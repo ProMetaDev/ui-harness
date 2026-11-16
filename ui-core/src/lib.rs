@@ -26,6 +26,7 @@ pub mod observe;
 pub mod plugin;
 pub mod policy;
 pub mod prompt;
+pub mod sandbox;
 pub mod sha256;
 pub mod skill;
 pub mod time;

@@ -128,6 +128,7 @@ run "验证包（7 个攻击场景）" bash tools/kit.sh
 run "版本接口（--version/-V/version 一致）" bash tools/verify_version.sh
 run "密钥扫描（工作树里不能有密钥形状）" bash tools/scan_secrets.sh
 run "观测式效果（shell 实际改动入日志）" bash tools/verify_observe.sh
+run "OS 沙箱（Landlock：区外写入被拒）" bash tools/verify_sandbox.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh

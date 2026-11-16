@@ -112,9 +112,10 @@ $ bash tools/kit.sh
 
 ## 诚实的边界
 
-- **shell 是信任边界。** 批准一条命令，等于批准它内部的一切读写与联网；效果策略只决定
-  "要不要执行这条命令"。所以多了 `effect/observed`——但那是**事后记账**，不是事前阻止。
-- **没有 OS 级沙箱。** 防越权只能靠我们自己的策略，这挡不住决心要越界的东西。
+- **shell 是信任边界，但 Linux 上有沙箱。** 批准一条命令，等于批准它内部的一切行为；
+  所以两件事一起做：`effect/observed` 记**实际改动**（事后），Landlock 把**写入**限制在工作区
+  与 /tmp（事前）。内核不支持时**命令直接失败**，不会偷偷降级成无沙箱执行（`UI_SANDBOX=0` 可显式关闭）。
+- **Windows 上没有对等机制。** 那里 shell 仍是"可执行程序"级信任，只靠策略拦。
 - **插件声明不是强制约束。** `effects: []` 只表示"声称没有副作用"，内核不验证。
 - **MCP 同理。** 外部 server 在自己的进程里自主运行。
 - `effect/observed` 只看工作区内、只看元数据；大仓库可 `UI_OBSERVE=0` 关掉。
@@ -124,7 +125,7 @@ $ bash tools/kit.sh
 ## 验证方式
 
 ```bash
-bash tools/kit.sh                        # 7 个攻击场景，一张结论表
+bash tools/kit.sh                        # 8 个攻击场景，一张结论表
 python3 tools/verify_journal.py JOURNAL  # 0 完好 / 2 链被改 / 3 尾部残缺
 UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3 seeds 实验链路
 ```

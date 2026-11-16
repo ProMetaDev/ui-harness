@@ -116,6 +116,8 @@ pub struct Agent {
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
     /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动写进日志
     pub env_observe: bool,
+    /// OS 沙箱配置（Linux Landlock）
+    pub sandbox: crate::sandbox::Config,
     /// 外部 MCP server（未配置时为 None）。
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
 
@@ -235,6 +237,11 @@ impl Agent {
             env_observe: std::env::var("UI_OBSERVE")
                 .map(|v| v != "0")
                 .unwrap_or(true),
+            sandbox: crate::sandbox::Config {
+                fs: std::env::var("UI_SANDBOX").map(|v| v != "0").unwrap_or(true),
+                net: std::env::var("UI_SANDBOX_NET").map(|v| v == "1").unwrap_or(false),
+                extra_writable: Vec::new(),
+            },
             plugins: None,
             mcp: None,
             tool_seq: 0,
@@ -277,6 +284,7 @@ impl Agent {
             env_scrub: self.env_scrub,
             plugins: self.plugins.clone(),
             env_observe: self.env_observe,
+            sandbox: self.sandbox.clone(),
         }
     }
 
@@ -932,6 +940,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                     mcp: agent.mcp.clone(),
                     env_scrub: agent.env_scrub,
                     env_observe: agent.env_observe,
+                    sandbox: agent.sandbox.clone(),
                     plugins: agent.plugins.clone(),
                 };
                 let result = (tool.run)(&args, &ctx);
@@ -963,6 +972,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                         mcp: agent.mcp.clone(),
                         env_scrub: agent.env_scrub,
                     env_observe: agent.env_observe,
+                    sandbox: agent.sandbox.clone(),
                         plugins: agent.plugins.clone(),
                     },
                 );
@@ -992,6 +1002,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                             mcp: agent.mcp.clone(),
                             env_scrub: agent.env_scrub,
                     env_observe: agent.env_observe,
+                    sandbox: agent.sandbox.clone(),
                             plugins: agent.plugins.clone(),
                         },
                     );

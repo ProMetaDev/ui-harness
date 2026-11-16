@@ -93,3 +93,34 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 
 它补的是"**说了要执行，但没说做了什么**"这个缺口；它**不能**替代 OS 沙箱——
 观测是事后记账，沙箱是事前阻止。
+
+
+## OS 沙箱（Landlock，Linux 5.13+）
+
+观测是**事后记账**，沙箱是**事前阻止**。Linux 上用 Landlock 给 shell 上锁，
+零依赖直接调 syscall（不用 libc crate、不用 bwrap、不需要 root）：
+
+| 路径 | 权限 |
+|---|---|
+| 整个文件系统 | 读 + 执行（否则 exec 不了 /bin/sh） |
+| 工作区 | 全部 |
+| `/tmp` | 全部 |
+| `/dev/null` | 读写（重定向不报错） |
+
+**fail closed**：要沙箱却拿不到（内核不支持），命令**直接失败**，不会静默降级成
+无沙箱执行。`UI_SANDBOX=0` 是显式关闭，日志 meta 里会记 `sandbox:"off"`。
+
+每条 shell 调用的结果里都带沙箱标记：
+
+```json
+{"callId":"call-1","tool":"shell","ok":true,"meta":{"sandbox":"landlock:7","envScrubbed":0}}
+```
+
+**边界**：
+
+| 项 | 说明 |
+|---|---|
+| 网络 | 默认**不**限制；`UI_SANDBOX_NET=1` 时禁 TCP（ABI ≥ 4）。UDP 不受 Landlock 限制。 |
+| Windows | **没有对等机制**，shell 仍是"可执行程序"级信任。 |
+| 读 | 系统文件可读（不然跑不了程序），所以 `cat secrets` 这类**读**仍然拦不住。 |
+| 环境 | 靠 `envScrubbed`（另一条防线），不是 Landlock。 |

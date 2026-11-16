@@ -164,6 +164,24 @@ else
   row "7 验收失败" "退出 3" "code=$code" "FAIL"
 fi
 
+# ── 8. shell 写工作区外（Landlock）──
+# 注意目标必须**不在 /tmp**：/tmp 本来就在允许写的名单里，写那里成功不代表沙箱失效
+ws=$(mkws t8)
+outside="$HOME/.ui-kit-sandbox-probe.txt"
+rm -f "$outside"
+cat > "$ws/sc.json" <<JSON
+{"model":"scripted","steps":[
+  {"content":"区外写","toolCalls":[{"name":"shell","args":{"command":"echo evil > $outside"}}]},
+  {"content":"完成"}]}
+JSON
+run_mock "$ws" "$ws/sc.json"
+if [ -f "$outside" ]; then
+  rm -f "$outside"
+  row "8 shell 写工作区外" "被拒" "写成功了" "GAP"
+else
+  row "8 shell 写工作区外" "被拒" "被拒" "BLOCKED"
+fi
+
 echo "验证包结果"
 echo "--------------------------------------------------------------------"
 printf '%-26s %-12s %-20s %s\n' "场景" "预期" "实际" "结论"

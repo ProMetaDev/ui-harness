@@ -27,6 +27,8 @@ pub struct Ctx {
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
     /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动记进日志
     pub env_observe: bool,
+    /// OS 沙箱（Linux Landlock）：把 shell 的写入限制在工作区
+    pub sandbox: crate::sandbox::Config,
 }
 
 impl Default for Ctx {
@@ -38,6 +40,7 @@ impl Default for Ctx {
             env_scrub: true,
             plugins: None,
             env_observe: true,
+            sandbox: crate::sandbox::Config::default(),
         }
     }
 }
@@ -500,6 +503,40 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     // 自成进程组，超时/取消时才能连后代一起收掉
     isolate_group(&mut cmd);
 
+    // OS 沙箱：在子进程 exec 之前上锁。
+    // **fail closed**：要沙箱却拿不到沙箱时，命令直接失败，绝不静默降级成无沙箱执行。
+    #[cfg(target_os = "linux")]
+    let sandbox_label = {
+        if ctx.sandbox.fs {
+            let ws = ctx.workspace.to_string_lossy().to_string();
+            match crate::sandbox::pre_exec(&ws, &ctx.sandbox) {
+                Ok(hook) => {
+                    use std::os::unix::process::CommandExt;
+                    unsafe {
+                        cmd.pre_exec(hook);
+                    }
+                    format!("landlock:{}", crate::sandbox::abi_version().unwrap_or(0))
+                }
+                Err(e) => {
+                    return ToolResult {
+                        ok: false,
+                        content: String::new(),
+                        error: Some(format!(
+                            "沙箱不可用（{}）。要么升级内核，要么显式设置 UI_SANDBOX=0 关闭限制——\
+                             我们不会假装有沙箱地把命令跑掉。",
+                            e
+                        )),
+                        meta: Json::obj(vec![("sandbox", Json::from("unavailable"))]),
+                    }
+                }
+            }
+        } else {
+            "off".to_string()
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let sandbox_label = "n/a".to_string();
+
     // 密钥卫生：默认清掉「看起来是密钥」的环境变量再交给子进程。
     // 竞品里只有 dsh 做到这一条（headless-harness-bench 的 T5 实测），
     // 让子进程继承整个父环境等于把 operator 的凭据交给模型调用的命令。
@@ -592,6 +629,8 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             ("timedOut", Json::Bool(timed_out)),
             // 审计用：这条命令拿到的环境里，有几个密钥类变量被剔掉了
             ("envScrubbed", Json::from(scrubbed)),
+            // 沙箱状态进 meta：事后能回答"这条命令当时被限制到什么程度"
+            ("sandbox", Json::from(sandbox_label.as_str())),
         ]),
     }
 }

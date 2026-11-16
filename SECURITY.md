@@ -20,7 +20,8 @@
 
 | 项 | 说明 |
 |---|---|
-| OS 级隔离 | 没有 namespace / seccomp / Job Object。shell 批准后内部行为不受约束。 |
+| Windows 上的 OS 隔离 | 没有 Job Object 限制。Linux 有 Landlock，Windows 没有对等物。 |
+| 网络隔离 | 默认只限制写入；`UI_SANDBOX_NET=1` 才禁 TCP（需 ABI ≥ 4）。UDP 不受限。 |
 | 工作区外的改动 | `effect/observed` 只扫工作区内部。 |
 | 全量历史重写 | 哈希链防的是单步篡改；同时控制文件系统和工具链的攻击者能重写整份日志。 |
 | Web 端的多用户 | `ui serve` 只绑 127.0.0.1，token 是单用户的。 |

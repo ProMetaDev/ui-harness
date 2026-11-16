@@ -357,11 +357,15 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     // 诚实标注能力边界：shell / 插件 / MCP 是"声明式"的信任边界——
     // 我们只仲裁"要不要执行这条命令"，不仲裁命令内部做了什么。
     println!("\n信任边界（说清楚，不含糊）");
-    println!("  shell   ：获得批准后，命令内部的读写/联网不受效果策略约束");
-    println!("            但执行前后会对比工作区，把**实际改动**记入 effect/observed（UI_OBSERVE=0 可关）");
+    // 沙箱状态：这是"能不能阻止"和"只能事后记账"的分界线，必须如实打
+    let sb = ui_core::sandbox::describe(&ui_core::sandbox::Config::default());
+    println!("  shell   ：{}", sb);
+    println!("            执行前后还会对比工作区，把**实际改动**记入 effect/observed（UI_OBSERVE=0 可关）");
+    #[cfg(not(target_os = "linux"))]
+    println!("            注意：Windows 没有对等机制，shell 在那里仍是「可执行程序」级信任");
     println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
     println!("  mcp_call：同上，外部 server 在进程内自主");
-    println!("  结论    ：把它们当「可执行程序」，不是「沙箱里的受限代码」");
+    println!("  结论    ：shell 在 Linux 上有写入沙箱；plugin / MCP 没有，仍按「可执行程序」对待");
 
     println!("\n工具与效果");
     for tool in registry() {

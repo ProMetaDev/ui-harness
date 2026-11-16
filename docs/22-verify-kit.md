@@ -3,7 +3,7 @@
 来自外部评审的要求：**不要"请相信我"，要一套别人能自己跑、自己破坏、自己看结论的材料。**
 
 ```bash
-bash tools/kit.sh        # 七个场景，一张表
+bash tools/kit.sh        # 八个场景，一张表
 ```
 
 输出：
@@ -50,7 +50,7 @@ python3 tools/verify_journal.py <journal.jsonl>
 
 就这两条。任何语言 20 行能实现。
 
-## 七个场景各自在证明什么
+## 八个场景各自在证明什么
 
 | 场景 | 做法 | 说明 |
 |---|---|---|
@@ -61,6 +61,7 @@ python3 tools/verify_journal.py <journal.jsonl>
 | 5 shell 间接读密钥 | `cat secrets/providers.toml` | **读到了**——信任边界，见下面 |
 | 6 插件漏报效果 | 声明 `effects: []` 但写文件 | **写了**——声明不是强制 |
 | 7 合并后验收失败 | `--accept "test -f 不存在"` | 退出 3，不许宣布完成 |
+| 8 shell 写工作区外 | `echo evil > $HOME/x` | **被 Landlock 拒绝**（写沙箱生效） |
 
 ## 必须承认的两个 GAP
 
