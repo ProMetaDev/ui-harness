@@ -1804,7 +1804,6 @@ fn lab_table(args: &Args) -> Result<i32, String> {
     }
 
     struct Bundle {
-        dir: PathBuf,
         name: String,
         env: Json,
         inputs: std::collections::BTreeMap<String, String>,
@@ -1863,7 +1862,7 @@ fn lab_table(args: &Args) -> Result<i32, String> {
             }
         }
 
-        bundles.push(Bundle { dir: dir.clone(), name, env, inputs, numbers });
+        bundles.push(Bundle { name, env, inputs, numbers });
     }
 
     // 输入一致性：同一个文件在不同包里哈希必须相同
@@ -2506,7 +2505,6 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
 
     // ── 6. 验收：跑一条命令，失败就不许说完成（no artifact, no claim）──
     let mut accept_ok: Option<bool> = None;
-    let mut accept_note = String::new();
     if let Some(cmd) = args.get("accept") {
         println!("\n── 验收：{} ──", cmd);
         let out = std::process::Command::new("sh")
@@ -2536,7 +2534,6 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
             Err(e) => (-1, e.to_string()),
         };
         accept_ok = Some(code == 0);
-        accept_note = format!("验收命令退出码 {}", code);
         if code == 0 {
             println!("验收通过");
         } else {

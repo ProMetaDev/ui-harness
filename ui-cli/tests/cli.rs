@@ -440,10 +440,23 @@ fn mcp_tools_are_callable_and_policy_visible() {
             {"content":"好了"}]}"#,
     )
     .unwrap();
-    let cfg = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // 配置里必须用**绝对路径**：MCP server 是子进程，cwd 不保证在仓库根。
+    // 之前用 fixtures/mcp/demo.json（里面写死了作者本机的 /mnt/x 路径），
+    // 本地能过、CI 必挂——这是真实踩过的。
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("fixtures/mcp/demo.json");
+        .join("fixtures/mcp/server.py");
+    let server = server.to_string_lossy().replace('\\', "/");
+    let cfg = ws.join("mcp.json");
+    fs::write(
+        &cfg,
+        format!(
+            r#"{{"servers":[{{"name":"demo","cmd":["python3","{}"]}}]}}"#,
+            server
+        ),
+    )
+    .unwrap();
     let out = Command::new(bin())
         .args([
             "run", "--task", "用外部工具", "--mock", sc.to_str().unwrap(),

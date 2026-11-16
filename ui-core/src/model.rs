@@ -308,6 +308,7 @@ impl ExternalModel {
 
 /// 把一条命令行拆成 argv：支持双引号包住带空格的参数。
 /// 只在 Windows 的适配器启动路径用（`cmd /C` 的引号处理太容易出事）。
+#[cfg(windows)]
 fn split_command_line(cmd: &str) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -340,6 +341,7 @@ fn split_command_line(cmd: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+#[cfg(windows)]
 fn needs_shell(cmd: &str) -> bool {
     cmd.contains('|') || cmd.contains('>') || cmd.contains('&') || cmd.contains('<')
 }

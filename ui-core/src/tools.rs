@@ -501,7 +501,6 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     // 竞品里只有 dsh 做到这一条（headless-harness-bench 的 T5 实测），
     // 让子进程继承整个父环境等于把 operator 的凭据交给模型调用的命令。
     let mut scrubbed = 0usize;
-    let _ = &mut scrubbed;
     if ctx.env_scrub {
         let keep: Vec<(String, String)> = std::env::vars().collect();
         cmd.env_clear();
@@ -588,6 +587,8 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             ("status", Json::from(code)),
             ("durationMs", Json::from(duration)),
             ("timedOut", Json::Bool(timed_out)),
+            // 审计用：这条命令拿到的环境里，有几个密钥类变量被剔掉了
+            ("envScrubbed", Json::from(scrubbed)),
         ]),
     }
 }
