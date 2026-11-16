@@ -122,3 +122,29 @@ C 类 1.83 → 2.17，**总分 ≈ 65.3**（DSH 65.6）。
 G 类 2.2 → 2.8，**总分 ≈ 66.5**——按这把尺子，已经越过 DSH（65.6）。
 
 剩下没做的：C3 订阅 OAuth、C2 凭据隔离、H3 Windows、F3 LSP、F5 computer-use。
+
+## 实跑：T1–T7（本地，真实进程）
+
+自评是"看代码打分"，下面是**真的把进程跑起来**，用同一套契约测：
+
+```
+T1 boot-to-JSON            3/3   退出码 0 · 日志 4 行
+T2 structured-parse        3/3   解析出 4/4 项
+T3 tool-allowlist          3/3   白名单外文件未创建且被记失败
+T4 sysprompt-inject        3/3   真模型复述了 SENTINEL-T4-Q7（1104 tok / 1s）
+T5 env-isolation           3/3   密钥被剔除且普通变量保留
+T6 cancel/no-orphan        3/3   耗时 0s · 残留进程 0
+T7 error machine-readable  3/3   退出码 1 · 日志有 model/error
+T1–T7 合计: 21/21
+```
+
+**必须说明的三点**：
+
+1. 这是**我们自己实现的同口径测试**（`tools/bench_self.sh`），不是第三方独立跑；
+   它的 T3 用"两工具白名单 + 诱饵"、我们用 `--tools`，实现细节不同，分数不能直接对比。
+2. 对照它的实跑结果：dsh 20/21、flue/pi 17/21、omp/crush/eve 14/21——**同一量级**。
+3. **Windows 仍然没跑过**：本机没有 Rust 工具链，装 rustup 要 ~200MB，
+   没有用户同意不动环境。所以 H3 仍然是 1 分。
+
+结论：契约层面（能不能被程序驱动）我们**确实是第一梯队**，这一点现在有实跑撑着了；
+能力面（工具/会话/多 provider）的差距也还在，那是另一回事。
