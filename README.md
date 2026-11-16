@@ -1,12 +1,15 @@
 # ui
 
+[![ci](https://github.com/ProMetaDev/ui-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/ProMetaDev/ui-harness/actions/workflows/ci.yml)
+
 **Unleash your imagination。**
 
 ui 是一个用 Rust 写的 agent harness：内核零第三方依赖，单二进制 1.9 MB（strip 后），
 主张“每一步都能解释”——把每一步工具调用写成追加式 JSONL 日志，再用 SHA-256 哈希链串起来，
 可校验、可回放、可崩溃对账。
 
-当前 v0.1.0：37 项门禁、131 个测试、13 个工具，支持 MCP 与本地插件。
+当前 v0.1.1：**38 项门禁、132 个测试**、13 个工具，支持 MCP 与本地插件。
+CI（GitHub Actions）在干净 checkout 上跑同一套：preflight → 构建 → 版本/密钥 → 测试 → 门禁 → 发布包。
 
 ## 30 秒上手
 
@@ -14,8 +17,8 @@ ui 是一个用 Rust 写的 agent harness：内核零第三方依赖，单二进
 
 ```bash
 bash tools/bootstrap.sh   # 检查依赖：缺什么、怎么装，逐条说明
-bash tools/test.sh        # 同步构建副本并跑 131 个测试
-bash tools/debug.sh       # 37 项门禁：release 构建 + 端到端 + 7 个攻击场景
+bash tools/test.sh        # 同步构建副本并跑 132 个测试
+bash tools/debug.sh       # 38 项门禁：release 构建 + 端到端 + 7 个攻击场景
 ```
 
 构建产物在 `$UI_BIN`（由 `tools/env.sh` 定义，默认 `$HOME/ui-target/release/ui`）；
@@ -78,11 +81,11 @@ python3 tools/verify_journal.py JOURNAL  # 0 完好 / 2 链断或被改 / 3 尾�
 
 ## 状态与许可
 
-- 原型，v0.1.0。能运行、有测试，也有**可校验的发布包**：
+- 原型，v0.1.1。CI 在 Linux 上全绿（38/38）。能运行、有测试，也有**可校验的发布包**：
   `bash tools/release.sh` 会构建、打包、算 sha256 并自校验（解压重算）。
   仍然**没有 CI**——改动靠手跑门禁。
 - Windows 已在真机验证（含 `serve` 与真模型），但**临时目录不可写**：
   `doctor` 会告警，相关工具退到工作区写临时文件。
-- 本文数字（37 项门禁、131 个测试、13 个工具、1.9 MB）来自本仓库自己的测量，
+- 本文数字（38 项门禁、132 个测试、13 个工具、1.9 MB）来自本仓库自己的测量，
   没有第三方独立评审。
 - 许可证：Apache-2.0。
