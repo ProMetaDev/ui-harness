@@ -48,4 +48,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // commit 变了要重新构建，否则 --version 会一直报旧 commit
+    if let Some(dir) = &git_dir {
+        println!("cargo:rerun-if-changed={}/.git/HEAD", dir);
+    }
 }
