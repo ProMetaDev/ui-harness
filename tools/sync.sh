@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 把 X:\dsh_ws\harness-v2 同步到 WSL 的 ~/ui 构建副本。
 # 源码在 ext4 上，cargo 的扫描/增量都快得多（实测：干净 19.6s→3.1s，增量 3.4s→0.04s）。
 set -uo pipefail
 
-SRC=/mnt/x/dsh_ws/harness-v2
-DST="${UI_BUILD_DIR:-$HOME/ui}"
+SRC="$UI_ROOT"
+DST="$UI_BUILD_DIR"
 
 mkdir -p "$DST"
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 用 headless-harness-bench 的 T1–T7 在自己身上跑一遍（本地、真实进程）。
 # 每条 0–3 分，满分 21。评分标准按它的口径，判定依据是实际行为不是文档。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/selfbench
 rm -rf "$BASE"; mkdir -p "$BASE"
 TOTAL=0

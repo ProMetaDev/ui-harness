@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # T4 走真模型：追加的 system 指令必须真的被模型看到并遵守。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/selfbench/t4live
 rm -rf "$WS"; mkdir -p "$WS"
 
 NODE_BIN=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
-export UI_MODEL_CMD="$NODE_BIN /mnt/x/dsh_ws/harness-v2/tools/deepseek.mjs"
+export UI_MODEL_CMD="$NODE_BIN "$UI_ROOT"/tools/deepseek.mjs"
 
 start=$(date +%s)
 out=$("$BIN" run \

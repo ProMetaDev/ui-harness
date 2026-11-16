@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型 + 中途取消：启动一轮，2 秒后按 Esc，看是否真的停下来。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
 BIN="$CARGO_TARGET_DIR/release/ui"
 

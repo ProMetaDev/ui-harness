@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证：超时能连后代进程一起收掉（之前 `sleep 3 & wait` 会活到自然结束）。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/ui-shelltimeout
 rm -rf "$BASE"; mkdir -p "$BASE/work"
 

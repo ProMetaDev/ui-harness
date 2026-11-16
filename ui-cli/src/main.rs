@@ -44,9 +44,27 @@ fn init_console() {
 #[cfg(not(windows))]
 fn init_console() {}
 
+/// `ui --version` / `ui -V` / `ui version`：回答"这是哪个构建"。
+///
+/// 一开始我们连这个都没有——外部基准的黄金任务恰好就是"给 CLI 加 --version"。
+fn print_version() {
+    println!(
+        "ui {} (commit {}, built {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("UI_COMMIT").unwrap_or("unknown"),
+        option_env!("UI_BUILD_DATE").unwrap_or("unknown")
+    );
+}
+
 fn main() {
     init_console();
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--version" || a == "-V")
+        || argv.first().map(|a| a == "version").unwrap_or(false)
+    {
+        print_version();
+        return;
+    }
     let code = match dispatch(&argv) {
         Ok(code) => code,
         Err(message) => {

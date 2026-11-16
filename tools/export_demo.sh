@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 生成一份真实轨迹并导出单文件查看器，再用 node 校验内嵌数据能解析。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 BIN="$CARGO_TARGET_DIR/release/ui"
 
 cargo build --release --offline 2>&1 | tail -1

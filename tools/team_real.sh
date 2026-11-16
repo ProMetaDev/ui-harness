@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型协作模式：给一个真实的小项目补「测试 + 文档」，拆成 2 个子代理并行做。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/team-real
 rm -rf "$WS"; mkdir -p "$WS"
 
@@ -25,7 +27,7 @@ cat > "$WS/README.md" <<'EOF'
 EOF
 
 NODE_BIN=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
-export UI_MODEL_CMD="$NODE_BIN /mnt/x/dsh_ws/harness-v2/tools/deepseek.mjs"
+export UI_MODEL_CMD="$NODE_BIN "$UI_ROOT"/tools/deepseek.mjs"
 
 start=$(date +%s)
 echo "=== 协作模式（真模型，2 个子代理）==="

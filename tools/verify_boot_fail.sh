@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证开机检查的失败路径：损坏的 journal 应让 /api/ready 报 ok:false 并降级到临时日志。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-boot-fail
 PORT=7840
 rm -rf "$WS"; mkdir -p "$WS/.ui"

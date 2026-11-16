@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型多轮对话：第一轮看问题，第二轮让它按方案修 —— 验证跨轮历史。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
 BIN="$CARGO_TARGET_DIR/release/ui"
 

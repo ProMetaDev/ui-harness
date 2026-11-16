@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 手工验收：起 --mock 的 ui serve，确认 /api/events 真的推送 {"type":"delta"}，
 # 并且最终 assistant 事件仍在。只用于本地验证，不接入 debug.sh。
 set -uo pipefail
-BIN="${UI_BIN:-$HOME/ui/target/release/ui}"
+BIN="${UI_BIN:-"$UI_BIN"}"
 PORT="${1:-7810}"
 BASE="http://127.0.0.1:$PORT"
 WS=/tmp/ui-delta

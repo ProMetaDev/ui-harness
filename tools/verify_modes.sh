@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证「模式只改严格度」这件事在真实运行里成立：
 #   1) quiet 模式跑一轮（命令自动放行）
 #   2) 用 strict 重判同一份日志 → 应该指出那些执行动作会被收紧
 #   3) 日志本身完整（哈希链可验）
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-mode
 rm -rf "$WS"; mkdir -p "$WS"
 printf 'export function greet(n){ return n ? `hi ${n}` : "hi "; }\n' > "$WS/greet.js"

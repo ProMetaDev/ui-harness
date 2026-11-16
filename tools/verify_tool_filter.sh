@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 工具白名单（A4）：--no-tools 时模型看不到也不该用工具；--tools 只留指定的。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-tools
 rm -rf "$WS"; mkdir -p "$WS"
 

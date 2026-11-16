@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证「内核 ↔ 子进程模型」这条缝：不碰网络，不需要 key。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 BIN="$CARGO_TARGET_DIR/release/ui"
 
 cat > demo/greet.js <<'EOF'

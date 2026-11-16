@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
 echo "BASH_ENV=[${BASH_ENV:-}] ENV=[${ENV:-}]"
 echo "--- 直接跑 _node.sh 的 stdout ---"
 bash tools/_node.sh -e 'console.log("hello")' 2>/tmp/n.err | od -c | head -3

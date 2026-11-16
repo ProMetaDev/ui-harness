@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型 demo：DeepSeek 跑一轮真实修改，然后自检 + 导出轨迹。
 # 前置：secrets/providers.toml 的 [chat].api_key（或环境变量 DEEPSEEK_API_KEY）。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 BIN="$CARGO_TARGET_DIR/release/ui"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
 

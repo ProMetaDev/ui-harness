@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 构建 + 测试的固定入口（快路径：/mnt → ext4 副本再编译）。
 set -uo pipefail
 
@@ -7,7 +9,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 echo "== sync + build =="
 bash "$HERE/sync.sh"
 
-cd "${UI_BUILD_DIR:-$HOME/ui}"
+cd "$UI_BUILD_DIR"
 
 # 关键：cargo 的退出码必须成为脚本的退出码。
 # 以前是 `cargo test | grep ... || true`，grep 的退出码把失败吞掉了——

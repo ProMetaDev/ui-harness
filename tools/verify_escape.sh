@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 独立验证：`..` 路径穿越是否真的被挡住（不看对抗 agent 的测试，自己跑 E2E）。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/ui-escape
 rm -rf "$BASE"; mkdir -p "$BASE/work"
 

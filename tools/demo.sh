@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # Deterministic showcase: reset the demo file, run one turn, replay the journal.
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
-
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 cargo build --release --offline 2>&1 | tail -1
 
 cat > demo/greet.js <<'EOF'

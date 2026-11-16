@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 PORT=7822
 BASE="http://127.0.0.1:$PORT"
 WS=/tmp/ui-cancel-debug

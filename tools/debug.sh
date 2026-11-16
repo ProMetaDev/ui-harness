@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 一条命令验证全部能力。任何一层 FAIL 就停在那层——上面的层不值得看。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 BIN="$CARGO_TARGET_DIR/release/ui"
 WS=/tmp/ui-gate
 PASS=0
@@ -78,6 +80,8 @@ check_verify_clean() {
   "$BIN" verify --workspace "$WS" | grep -q '哈希链完整'
 }
 
+bash tools/preflight.sh || true
+echo
 echo "== L1 内核（无终端、无模型）"
 LAYER=1
 run "build" cargo build --release --offline
@@ -121,6 +125,7 @@ run "CRLF+BOM 文件打补丁（Windows 回归）" bash tools/verify_crlf_patch.
 run "会话（新建/列表/互不干扰）" bash tools/verify_sessions.sh
 run "会话 Web（列表/切换/历史不串）" bash tools/verify_web_sessions.sh
 run "验证包（7 个攻击场景）" bash tools/kit.sh
+run "版本接口（--version/-V/version 一致）" bash tools/verify_version.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh

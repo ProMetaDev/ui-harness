@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 多 seed 对照表：三个包 → 一张表；输入不一致时必须拒绝求均值。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/ui-table
 rm -rf "$BASE"; mkdir -p "$BASE"
 

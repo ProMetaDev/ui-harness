@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 ROOT=/tmp/team-m
 NODE=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
 

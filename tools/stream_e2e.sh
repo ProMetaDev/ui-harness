@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 端到端：离线假 DeepSeek → 适配器（流式）→ 内核 → 网页端 SSE → 静态快照。
 # 全程不联网、不花钱；产物落到 out/stream/。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 
-BIN="$HOME/ui/target/release/ui"
+BIN="$UI_BIN"
 OUT="$PWD/out/stream"
 PORT=${1:-18460}
 KPORT=${2:-7861}

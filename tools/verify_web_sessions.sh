@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # Web 端会话：列表 / 新建 / 切换后写入正确的日志、历史不串
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-PORT=7806
+cd "$UI_ROOT"
+BIN="$UI_BIN"
+PORT=$(ui_free_port 17800)
 WS=/tmp/ui-wsession
 rm -rf "$WS"; mkdir -p "$WS"
 TOKEN=t

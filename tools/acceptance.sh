@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真实验收（第一例：有红灯）。产物落在 out/acceptance/ 下，WSL 重启也不会丢。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
-BIN="$HOME/ui/target/release/ui"
+BIN="$UI_BIN"
 BASE="$PWD/out/acceptance/case1"
 WS="$BASE/repo"
 TASK="$PWD/fixtures/acceptance-task.txt"

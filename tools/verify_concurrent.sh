@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真多进程验证：3 个 ui 进程同时往同一个 workspace 的 journal 里追加。
 # 期望：链完整、seq 连续、事件数正好是 3 份。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/ui-concurrent
 rm -rf "$BASE"; mkdir -p "$BASE/work"
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证包：七个场景，每个给出「预期 / 实际 / 结论」。
 # 结论只有三种：BLOCKED（拦住了）、REPAIRED（可修复）、GAP（已知拦不住）。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 ROOT=/tmp/ui-kit
 rm -rf "$ROOT"; mkdir -p "$ROOT" "$ROOT/outside"
 ROWS="$ROOT/rows.txt"

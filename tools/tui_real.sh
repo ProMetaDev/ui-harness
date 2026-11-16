@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型 + 全屏 TUI：模型会请求跑命令，审批浮层里按 y 放行，最后 q 退出。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
 BIN="$CARGO_TARGET_DIR/release/ui"
 

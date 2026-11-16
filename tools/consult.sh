@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 把简报发给强模型做评审，结果写到 out/consult-<时间>.md
 #
 # 用法：
@@ -7,7 +9,7 @@
 #
 # 可选：BRIEF=docs/other.md bash tools/consult.sh
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 
 BRIEF=${BRIEF:-docs/consult-brief.md}
 OUTDIR=${OUTDIR:-out}

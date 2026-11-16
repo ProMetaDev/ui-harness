@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 结论对账：声明的数字必须能在产物里找到；产物对不上就必须失败。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-claim
 B=/tmp/ui-claim-bundle
 rm -rf "$WS" "$B"; mkdir -p "$WS"

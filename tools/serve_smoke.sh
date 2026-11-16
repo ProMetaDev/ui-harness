@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # Web 用户端冒烟：起服务 → 取页面 → 发消息 → 收事件 → 收工。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-PORT=${1:-7799}
+cd "$UI_ROOT"
+BIN="$UI_BIN"
+PORT=${1:-$(ui_free_port 17800)}
 BASE="http://127.0.0.1:$PORT"
 WS=/tmp/ui-web
 rm -rf "$WS"; mkdir -p "$WS"

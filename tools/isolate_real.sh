@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型 + 隔离并行：两个子代理各写各的文档，父工作区不被污染，再显式 apply 回写。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
-BIN="$HOME/ui/target/release/ui"
-
+BIN="$UI_BIN"
 bash tools/dev.sh build --release 2>&1 | tail -1
 rm -rf demo/.ui demo/SECURITY.md demo/USABILITY.md
 

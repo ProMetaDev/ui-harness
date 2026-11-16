@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 echo "python3: $(python3 --version 2>&1)"
 python3 - <<'PY'
 mods = {}

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 对同一个任务重复跑 N 次，统计 tokens / steps / calls / wall time。
 # 用途：判断「某个改动到底有没有效果」——同一剧本跑基线，改完再用同一剧本跑一次。
 #
@@ -11,7 +13,7 @@
 #   * --workspace 只是模板：每次跑都复制一份全新工作区到
 #     out/eval/<label>-<时间戳>/run-N/workspace，原目录不会被写。
 #     不传 --workspace 时用 fixtures/eval-workspace。
-#   * 只跑 release 二进制（默认 $HOME/ui/target/release/ui），不调用真实模型：
+#   * 只跑 release 二进制（默认 "$UI_BIN"），不调用真实模型：
 #     --mock 是必填项，剧本决定每一步，结果可复现。
 #   * 任何一次 reason != done（或 ui 退出码非 0）→ 退出码 1，可以直接当门禁。
 #
@@ -127,7 +129,7 @@ LABEL="${LABEL//\//_}"
 LABEL="${LABEL//[[:space:]]/_}"
 
 # ---------- 环境 ----------
-# 默认按项目约定用 $HOME/ui 下的 release 二进制；HOME 被 Windows 环境带歪时
+# 默认按项目约定用 "$UI_BUILD_DIR" 下的 release 二进制；HOME 被 Windows 环境带歪时
 # 再按真实用户目录 / 另一份 target 顺序找，避免 eval 本身因为环境问题跑不起来。
 USER_HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
 DEFAULT_HOME="${HOME:-${USER_HOME:-/home/$(id -un)}}"

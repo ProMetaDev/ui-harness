@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # --accept：验收命令通过才算完成；失败必须非零退出。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 run() {
   local name="$1" accept="$2" expect="$3"
   local ws=/tmp/ui-accept-$name

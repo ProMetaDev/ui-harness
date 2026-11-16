@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 用 script(1) 造 pty，端到端验证全屏 TUI：
 #   1) 进/出备用屏；2) 画帧；3) 输入一行并发送；4) 审批键 a；5) Esc 退出。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 BIN="$CARGO_TARGET_DIR/release/ui"
 
 cargo build --release --offline 2>&1 | tail -1

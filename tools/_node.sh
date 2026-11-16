@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 找到 node：优先 PATH，其次 nvm/常见位置。非登录 shell 里 PATH 常常没有 node。
 set -uo pipefail
 if command -v node >/dev/null 2>&1; then exec node "$@"; fi

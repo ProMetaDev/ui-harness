@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # B 组基准：3 个 CPU 任务 × 3 个 seed。每个 run 打包，最后每个任务出一张对照表。
 # 默认用脚本化模型（零成本、可进 CI）；真模型对照见 REAL=1。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=${BASE:-/tmp/mlbench}
 TASKS=${TASKS:-"lr mlp ablation"}
 SEEDS=${SEEDS:-"1 2 3"}

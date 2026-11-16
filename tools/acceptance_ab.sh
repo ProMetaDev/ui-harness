@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # A/B：同一个注入、同一个任务，只改「工具输出是否落盘」。
 #   arm A（control）：--tool-chars 0   → 全部常驻上下文（旧行为）
 #   arm B（treatment）：--tool-chars 2000 → 超长落盘，上下文只留首尾+指针
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
-BIN="$HOME/ui/target/release/ui"
+BIN="$UI_BIN"
 TASK="$PWD/fixtures/acceptance-task2.txt"
 BASE="$PWD/out/acceptance/ab"
 

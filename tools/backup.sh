@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 备份：打包（含 .git 历史）→ 放 WSL ext4 → 再镜像一份到 Windows C 盘。
 # 目标盘都在不同物理盘上：X:（源码）、/dev/sdd（WSL）、C:（系统盘）。
 set -euo pipefail
-SRC=/mnt/x/dsh_ws/harness-v2
+SRC="$UI_ROOT"
 DEST=${DEST:-$HOME/backups}
 MIRROR=${MIRROR:-/mnt/c/Users/31440/backups}
 KEEP=${KEEP:-7}

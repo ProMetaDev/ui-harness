@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 第二例：没有红灯可依赖。注入一个测试抓不到的隐患（去掉原子写），看它能否靠读代码发现。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
-BIN="$HOME/ui/target/release/ui"
+BIN="$UI_BIN"
 WS=/tmp/acceptance/repo2
 
 bash tools/_node.sh tools/acceptance_prepare2.js "$WS"

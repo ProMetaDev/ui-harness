@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 输入血缘：读过的数据也留指纹。数据换版本 → 校验必须拒绝。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-lineage
 BUNDLE=/tmp/ui-lineage-bundle
 rm -rf "$WS" "$BUNDLE"; mkdir -p "$WS"

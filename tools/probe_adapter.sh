@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
 cat > /tmp/adapter-in.json <<'EOF'
 {"prompt":"回答两个字：收到","repair":null}
 EOF

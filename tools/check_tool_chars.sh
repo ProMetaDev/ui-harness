@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-tc; rm -rf "$WS"; mkdir -p "$WS"
 python3 - 2>/dev/null <<'EOF' || seq 1 400 | sed 's/^/line /' > /tmp/ui-tc/big.txt
 EOF

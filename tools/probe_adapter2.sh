@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
 TASK=$(cat fixtures/acceptance-task2.txt)
 node -e '
 const fs=require("fs");

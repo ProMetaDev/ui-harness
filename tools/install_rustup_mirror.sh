@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 用国内镜像装 rustup + Windows 交叉目标（只装在 WSL 的 ~/.cargo，不动 Windows）
 set -uo pipefail
 export RUSTUP_DIST_SERVER=https://rsproxy.cn

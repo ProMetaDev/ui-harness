@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 离线验证 tools/deepseek.mjs 的流式协议：本地 HTTPS 假服务 + 自签证书。
 # 不调用真实 API、不需要真 key。UI_PROVIDERS_FILE 让适配器读测试配置。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 
 PORT=${1:-18443}
 TMP=/tmp/ui-adapter-stream
@@ -88,7 +90,7 @@ done
 
 # 5) 内核端到端（需要 release 二进制）：UI_MODEL_CMD 指向本适配器，
 #    用 ui serve 的 SSE 看内核是否把多行 delta 转成多个 delta 事件。
-BIN="${UI_BIN:-$HOME/ui/target/release/ui}"
+BIN="${UI_BIN:-"$UI_BIN"}"
 if [ -x "$BIN" ]; then
   KWS=/tmp/ui-adapter-kernel
   KPORT=$((PORT + 1))

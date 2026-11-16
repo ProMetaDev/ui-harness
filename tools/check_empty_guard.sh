@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 静态守卫：空状态的判定必须看「渲染出来的消息」，不是事件条数。
 # 背景：曾经用 `__UI_BOOT__.some(e => e.type !== 'session')` 判断，
 #       把 lab-run 这类元事件算成内容，结果欢迎页被隐藏、主区白屏。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 HTML=ui-cli/assets/chat.html
 
 fail() { echo "FAIL: $1"; exit 1; }

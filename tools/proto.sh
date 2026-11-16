@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 原型一键演示：跑实验 → 声明结论 → 打包 → 校验 → 多 seed 出表。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=${BASE:-/tmp/proto}
 rm -rf "$BASE"; mkdir -p "$BASE/bundles"
 

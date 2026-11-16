@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # A + C 端到端：跑一轮 → 打包 → 校验 → 篡改 → 校验必须失败。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=/tmp/ui-lab
 BUNDLE=/tmp/ui-lab-bundle
 rm -rf "$WS" "$BUNDLE"; mkdir -p "$WS"

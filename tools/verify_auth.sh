@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 鉴权：没有 token 什么都拿不到；带 ?t= 种 Cookie 后正常；API 返回 401 JSON。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-PORT=7807
+cd "$UI_ROOT"
+BIN="$UI_BIN"
+PORT=$(ui_free_port 17800)
 WS=/tmp/ui-auth
 rm -rf "$WS"; mkdir -p "$WS"
 TOKEN=s3cret

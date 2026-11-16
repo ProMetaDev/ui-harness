@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 前端新能力自测：停止按钮、工具输出展开、断线重连按 since 去重。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-PORT=${1:-7811}
+cd "$UI_ROOT"
+BIN="$UI_BIN"
+PORT=${1:-$(ui_free_port 17800)}
 BASE="http://127.0.0.1:$PORT"
 WS=/tmp/ui-web-features
 rm -rf "$WS"; mkdir -p "$WS"

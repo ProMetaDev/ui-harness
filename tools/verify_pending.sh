@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 验证两件"没做完"的事：
 #   1) ui run 在 empty_reply 这类非 done 原因下，退出码必须非 0
 #   2) 符号链接能否逃出工作区（对抗 agent 报的未修项）
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 BASE=/tmp/ui-check2
 rm -rf "$BASE"; mkdir -p "$BASE/work"
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型：① 按名字加载 skill 并用它办事 ② 跑一个带审批闸门的两步工作流
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-export CARGO_TARGET_DIR="$HOME/ui-target"
+cd "$UI_ROOT"
+export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 export UI_MODEL_CMD="bash tools/_node.sh tools/deepseek.mjs"
 BIN="$CARGO_TARGET_DIR/release/ui"
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 bash tools/dev.sh build --release 2>&1 | tail -1
 rm -rf out/acceptance/probe
 bash tools/_node.sh tools/acceptance_prepare2.js out/acceptance/probe/repo >/dev/null

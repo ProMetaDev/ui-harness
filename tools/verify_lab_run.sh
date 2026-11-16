@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 实验室「跑一次」：POST 触发 → 并发保护 → SSE 有 lab-run 事件 → 列表仍可读。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
-PORT=7799
+cd "$UI_ROOT"
+BIN="$UI_BIN"
+PORT=$(ui_free_port 17800)
 WS=/tmp/ui-labrun
 rm -rf "$WS"; mkdir -p "$WS/bundles"
 

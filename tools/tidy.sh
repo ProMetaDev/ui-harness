@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 收尾：把散落的东西归位，清掉临时产物。先打印，再动手。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
+cd "$UI_ROOT"
 
 echo "=== 准备处理 ==="
 ls -d -- 'C:Users31440' 2>/dev/null && echo "  ↑ 早先 \$HOME 展开失败留下的目录"

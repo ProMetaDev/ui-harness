@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 真模型对照：让 agent 自己跑一次实验（不是剧本），再打包、校验、出表。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 WS=${WS:-/tmp/mlbench-real/lr-s1}
 rm -rf "$WS"; mkdir -p "$WS"
 cp fixtures/ml/lr/train.py "$WS/"
 
 # sh -c ??? nvm ? PATH,?????
 NODE_BIN=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
-export UI_MODEL_CMD="$NODE_BIN /mnt/x/dsh_ws/harness-v2/tools/deepseek.mjs"
+export UI_MODEL_CMD="$NODE_BIN "$UI_ROOT"/tools/deepseek.mjs"
 
 echo "=== 真模型跑 lr 实验（seed=1）==="
 start=$(date +%s)

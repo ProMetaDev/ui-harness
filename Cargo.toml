@@ -11,3 +11,5 @@ authors = ["ProMetaDev"]
 [profile.release]
 opt-level = 2
 lto = false
+# strip：15MB → 约 3.5MB。审计工具要能随手传输，体积不是"无所谓"。
+strip = true

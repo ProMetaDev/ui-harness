@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 # 协作模式矩阵：三种性质不同的任务各跑一次，记录成败、成本、产出。
 set -uo pipefail
-cd /mnt/x/dsh_ws/harness-v2
-BIN="$HOME/ui/target/release/ui"
+cd "$UI_ROOT"
+BIN="$UI_BIN"
 ROOT=/tmp/team-m
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 
 NODE_BIN=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
-export UI_MODEL_CMD="$NODE_BIN /mnt/x/dsh_ws/harness-v2/tools/deepseek.mjs"
+export UI_MODEL_CMD="$NODE_BIN "$UI_ROOT"/tools/deepseek.mjs"
 
 mk_ws() {
   local d="$1"
