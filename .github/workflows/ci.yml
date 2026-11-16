@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # --version 依赖 git log；浅克隆够用，但要有完整的 HEAD
+          # --version 依赖 git rev-parse；浅克隆够用，但要能读到 HEAD
           fetch-depth: 0
 
       - name: 安装 Rust
@@ -26,24 +26,15 @@ jobs:
       - name: 缓存 cargo
         uses: actions/cache@v4
         with:
-          path: |
-            ${{ github.workspace }}/target
-            ~/.cargo/registry
+          path: ${{ github.workspace }}/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
-      - name: 前置检查
-        run: bash tools/preflight.sh
-
-      - name: 版本与密钥
-        run: |
-          bash tools/verify_version.sh
-          bash tools/scan_secrets.sh
-
-      - name: 测试
-        run: bash tools/test.sh
-
-      - name: 门禁（38 项）
-        run: bash tools/debug.sh
+      # 关键：不在 workflow 里复制步骤，直接调 tools/ci.sh。
+      # 之前 workflow 自己排了顺序，把「版本检查」排在建构建之前，于是三次全红——
+      # 而本地 ci.sh 的顺序是对的。一份来源，才不会漂移。
+      - name: CI（preflight → 构建 → 版本/密钥 → 测试 → 门禁）
+        run: bash tools/ci.sh
 
       - name: 发布包
         run: bash tools/release.sh
@@ -54,4 +45,5 @@ jobs:
           name: ui-linux
           path: |
             dist/*.tar.gz
-            dist/*.sha256
+            dist/**/*.sha256
+          if-no-files-found: error
