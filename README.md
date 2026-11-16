@@ -22,6 +22,16 @@ Rust 内核，零第三方依赖，单二进制 1.9 MB。
 
 ## 30 秒上手
 
+想先**看效果**再决定要不要装？不用 Rust、不用模型，30 秒：
+
+```bash
+bash tools/demo-audit.sh   # 跑一轮 → 回放 → 校验 → 篡改 → 发现 → 修复
+```
+
+完整解说（真实输出逐步注释）：[docs/quickstart.md](docs/quickstart.md)
+
+装好了再跑这些：
+
 ```bash
 bash tools/bootstrap.sh   # 先看还缺什么（需要 Rust；其余逐项说明）
 bash tools/test.sh        # 137 个测试
