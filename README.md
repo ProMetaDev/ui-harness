@@ -73,11 +73,15 @@ $ bash tools/kit.sh
 
 ## 界面
 
-终端与网页共用同一套状态（同一个内核、同一份日志）：
+终端（`ui tui`）与网页（`ui serve`）共用同一套状态：同一个内核、同一份日志。
 
-| TUI（`ui tui`） | 网页（`ui serve`） | 实验室（`ui lab`） |
-|---|---|---|
-| ![tui](docs/images/shell.png) | ![web](docs/images/sessions.png) | ![lab](docs/images/lab.png) |
+![网页端](docs/images/chat.png)
+
+真实对话里每一次工具调用都带决策与结果（上图第三条是 shell 被批准后执行）。
+
+| 实验室（`ui lab`） | 会话（多会话互不干扰） |
+|---|---|
+| ![实验室](docs/images/lab.png) | ![会话](docs/images/sessions.png) |
 
 ## 主要命令
 
