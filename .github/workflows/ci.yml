@@ -10,14 +10,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      # checkout 就在本地盘，不需要 rsync 到 ext4 副本（sync.sh 会自己跳过）
       UI_BUILD_DIR: ${{ github.workspace }}
       UI_TARGET_DIR: ${{ github.workspace }}/target
       UI_GIT_DIR: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # --version 依赖 git rev-parse；浅克隆够用，但要能读到 HEAD
           fetch-depth: 0
 
       - name: 安装 Rust
@@ -30,9 +28,19 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # 关键：不在 workflow 里复制步骤，直接调 tools/ci.sh。
-      # 之前 workflow 自己排了顺序，把「版本检查」排在建构建之前，于是三次全红——
-      # 而本地 ci.sh 的顺序是对的。一份来源，才不会漂移。
+      # 先打印真实环境：脚本假设有 fuser/pkill/script/rsync，缺哪个一目了然
+      - name: 环境诊断
+        run: |
+          set +e
+          echo "== uname =="; uname -a
+          echo "== 工具 =="
+          for c in python3 cargo git curl rsync fuser pkill pgrep script ss awk sed grep; do
+            printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
+          done
+          echo "== 版本 =="; python3 --version; cargo --version
+          echo "== UI_ 环境 =="; env | grep -E '^UI_' || true
+          echo "== 磁盘 =="; df -h . | tail -1
+
       - name: CI（preflight → 构建 → 版本/密钥 → 测试 → 门禁）
         run: bash tools/ci.sh
 
@@ -47,3 +55,20 @@ jobs:
             dist/*.tar.gz
             dist/**/*.sha256
           if-no-files-found: error
+
+      # 失败时把 CI 日志作为 artifact 留下，便于事后查（网页上看不到时也能下载）
+      - name: 失败时保存日志
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          cp -f /tmp/ci-step.log ci-logs/ 2>/dev/null || true
+          bash tools/preflight.sh > ci-logs/preflight.txt 2>&1 || true
+          env | grep -E '^UI_' > ci-logs/env.txt 2>/dev/null || true
+
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs/
+          if-no-files-found: ignore

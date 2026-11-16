@@ -14,8 +14,9 @@ cd "$UI_ROOT"
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
 
-STEP_LOG=$(mktemp)
-trap 'rm -f "$STEP_LOG"' EXIT
+# 日志写固定路径：失败时 GitHub Actions 会把它当 artifact 带走（/tmp 随机名拿不到）
+STEP_LOG="$UI_ROOT/.ci-step.log"
+: > "$STEP_LOG"
 
 step() { printf '\n===== %s =====\n' "$1"; }
 
@@ -44,4 +45,5 @@ else
   step "门禁已跳过（--fast）"
 fi
 
+rm -f "$STEP_LOG"
 printf '\nCI 通过：%s\n' "$("$UI_BIN" --version)"
