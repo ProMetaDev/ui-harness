@@ -135,6 +135,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("team") => cmd_team(&args),
         Some("prompt") => cmd_prompt(&args),
         Some("providers") => cmd_providers(&args),
+        Some("plugins") => cmd_plugins(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -276,6 +277,56 @@ fn provider_model(args: &Args) -> Option<Result<Box<dyn Model + Send>, String>> 
 }
 
 /// `ui providers`：列出配置里的 provider（不启动任何进程）。
+/// `.ui/plugins.json` 或 `--plugins FILE`：加载本地插件（能力声明必须显式）。
+fn attach_plugins(agent: &mut Agent, args: &Args) -> Result<(), String> {
+    let ws = agent.workspace.clone();
+    let path = match args.get("plugins") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let p = ws.join(".ui").join("plugins.json");
+            if !p.exists() {
+                return Ok(());
+            }
+            p
+        }
+    };
+    let set = ui_core::plugin::Set::load(&path)?;
+    ui_core::prompt::add_extra_tools(set.catalog());
+    agent.plugins = Some(std::sync::Arc::new(set));
+    Ok(())
+}
+
+/// `ui plugins`：列出插件与它们声明的能力（不启动任何进程）。
+fn cmd_plugins(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let path = match args.get("plugins") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => ws.join(".ui").join("plugins.json"),
+    };
+    if !path.exists() {
+        return Err(format!("没有插件配置：{}", path.display()));
+    }
+    let set = ui_core::plugin::Set::load(&path)?;
+    println!("配置 {} · {} 个插件", path.display(), set.plugins.len());
+    for p in &set.plugins {
+        println!("  {}（{} 个工具）cmd={}", p.name, p.tools.len(), p.cmd);
+        for t in &p.tools {
+            let eff: Vec<String> = t
+                .effects
+                .iter()
+                .map(|e| format!("{} {}", e.kind, e.target))
+                .collect();
+            println!(
+                "    - {} — {}  [{}]",
+                t.name,
+                if t.summary.is_empty() { "?" } else { &t.summary },
+                if eff.is_empty() { "无副作用".to_string() } else { eff.join(", ") }
+            );
+        }
+    }
+    Ok(0)
+}
+
 fn cmd_providers(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let path = args
@@ -326,6 +377,7 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    attach_plugins(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
@@ -461,6 +513,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    attach_plugins(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
@@ -631,6 +684,7 @@ fn cmd_tui(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    attach_plugins(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
@@ -971,6 +1025,7 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    attach_plugins(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
@@ -2239,6 +2294,7 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     summarizer.mode = mode_from(args);
     summarizer.tool_chars = tool_chars(args);
     attach_mcp(&mut summarizer, args)?;
+    attach_plugins(&mut summarizer, args)?;
 
     // ── 6. 验收：跑一条命令，失败就不许说完成（no artifact, no claim）──
     let mut accept_ok: Option<bool> = None;
@@ -2383,6 +2439,7 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    attach_plugins(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;

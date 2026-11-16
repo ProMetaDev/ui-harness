@@ -23,6 +23,8 @@ pub struct Ctx {
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
     /// ?????????????????(???)
     pub env_scrub: bool,
+    /// ????(??)
+    pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
 }
 
 impl Default for Ctx {
@@ -32,6 +34,7 @@ impl Default for Ctx {
             cancel: crate::cancel::Cancel::new(),
             mcp: None,
             env_scrub: true,
+            plugins: None,
         }
     }
 }
@@ -700,6 +703,41 @@ pub fn registry() -> Vec<Tool> {
                 ]
             },
             run: |args, ctx| run_mv(args, ctx),
+        },
+        Tool {
+            name: "plugin_call",
+            summary: "调用本地插件工具：{plugin, tool, args}（插件名见提示清单）",
+            idempotent: false,
+            params: &[
+                ("plugin", "string", true),
+                ("tool", "string", true),
+                ("args", "object", false),
+            ],
+            effects: |args, ctx| {
+                let plugin = args.str_at("plugin").unwrap_or("");
+                let tool = args.str_at("tool").unwrap_or("");
+                match &ctx.plugins {
+                    // 用插件**声明**的效果，而不是我们猜的
+                    Some(set) => set.effects_for(plugin, tool, &ctx.workspace),
+                    None => vec![Effect::new("proc.exec", format!("plugin:{}:{}", plugin, tool))],
+                }
+            },
+            run: |args, ctx| {
+                let plugin = args.str_at("plugin").unwrap_or("");
+                let tool = args.str_at("tool").unwrap_or("");
+                if plugin.is_empty() || tool.is_empty() {
+                    return ToolResult::err("plugin_call 需要 plugin 与 tool");
+                }
+                let set = match &ctx.plugins {
+                    Some(s) => s,
+                    None => return ToolResult::err("没有配置插件（.ui/plugins.json）"),
+                };
+                let payload = args.get("args").cloned().unwrap_or(Json::Obj(vec![]));
+                match set.call(plugin, tool, &payload) {
+                    Ok(text) => ToolResult::ok(text),
+                    Err(e) => ToolResult::err(e),
+                }
+            },
         },
         Tool {
             name: "mcp_call",

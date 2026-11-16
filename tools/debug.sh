@@ -115,6 +115,7 @@ run "访问鉴权（401 / Cookie / --token off）" bash tools/verify_auth.sh
 run "工具白名单（--no-tools / --tools）" bash tools/verify_tool_filter.sh
 run "新工具（grep/patch/todo/tree/fs_mv）" bash tools/verify_tools2.sh
 run "多 provider（注册表 / 切换 / 报错）" bash tools/verify_providers.sh
+run "插件（能力声明 + 调用 + 拒绝非法声明）" bash tools/verify_plugins_v2.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh

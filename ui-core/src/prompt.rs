@@ -249,11 +249,11 @@ fn render_tools(tools: &[Tool]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    // 外部 MCP 工具：模型必须知道有哪些，否则 mcp_call 只能瞎猜
-    if let Some(extra) = EXTRA_TOOLS.get() {
+    // 外部 MCP 工具与本地插件：模型必须知道有哪些，否则调用只能瞎猜
+    if let Ok(extra) = EXTRA_TOOLS.lock() {
         if !extra.is_empty() {
-            out.push_str("\n\n外部 MCP 工具（用 mcp_call 调，server/tool 照抄冒号前的部分）：");
-            for (name, desc) in extra {
+            out.push_str("\n\n外部工具（MCP 用 mcp_call，插件用 plugin_call；名字照抄冒号分隔的那串）：");
+            for (name, desc) in extra.iter() {
                 out.push_str(&format!("\n- {}（{}）", name, desc));
             }
         }
@@ -262,10 +262,19 @@ fn render_tools(tools: &[Tool]) -> String {
 }
 
 /// 启动时注入一次：MCP server 的工具清单
-static EXTRA_TOOLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+static EXTRA_TOOLS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 pub fn set_extra_tools(list: Vec<(String, String)>) {
-    let _ = EXTRA_TOOLS.set(list);
+    if let Ok(mut guard) = EXTRA_TOOLS.lock() {
+        *guard = list;
+    }
+}
+
+/// ??(MCP ???????,????)
+pub fn add_extra_tools(mut list: Vec<(String, String)>) {
+    if let Ok(mut guard) = EXTRA_TOOLS.lock() {
+        guard.append(&mut list);
+    }
 }
 
 /// 启动时注入一次：调用方追加的系统指令（`--append-system-prompt`）
