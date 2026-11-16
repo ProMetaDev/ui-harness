@@ -2085,20 +2085,78 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
         eprintln!("合并时有问题（退出码 {}），见上面的冲突/漂移报告", apply_code);
     }
 
-    // ── 5. 汇总在 apply 之后跑：看的是真实磁盘，而不是子代理的自述 ──
+    // ── 5. 汇总用一个新的 agent（在 apply 之后看真实磁盘）──
     let model2 = build_model(args)?;
     let journal2 = Journal::open(&jp).map_err(|e| e.to_string())?;
     let mut summarizer = Agent::new(journal2, model2, ws.clone(), limits_from(args));
     summarizer.mode = mode_from(args);
     summarizer.tool_chars = tool_chars(args);
     attach_mcp(&mut summarizer, args)?;
+
+    // ── 6. 验收：跑一条命令，失败就不许说完成（no artifact, no claim）──
+    let mut accept_ok: Option<bool> = None;
+    let mut accept_note = String::new();
+    if let Some(cmd) = args.get("accept") {
+        println!("\n── 验收：{} ──", cmd);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&ws)
+            .output();
+        let (code, tail) = match out {
+            Ok(o) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                let tail = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .rev()
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (o.status.code().unwrap_or(-1), tail)
+            }
+            Err(e) => (-1, e.to_string()),
+        };
+        accept_ok = Some(code == 0);
+        accept_note = format!("验收命令退出码 {}", code);
+        if code == 0 {
+            println!("验收通过");
+        } else {
+            println!("验收失败（退出码 {}）", code);
+            println!("{}", tail);
+        }
+        append_log(
+            &mut summarizer,
+            "team/accept",
+            Json::obj(vec![
+                ("cmd", Json::from(cmd)),
+                ("ok", Json::Bool(code == 0)),
+                ("code", Json::from(code)),
+                ("tail", Json::from(tail.as_str())),
+            ]),
+        )?;
+    }
+
     let mut hooks2 = ConsoleHooks::new(args.flag("yes"), args.flag("json"));
     println!("\n── 汇总 ──");
+    let accept_line = match accept_ok {
+        Some(true) => "验收命令已通过（退出码 0）。".to_string(),
+        Some(false) => "**验收命令失败**——结论必须写明失败，不能宣布完成。".to_string(),
+        None => "本次没有配置验收命令。".to_string(),
+    };
     let final_prompt = format!(
         "各子代理已完成并已合并回工作区。现在做汇总：\n\
          1) 用工具核对每项产出是否真的落地（不要只信描述）；\n\
          2) 说明哪些完成、哪些没完成、原因是什么；\n\
          3) 给出一句话结论。\n\n\
+         验收状态：{accept_line}\n\
          原始目标：{task}\n汇总提示：{summary}"
     );
     let final_report = summarizer
@@ -2106,10 +2164,25 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
         .map_err(|e| e.to_string())?;
 
     println!(
-        "\n协作结束 · workflow={} · apply={} · 汇总 {} 步 / {} tok",
-        wf_code, apply_code, final_report.steps, final_report.tokens
+        "\n协作结束 · workflow={} · apply={} · 验收={} · 汇总 {} 步 / {} tok",
+        wf_code,
+        apply_code,
+        match accept_ok {
+            Some(true) => "通过",
+            Some(false) => "失败",
+            None => "未配置",
+        },
+        final_report.steps,
+        final_report.tokens
     );
-    Ok(if wf_code == 0 { apply_code } else { wf_code })
+    if wf_code != 0 {
+        return Ok(wf_code);
+    }
+    if apply_code != 0 {
+        return Ok(apply_code);
+    }
+    // 验收失败就是失败，哪怕 agent 说完成了
+    Ok(if accept_ok == Some(false) { 3 } else { 0 })
 }
 
 /// 从日志里取最后一次 plan 工具调用的参数。
