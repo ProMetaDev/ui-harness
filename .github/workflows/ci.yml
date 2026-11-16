@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  linux:
     runs-on: ubuntu-latest
     env:
       UI_BUILD_DIR: ${{ github.workspace }}
@@ -31,13 +31,11 @@ jobs:
       - name: 环境诊断
         run: |
           set +e
-          echo "== uname =="; uname -a
           echo "== 工具 =="
           for c in python3 cargo git curl rsync fuser pkill pgrep script ss awk sed grep diff timeout; do
             printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
           done
           echo "== 版本 =="; python3 --version; cargo --version
-          echo "== UI_ 环境 =="; env | grep -E '^UI_' || true
 
       - name: CI（preflight → 构建 → 版本/密钥 → 测试 → 门禁）
         run: bash tools/ci.sh
@@ -54,23 +52,16 @@ jobs:
             dist/**/*.sha256
           if-no-files-found: error
 
-      # 失败时把「失败步骤的日志」直接打进这一步的输出：
-      # 这样贴最后一步的日志就等于贴到了出错现场，不需要再去翻上面的步骤。
       - name: 失败诊断
         if: failure()
         run: |
           echo "===================== 失败诊断开始 ====================="
           echo "---- 失败步骤的最后 80 行 ----"
-          if [ -f .ci-step.log ]; then
-            tail -80 .ci-step.log
-          else
-            echo "（没有 .ci-step.log）"
-          fi
+          if [ -f .ci-step.log ]; then tail -80 .ci-step.log; else echo "（没有 .ci-step.log）"; fi
           echo "---- 环境再确认 ----"
           for c in fuser pkill pgrep script rsync python3; do
             printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
           done
-          echo "aria2c/diffutils 无关，仅确认基础工具"
           echo "===================== 失败诊断结束 ====================="
           mkdir -p ci-logs
           cp -f .ci-step.log ci-logs/ 2>/dev/null || true
@@ -82,3 +73,39 @@ jobs:
           name: ci-logs
           path: ci-logs/
           if-no-files-found: ignore
+
+  windows:
+    runs-on: ubuntu-latest
+    env:
+      UI_BUILD_DIR: ${{ github.workspace }}
+      UI_TARGET_DIR: ${{ github.workspace }}/target
+      UI_GIT_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 mingw 链接器
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: 安装 Rust + windows-gnu target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/target
+          key: ${{ runner.os }}-cargo-win-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-win-
+
+      - name: 交叉编译 ui.exe
+        run: bash tools/build_windows.sh
+
+      - name: 上传 ui.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-windows
+          path: ${{ github.workspace }}/target/x86_64-pc-windows-gnu/release/ui.exe
+          if-no-files-found: error
