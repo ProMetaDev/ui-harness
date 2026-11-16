@@ -21,6 +21,8 @@ pub struct Ctx {
     pub cancel: crate::cancel::Cancel,
     /// 外部 MCP 工具（没配置就是 None，`mcp_call` 会明确报错）
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
+    /// ?????????????????(???)
+    pub env_scrub: bool,
 }
 
 impl Default for Ctx {
@@ -29,6 +31,7 @@ impl Default for Ctx {
             workspace: PathBuf::new(),
             cancel: crate::cancel::Cancel::new(),
             mcp: None,
+            env_scrub: true,
         }
     }
 }
@@ -488,6 +491,27 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
 
     // 自成进程组，超时/取消时才能连后代一起收掉
     isolate_group(&mut cmd);
+
+    // 密钥卫生：默认清掉「看起来是密钥」的环境变量再交给子进程。
+    // 竞品里只有 dsh 做到这一条（headless-harness-bench 的 T5 实测），
+    // 让子进程继承整个父环境等于把 operator 的凭据交给模型调用的命令。
+    let mut scrubbed = 0usize;
+    let _ = &mut scrubbed;
+    if ctx.env_scrub {
+        let keep: Vec<(String, String)> = std::env::vars().collect();
+        cmd.env_clear();
+        for (k, v) in keep {
+            let up = k.to_ascii_uppercase();
+            let looks_secret = ["KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH"]
+                .iter()
+                .any(|p| up.contains(p));
+            if looks_secret {
+                scrubbed += 1;
+                continue;
+            }
+            cmd.env(k, v);
+        }
+    }
 
     let mut child = match cmd
         .current_dir(&ctx.workspace)

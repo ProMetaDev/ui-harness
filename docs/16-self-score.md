@@ -63,3 +63,19 @@
 ## 一句话
 
 **按这把尺子，我们 57 分。四个便宜改动能到 63，剩下的分要靠会话/工具面/多 provider 这些硬骨头。**
+
+---
+
+## 更新（同日，补完四条便宜分之后）
+
+| 标准 | 之前 | 现在 | 做了什么 |
+|---|:---:|:---:|---|
+| A3 追加 system prompt | 1 | **3** | `--append-system-prompt`（`ui prompt --full` 可验证） |
+| A4 工具白名单 | 1 | **3** | `--no-tools` / `--tools a,b` |
+| D1 子进程 env 允许清单 | 0 | **2** | 默认剔掉 KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL/AUTH |
+| D3 默认不泄漏整个 env | 1 | **2** | 同上（$PATH 等保留，实测通过） |
+| H4 许可证 | 1 | **3** | Apache-2.0（LICENSE + Cargo 元数据） |
+
+重算：**≈ 57 → 63**，与 DSH（65.6）差 2.6 分，已经贴到 Pi（60.9）之上。
+
+剩下的大头：C（多 provider / OAuth）、F（工具力）、G（插件）、H3（Windows 未测）。

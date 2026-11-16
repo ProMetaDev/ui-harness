@@ -1,4 +1,6 @@
 [workspace]
+license = "Apache-2.0"
+authors = ["ProMetaDev"]
 members = ["ui-core", "ui-cli"]
 resolver = "2"
 

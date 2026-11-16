@@ -268,6 +268,13 @@ pub fn set_extra_tools(list: Vec<(String, String)>) {
     let _ = EXTRA_TOOLS.set(list);
 }
 
+/// 启动时注入一次：调用方追加的系统指令（`--append-system-prompt`）
+static EXTRA_SYSTEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_extra_system(text: &str) {
+    let _ = EXTRA_SYSTEM.set(text.to_string());
+}
+
 pub fn build_snapshot(
     workspace: &Path,
     tools: &[Tool],
@@ -282,7 +289,18 @@ pub fn build_snapshot(
         Section {
             id: "core",
             owner: "kernel",
-            text: CORE.to_string(),
+            text: {
+                // `--append-system-prompt`：调用方追加的系统指令（A3）。
+                // 放在 core 里，每轮都生效，不依赖调用方自己拼历史。
+                let mut text = CORE.to_string();
+                if let Some(extra) = EXTRA_SYSTEM.get() {
+                    if !extra.trim().is_empty() {
+                        text.push_str("\n\n## 调用方追加的指令\n\n");
+                        text.push_str(extra.trim());
+                    }
+                }
+                text
+            },
             tokens: 0,
             bytes: 0,
             volatility: "stable",

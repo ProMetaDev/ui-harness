@@ -132,6 +132,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("skills") => cmd_skills(&args),
         Some("workflow") => cmd_workflow(&args),
         Some("team") => cmd_team(&args),
+        Some("prompt") => cmd_prompt(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -261,6 +262,12 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
+    if args.flag("no-env-scrub") {
+        agent.env_scrub = false;
+    }
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
 
     println!("ui · workspace {}", ws.display());
     println!("/status 账本 · /policy 规则 · /journal 日志 · /quit 退出");
@@ -390,6 +397,12 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
+    if args.flag("no-env-scrub") {
+        agent.env_scrub = false;
+    }
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
     let label = agent.model.name().to_string();
     let ws_label = ws.to_string_lossy().to_string();
 
@@ -554,6 +567,12 @@ fn cmd_tui(args: &Args) -> Result<i32, String> {
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
+    if args.flag("no-env-scrub") {
+        agent.env_scrub = false;
+    }
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
     agent.cancel = hooks.tui.cancel_token();
     hooks.redraw();
 
@@ -888,6 +907,12 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
+    if args.flag("no-env-scrub") {
+        agent.env_scrub = false;
+    }
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
     // `--skills a,b`：并行子代理或脚本化调用时，直接在开场前预加载
     preload_skills(&mut agent, &ws, &skill_list(args))?;
     let mut hooks = ConsoleHooks::new(args.flag("yes"), false);
@@ -1806,6 +1831,46 @@ fn numeric_leaves(dir: &Path) -> std::collections::BTreeMap<String, f64> {
     out
 }
 
+/// `ui prompt`：打印当前会发给模型的快照（调试提示词用，也用来验收 A3）。
+fn cmd_prompt(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
+    let mut tools = ui_core::tools::registry();
+    if args.flag("no-tools") {
+        tools.clear();
+    }
+    if let Some(list) = args.get("tools") {
+        let want: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        tools.retain(|t| want.iter().any(|w| *w == t.name));
+    }
+    let snap = ui_core::prompt::build_snapshot(&ws, &tools, &[], None, None, "", &[]);
+    if args.flag("json") {
+        println!("{}", snap.to_json().to_compact());
+        return Ok(0);
+    }
+    if args.flag("full") {
+        println!("{}", snap.text);
+        return Ok(0);
+    }
+    println!(
+        "快照 {} · {} 段 · {} tok · {} 字节",
+        snap.id,
+        snap.sections.len(),
+        snap.tokens,
+        snap.bytes
+    );
+    for s in &snap.sections {
+        println!("  {:<10} {:>7} 字节 {:>6} tok  [{}]", s.id, s.bytes, s.tokens, s.owner);
+    }
+    Ok(0)
+}
+
 fn cmd_resume(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
@@ -2254,6 +2319,12 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     apply_tool_filter(&mut agent, args);
+    if args.flag("no-env-scrub") {
+        agent.env_scrub = false;
+    }
+    if let Some(text) = args.get("append-system-prompt") {
+        ui_core::prompt::set_extra_system(text);
+    }
     let mut hooks = ConsoleHooks::new(args.flag("yes"), json_out);
 
     append_log(

@@ -110,6 +110,8 @@ pub struct Agent {
     pub tool_chars: usize,
     /// 运行模式：只调决策严格度，不改日志格式
     pub mode: crate::mode::Mode,
+    /// ??????????????(???)
+    pub env_scrub: bool,
     /// 外部 MCP server（未配置时为 None）。
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
 
@@ -189,6 +191,7 @@ impl Agent {
             loaded_skills: Vec::new(),
             tool_chars: 2000,
             mode: crate::mode::Mode::default(),
+            env_scrub: true,
             mcp: None,
             tool_seq: 0,
             turn,
@@ -227,6 +230,7 @@ impl Agent {
             workspace: self.workspace.clone(),
             cancel: self.cancel.clone(),
             mcp: self.mcp.clone(),
+            env_scrub: self.env_scrub,
         }
     }
 
@@ -852,6 +856,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                     workspace: agent.workspace.clone(),
                     cancel: agent.cancel.clone(),
                     mcp: agent.mcp.clone(),
+                    env_scrub: agent.env_scrub,
                 };
                 let result = (tool.run)(&args, &ctx);
                 agent.journal.append(
@@ -880,6 +885,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                         workspace: agent.workspace.clone(),
                         cancel: agent.cancel.clone(),
                         mcp: agent.mcp.clone(),
+                        env_scrub: agent.env_scrub,
                     },
                 );
                 let request = ApprovalRequest {
@@ -906,6 +912,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                             workspace: agent.workspace.clone(),
                             cancel: agent.cancel.clone(),
                             mcp: agent.mcp.clone(),
+                            env_scrub: agent.env_scrub,
                         },
                     );
                     agent.journal.append(
