@@ -131,7 +131,12 @@ impl Journal {
 
         // 读和修复都必须在锁里：别的 writer 正在写时，读到的是半条记录，
         // 会被当成「尾部撕裂」截掉——那等于把别人刚写的记录毁了。
-        let (events, corrupt) = {
+        //
+        // 长度也必须在**同一把锁**里取：如果出了锁再 metadata().len()，
+        // 中间可能有别的写者追加，offset 就会跳过一条没解析过的记录，
+        // 下一次 catch_up 看到 seq 对不上，直接报「日志链断了」。
+        // 这不是理论问题——CI 上四线程并发时真的炸过。
+        let (events, corrupt, offset) = {
             let lock_path = path.with_extension("lock");
             let _lock = FileLock::acquire(&lock_path)?;
             let (events, corrupt) = Journal::read(&path)?;
@@ -148,7 +153,8 @@ impl Journal {
             // 可校验，但文件没有结尾换行。此时直接 append 会把两个 JSON 对象粘成
             // 一行，而**下一次** open 会把它们一起当成尾部撕裂截掉。先补上换行。
             ensure_trailing_newline(&path)?;
-            (events, corrupt)
+            let offset = fs::metadata(&path)?.len();
+            (events, corrupt, offset)
         };
         let mut torn_note = None;
         if let Some(c) = corrupt {
@@ -177,11 +183,10 @@ impl Journal {
             path,
             seq,
             prev,
-            offset: 0,
+            offset,
             writer: writer_id(),
             events,
         };
-        journal.offset = fs::metadata(&journal.path)?.len();
         if let Some(reason) = torn_note {
             journal.append(
                 "journal/torn",
@@ -603,6 +608,58 @@ fn two_writers_share_one_journal_without_breaking_the_chain() {
             i + 1
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_offset_always_matches_the_records_it_parsed() {
+    // 回归：open() 曾经在**锁外**取 offset。如果读完到取长度之间别的写者追加了一条，
+    // offset 就会跳过那条没解析过的记录，下一次 append 的 catch_up 看到 seq 对不上，
+    // 报「日志链断了」。CI 四线程并发时复现过。
+    //
+    // 直接断言不变量：**offset 必须正好等于它解析出的那些记录的字节数**。
+    // 这样不用去赌「seq 是否刚好断」，只要时序撞上就会红。
+    let dir = std::env::temp_dir().join(format!("ui-journal-toctou-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("journal.jsonl");
+    Journal::open(&path).unwrap().append("seed", Json::obj(vec![])).unwrap();
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let path = path.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut j = Journal::open(&path).unwrap();
+                let _ = j.append("noise", Json::obj(vec![]));
+                std::thread::sleep(std::time::Duration::from_micros(20));
+            }
+        })
+    };
+
+    for round in 0..400 {
+        let j = Journal::open(&path).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        // events 覆盖的前缀字节数（按行累加）
+        let covered: u64 = data
+            .split_inclusive(|b| *b == b'\n')
+            .take(j.events.len())
+            .map(|l| l.len() as u64)
+            .sum();
+        assert_eq!(
+            j.offset, covered,
+            "第 {} 轮：offset {} 与解析出的 {} 条记录（{} 字节）不一致——open 跳过了记录",
+            round,
+            j.offset,
+            j.events.len(),
+            covered
+        );
+        drop(j);
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
