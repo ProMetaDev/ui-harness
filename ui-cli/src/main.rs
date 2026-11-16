@@ -131,6 +131,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("export") => cmd_export(&args),
         Some("skills") => cmd_skills(&args),
         Some("workflow") => cmd_workflow(&args),
+        Some("team") => cmd_team(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -159,6 +160,7 @@ fn help() -> String {
      ui skills                    列出工作区里的 skill\n\
      ui workflow --file F         按文件里的步骤跑工作流（每步一次 turn）\n\
      ui workflow --file F --isolate   并行子代理各用一份工作区副本\n\
+     ui team --task \"复杂任务\" --agents 3   协作模式：自动拆成并行子任务再跑\n\
      ui apply --id ID [--yes]     把某个隔离子代理的改动写回工作区\n\
      ui audit --as strict         用另一个模式重判历史：哪些动作会被拦\n\
      ui lab pack --name e1        打包一次实验：产物 + 哈希 + 血缘 + 环境\n\
@@ -1948,6 +1950,122 @@ fn append_log(agent: &mut Agent, kind: &str, payload: Json) -> Result<(), String
 
 /// 工作流：顺序任务 + 并行子代理。每一步/每个子代理都写进同一份父日志。
 /// `--json` 时进度走 stderr，stdout 只有一行结果 JSON。
+/// 协作模式：把复杂任务拆成并行子任务，交给现有的 workflow 引擎跑。
+///
+/// 引擎侧的能力（并行、隔离副本、冲突/漂移闸、每子代理独立日志）都已经有了，
+/// 这里只补"自动拆解"这一层：让模型出一个计划，转成 workflow 文件，再委派执行。
+fn cmd_team(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let task = match args.get("task") {
+        Some(t) => t.to_string(),
+        None => return Err("用法：ui team --task \"复杂任务\" [--agents 3] [--isolate]".to_string()),
+    };
+    let agents = args
+        .get("agents")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3)
+        .clamp(2, 6);
+
+    println!("协作模式 · 目标：{}", task);
+    println!("子代理：{} 个（并行）", agents);
+
+    // ── 1. 规划：单独一个 agent，安静模式，不让它动手 ──
+    let model = build_model(args)?;
+    let jp = resolve_journal(args, &ws);
+    let journal = Journal::open(&jp).map_err(|e| e.to_string())?;
+    let mut planner = Agent::new(journal, model, ws.clone(), limits_from(args));
+    planner.mode = ui_core::Mode::Quiet;
+    planner.tool_chars = tool_chars(args);
+    let mut hooks = ConsoleHooks::new(args.flag("yes"), args.flag("json"));
+    let prompt = format!(
+        "把下面这个任务拆成 {agents} 个可以并行的子任务。每个子任务要能独立完成、边界清楚。\n\
+         只输出一个 JSON 对象，不要任何解释、不要代码块围栏：\n\
+         {{\"parallel\":[{{\"prompt\":\"子任务 1\"}},{{\"prompt\":\"子任务 2\"}}],\"summary\":\"汇总阶段的提示\"}}\n\n\
+         任务：{task}"
+    );
+    let report = planner
+        .run_turn(&prompt, &mut hooks)
+        .map_err(|e| e.to_string())?;
+    let plan = extract_plan(&report.final_text)
+        .ok_or_else(|| format!("规划结果里找不到 JSON 计划：{}", report.final_text))?;
+
+    let items = plan.arr_at("parallel").cloned().unwrap_or_default();
+    if items.is_empty() {
+        return Err("计划里没有 parallel 子任务".to_string());
+    }
+    println!("计划：{} 个并行子任务", items.len());
+    for (i, it) in items.iter().enumerate() {
+        println!("  {}. {}", i + 1, it.str_at("prompt").unwrap_or(""));
+    }
+
+    // ── 2. 转成 workflow 的格式（引擎认识的那种）──
+    // 结构：第 1 步并行跑所有子任务，第 2 步汇总。
+    let summary = plan
+        .str_at("summary")
+        .unwrap_or("汇总各子任务的结果，给出结论")
+        .to_string();
+    let wf_json = Json::obj(vec![
+        ("name", Json::from(format!("team-{}", agents))),
+        (
+            "steps",
+            Json::Arr(vec![
+                Json::obj(vec![("parallel", Json::Arr(items.clone()))]),
+                Json::obj(vec![("prompt", Json::from(summary.as_str()))]),
+            ]),
+        ),
+    ]);
+
+    let dir = ws.join(".ui");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = ui_core::time::now_ms();
+    let plan_path = dir.join(format!("team-{}.json", stamp));
+    std::fs::write(&plan_path, wf_json.to_pretty()).map_err(|e| e.to_string())?;
+    println!("计划文件：{}", plan_path.display());
+
+    // ── 3. 委派给 workflow 执行器（并行 + 隔离 + 闸门都在那边）──
+    let mut wf_args = Args {
+        values: std::collections::HashMap::new(),
+        flags: Vec::new(),
+        rest: Vec::new(),
+    };
+    wf_args.values.insert(
+        "file".to_string(),
+        plan_path.to_string_lossy().to_string(),
+    );
+    wf_args.values.insert(
+        "workspace".to_string(),
+        ws.to_string_lossy().to_string(),
+    );
+    for key in ["mock", "agents", "max-tokens", "max-calls", "mode", "mcp"] {
+        if let Some(v) = args.get(key) {
+            wf_args.values.insert(key.to_string(), v.to_string());
+        }
+    }
+    if args.flag("yes") {
+        wf_args.flags.push("yes".to_string());
+    }
+    if args.flag("json") {
+        wf_args.flags.push("json".to_string());
+    }
+    // 协作模式默认隔离：子代理各用一份工作区副本，改动靠 apply 闸合并
+    if args.flag("isolate") || !args.flag("no-isolate") {
+        wf_args.flags.push("isolate".to_string());
+    }
+    println!("交给 workflow 执行（并行 + 隔离）…");
+    cmd_workflow(&wf_args)
+}
+
+/// 从模型的回答里抠出 JSON 计划：容忍 ```json 围栏和前后废话。
+fn extract_plan(text: &str) -> Option<Json> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let slice = &text[start..=end];
+    json::parse(slice).ok()
+}
+
 fn cmd_workflow(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let json_out = args.flag("json");

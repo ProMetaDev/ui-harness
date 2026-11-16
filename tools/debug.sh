@@ -112,6 +112,7 @@ run "实验室跑一次（并发保护 + SSE）" bash tools/verify_lab_run.sh
 run "空状态守卫（元事件不该藏欢迎页）" bash tools/check_empty_guard.sh
 run "MCP 工具（外部 server 可调用 + 策略留痕）" bash tools/verify_mcp.sh
 run "访问鉴权（401 / Cookie / --token off）" bash tools/verify_auth.sh
+run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
 run "导出查看器并校验" check_viewer
 
 echo
