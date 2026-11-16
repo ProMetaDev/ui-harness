@@ -76,16 +76,26 @@ pub fn inspect_environment(workspace: &Path) -> Env {    let mut warnings = Vec:
     // must not fight over one path (that race made the snapshot non-deterministic).
     let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let probe = temp.join(format!("ui-probe-{}-{}", std::process::id(), seq));
-    let wrote = fs::write(&probe, b"").is_ok();
+    let wrote = match fs::write(&probe, b"") {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
     let cleaned = match fs::remove_file(&probe) {
         Ok(_) => true,
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     };
-    let temp_ok = wrote && cleaned;
+    let temp_ok = wrote.is_ok() && cleaned;
     if !temp_ok {
+        // 带上真实原因：Windows 上「不可写」可能是杀软、权限或路径问题，
+        // 只说「不可写」会让人无从下手。
+        let why = match &wrote {
+            Err(e) => e.clone(),
+            Ok(_) => "能写但删不掉".to_string(),
+        };
         warnings.push(format!(
-            "临时目录不可写: {} —— 工具可能把临时文件写进工作区",
-            temp.display()
+            "临时目录不可写: {} —— {}（工具可能把临时文件写进工作区）",
+            temp.display(),
+            why
         ));
     }
 

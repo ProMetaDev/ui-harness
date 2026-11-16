@@ -992,7 +992,84 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).trim()
         )),
-        Err(e) => ToolResult::err(format!("没有可用的 grep：{}（可以用 fs_search 做字面搜索）", e)),
+        // Windows 上没有 GNU grep：退化成内置的字面匹配，并明确告诉调用方
+        Err(_) => match literal_search(&ctx.workspace, path, pattern, include, args.bool_at("ignoreCase") == Some(true), max_hits as usize) {
+            Ok(body) => ToolResult::ok(format!("（本机没有 grep，已退化为字面匹配）\n{}", body)),
+            Err(e) => ToolResult::err(e),
+        },
+    }
+}
+
+/// 没有 grep 时的兜底：逐文件做字面匹配（不是正则，结果里会注明）。
+fn literal_search(
+    workspace: &Path,
+    path: &str,
+    pattern: &str,
+    include: Option<&str>,
+    ignore_case: bool,
+    max_hits: usize,
+) -> Result<String, String> {
+    let root = workspace.join(path);
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    let mut hits: Vec<String> = Vec::new();
+    fn walk(dir: &Path, needle: &str, ignore_case: bool, include: Option<&str>, hits: &mut Vec<String>, max: usize) {
+        if hits.len() >= max {
+            return;
+        }
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for e in rd.flatten() {
+            if hits.len() >= max {
+                return;
+            }
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui") {
+                continue;
+            }
+            if p.is_dir() {
+                walk(&p, needle, ignore_case, include, hits, max);
+                continue;
+            }
+            if let Some(glob) = include {
+                let suffix = glob.trim_start_matches('*');
+                if !name.ends_with(suffix) {
+                    continue;
+                }
+            }
+            let meta = match std::fs::metadata(&p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() > 2 * 1024 * 1024 {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&p) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for (i, line) in text.lines().enumerate() {
+                let hay = if ignore_case { line.to_lowercase() } else { line.to_string() };
+                if hay.contains(needle) {
+                    hits.push(format!("{}:{}:{}", p.display(), i + 1, line.trim_end()));
+                    if hits.len() >= max {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    walk(&root, &needle, ignore_case, include, &mut hits, max_hits);
+    if hits.is_empty() {
+        Ok("（无匹配）".to_string())
+    } else {
+        Ok(hits.join("\n"))
     }
 }
 
@@ -1004,19 +1081,29 @@ fn run_patch(args: &Json, ctx: &Ctx) -> ToolResult {
         return ToolResult::err("patch 需要 path 与 diff");
     }
     let path = ctx.resolve(rel);
-    let original = match std::fs::read_to_string(&path) {
+    let raw = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => return ToolResult::err(format!("读不到 {}: {}", rel, e)),
     };
+    // Windows 的文件常带 BOM（PowerShell 的 Set-Content 就会加）。
+    // 不剥掉它，diff 的第一行永远匹配不上——这是实机才发现的问题。
+    let had_bom = raw.starts_with('\u{feff}');
+    let original = raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string();
     match apply_unified(&original, diff) {
         Ok(updated) => {
-            if let Err(e) = std::fs::write(&path, &updated) {
+            let to_write = if had_bom {
+                format!("\u{feff}{}", updated)
+            } else {
+                updated.clone()
+            };
+            if let Err(e) = std::fs::write(&path, &to_write) {
                 return ToolResult::err(format!("写回失败: {}", e));
             }
             ToolResult::ok(format!(
-                "已应用 diff：{} → {} 字节",
+                "已应用 diff：{} → {} 字节{}",
                 original.len(),
-                updated.len()
+                updated.len(),
+                if had_bom { "（保留 BOM）" } else { "" }
             ))
         }
         Err(e) => ToolResult::err(e),
@@ -1024,7 +1111,11 @@ fn run_patch(args: &Json, ctx: &Ctx) -> ToolResult {
 }
 
 pub fn apply_unified(original: &str, diff: &str) -> Result<String, String> {
-    let mut out: Vec<String> = original.lines().map(str::to_string).collect();
+    // Windows 的文件多半是 CRLF；diff 一般是 LF。
+    // 先统一成 LF 比对，成功后再按原文件的换行风格还原——否则补丁永远匹配不上。
+    let crlf = original.contains("\r\n");
+    let normalized: String = original.replace("\r\n", "\n");
+    let mut out: Vec<String> = normalized.lines().map(str::to_string).collect();
     let diff_lines: Vec<&str> = diff.lines().collect();
     let mut i = 0usize;
     let mut hunks = 0usize;
@@ -1098,8 +1189,12 @@ pub fn apply_unified(original: &str, diff: &str) -> Result<String, String> {
         return Err("diff 里没有 @@ 块".to_string());
     }
     let mut text = out.join("\n");
-    if original.ends_with('\n') {
+    if normalized.ends_with('\n') {
         text.push('\n');
+    }
+    // 还原原来的换行风格
+    if crlf {
+        text = text.replace('\n', "\r\n");
     }
     Ok(text)
 }

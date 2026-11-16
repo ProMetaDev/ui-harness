@@ -253,6 +253,9 @@ fn write_str(out: &mut String, s: &str) {
 const MAX_DEPTH: usize = 128;
 
 pub fn parse(input: &str) -> Result<Json, String> {
+    // Windows 上到处是带 BOM 的 JSON（PowerShell 的 Set-Content、记事本都会加）：
+    // 不剥掉 BOM，Windows 用户的第一步就会失败。
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut p = Parser {
         b: input.as_bytes(),
         i: 0,

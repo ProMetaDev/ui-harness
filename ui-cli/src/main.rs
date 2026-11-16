@@ -95,7 +95,18 @@ fn workspace(args: &Args) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     // 规范成绝对路径：否则 prompt 里显示 "demo"，模型会把 "demo/greet.js" 也带上，
     // 于是路径变成 demo/demo/greet.js（真机跑出来的 bug）。
-    std::fs::canonicalize(&p).unwrap_or(p)
+    let p = std::fs::canonicalize(&p).unwrap_or(p);
+    strip_verbatim(p)
+}
+
+/// Windows 的 canonicalize 会加 `\\?\` 前缀：功能上没问题，但日志和界面里很难看。
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
 }
 
 fn journal_path(ws: &Path) -> PathBuf {
