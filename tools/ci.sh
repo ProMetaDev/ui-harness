@@ -15,22 +15,25 @@ FAST=0
 step() { printf '\n===== %s =====\n' "$1"; }
 fail() { printf '\nCI 失败：%s\n' "$1"; exit 1; }
 
-step "1/4 前置检查"
+step "1/5 前置检查"
 bash tools/preflight.sh || fail "preflight"
 grep -q '依赖齐全' <(bash tools/preflight.sh) || echo "（注意：有依赖缺失，部分检查会跳过）"
 
-step "2/4 版本与密钥"
+step "2/5 构建"
+bash tools/dev.sh build --release || fail "构建"
+
+step "3/5 版本与密钥"
 bash tools/verify_version.sh || fail "版本接口"
 bash tools/scan_secrets.sh || fail "密钥扫描"
 
-step "3/4 测试"
+step "4/5 测试"
 bash tools/test.sh || fail "测试"
 
 if [ "$FAST" -eq 0 ]; then
-  step "4/4 门禁（38 项）"
+  step "5/5 门禁"
   bash tools/debug.sh || fail "门禁"
 else
-  step "4/4 门禁已跳过（--fast）"
+  step "5/5 门禁已跳过（--fast）"
 fi
 
 printf '\nCI 通过：%s\n' "$("$UI_BIN" --version)"

@@ -47,7 +47,8 @@ fi
 
 echo
 if [ "$missing" -eq 0 ]; then
-  echo "结论：依赖齐全，36 项门禁可以全跑。"
+  GATE=$(grep -c '^run ' "$UI_ROOT/tools/debug.sh")
+echo "结论：依赖齐全，$GATE 项门禁可以全跑。"
   exit 0
 fi
 echo "结论：缺 $missing 项依赖，部分检查会跳过（不会假绿，但覆盖不完整）。"
