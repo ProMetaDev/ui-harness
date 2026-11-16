@@ -48,8 +48,16 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    // commit 变了要重新构建，否则 --version 会一直报旧 commit
+    // commit 变了要重新构建，否则 --version 会一直报旧 commit。
+    // HEAD 本身只是个 "ref: refs/heads/main" 指针，真正变化的是 ref 文件与 index。
     if let Some(dir) = &git_dir {
-        println!("cargo:rerun-if-changed={}/.git/HEAD", dir);
+        let git = std::path::Path::new(dir).join(".git");
+        println!("cargo:rerun-if-changed={}/HEAD", git.display());
+        if let Ok(head) = std::fs::read_to_string(git.join("HEAD")) {
+            if let Some(refname) = head.trim().strip_prefix("ref:") {
+                println!("cargo:rerun-if-changed={}/{}", git.display(), refname.trim());
+            }
+        }
+        println!("cargo:rerun-if-changed={}/index", git.display());
     }
 }
