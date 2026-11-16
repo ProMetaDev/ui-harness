@@ -1514,7 +1514,10 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
     let mut manifest: Vec<Json> = Vec::new();
     for (rel, origin) in &produced {
         let src = ws.join(rel);
-        let dst = art_dir.join(rel);
+        // 产物目录在 workspace 里就叫 artifacts/；复制进 bundle 的 artifacts/ 时要剥掉这层前缀，
+        // 否则会变成 artifacts/artifacts/metrics.json，对照表按目录扫数值就扫不到。
+        let inner = rel.strip_prefix("artifacts/").unwrap_or(rel.as_str());
+        let dst = art_dir.join(inner);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -1529,14 +1532,21 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
         ]));
     }
 
-    // 输入血缘：日志里的 fs/read 事件（Agent 在执行前记的）
+    // 输入血缘：日志里的 fs/read 事件（Agent 在执行前记的）。
+    // **产物自己不算输入**：agent 常会读回自己刚写的 metrics.json 做确认，
+    // 如果把它记成输入，多 seed 对照表就会因为"同一路径哈希不同"拒绝求均值——
+    // 而产物理所当然每个 seed 都不同。这是真模型跑出来的问题。
     let mut inputs: Vec<Json> = Vec::new();
     for e in &events {
         if e.str_at("kind") != Some("fs/read") {
             continue;
         }
+        let path = e.str_at("path").unwrap_or("");
+        if produced.contains_key(path) {
+            continue;
+        }
         inputs.push(Json::obj(vec![
-            ("path", Json::from(e.str_at("path").unwrap_or(""))),
+            ("path", Json::from(path)),
             ("sha256", Json::from(e.str_at("sha256").unwrap_or(""))),
             ("bytes", Json::from(e.u64_at("bytes").unwrap_or(0))),
             (
@@ -1666,6 +1676,17 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+/// 产物在包里的落盘位置。
+///
+/// manifest 记的是 **workspace 相对路径**（实验产物通常就叫 `artifacts/metrics.json`），
+/// 而包内统一放在 `bundle/artifacts/` 下，所以拼接时必须剥掉这层前缀，
+/// 否则会变成 `artifacts/artifacts/metrics.json`，校验时报「缺失」。
+fn bundle_artifact_path(bundle: &std::path::Path, rel: &str) -> PathBuf {
+    bundle
+        .join("artifacts")
+        .join(rel.strip_prefix("artifacts/").unwrap_or(rel))
+}
+
 fn lab_verify(args: &Args) -> Result<i32, String> {
     let bundle = args
         .sub(1)
@@ -1688,7 +1709,7 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
         };
         let rel = rec.str_at("path").unwrap_or("");
         let want = rec.str_at("sha256").unwrap_or("");
-        let file = bundle.join("artifacts").join(rel);
+        let file = bundle_artifact_path(&bundle, rel);
         match sha256_file(&file) {
             Some(got) if got == want => checked += 1,
             Some(got) => bad.push(format!("{} 哈希不符（记录 {}…，实际 {}…）", rel, &want[..8.min(want.len())], &got[..8.min(got.len())])),
@@ -1847,28 +1868,43 @@ fn lab_table(args: &Args) -> Result<i32, String> {
             }
         }
 
-        // 只有 .json 产物参与数值聚合；别的类型（图、模型权重）不猜
-        let mut numbers = std::collections::BTreeMap::new();
-        if let Ok(rd) = std::fs::read_dir(dir.join("artifacts")) {
+        // 只有 .json 产物参与数值聚合；别的类型（图、模型权重）不猜。
+        // 递归扫：产物可能在 artifacts/ 的子目录里。
+        fn scan_json(dir: &std::path::Path, numbers: &mut std::collections::BTreeMap<String, f64>) {
+            let rd = match std::fs::read_dir(dir) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
             for entry in rd.flatten() {
                 let p = entry.path();
-                if p.extension().map(|e| e == "json").unwrap_or(false) {
-                    if let Ok(text) = std::fs::read_to_string(&p) {
-                        if let Ok(v) = json::parse(&text) {
-                            collect_numbers(&v, "", &mut numbers);
-                        }
+                if p.is_dir() {
+                    scan_json(&p, numbers);
+                    continue;
+                }
+                if !p.extension().map(|e| e == "json").unwrap_or(false) {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    if let Ok(v) = json::parse(&text) {
+                        collect_numbers(&v, "", numbers);
                     }
                 }
             }
         }
+        let mut numbers = std::collections::BTreeMap::new();
+        scan_json(&dir.join("artifacts"), &mut numbers);
 
         bundles.push(Bundle { name, env, inputs, numbers });
     }
 
-    // 输入一致性：同一个文件在不同包里哈希必须相同
+    // 输入一致性：同一个文件在不同包里哈希必须相同。
+    // 产物路径一律不算输入（哪怕旧包里漏进了 inputs.jsonl）：它们每个 seed 本来就不同。
     let mut all_inputs: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
     for b in &bundles {
         for (path, hash) in &b.inputs {
+            if path.starts_with("artifacts/") {
+                continue;
+            }
             all_inputs
                 .entry(path.clone())
                 .or_default()

@@ -485,3 +485,75 @@ fn mcp_tools_are_callable_and_policy_visible() {
     assert_eq!(effects[0].str_at("target"), Some("mcp:demo:echo"));
     assert_eq!(req.str_at("decision"), Some("ask"));
 }
+
+#[test]
+fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
+    // 回归（真模型跑出来的两个 bug）：
+    //   1. 产物被复制成 bundle/artifacts/artifacts/metrics.json，对照表按目录扫数值扫不到；
+    //   2. agent 读回自己刚写的产物，被记成「输入」，于是多 seed 表因为
+    //      「同一路径哈希不同」拒绝求均值——而产物理所当然每个 seed 都不同。
+    let ws = temp_ws("labpack");
+    fs::create_dir_all(ws.join("artifacts")).unwrap();
+    fs::write(ws.join("fixtures_input.txt"), "input-v1\n").unwrap();
+
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"先读输入","toolCalls":[{"name":"fs_read","args":{"path":"fixtures_input.txt"}}]},
+            {"content":"写产物","toolCalls":[{"name":"fs_write","args":{"path":"artifacts/metrics.json","content":"{\"accuracy\":0.9}"}}]},
+            {"content":"读回产物确认","toolCalls":[{"name":"fs_read","args":{"path":"artifacts/metrics.json"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = Command::new(bin())
+        .args(["lab", "pack", "--name", "s1", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("pack");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let bundle = ws.join("experiments").join("s1");
+    assert!(
+        bundle.join("artifacts").join("metrics.json").is_file(),
+        "产物应当平铺在 bundle/artifacts/ 下，不能多套一层 artifacts/"
+    );
+    assert!(
+        !bundle.join("artifacts").join("artifacts").exists(),
+        "不该出现 artifacts/artifacts 这种双层目录"
+    );
+
+    let inputs = fs::read_to_string(bundle.join("inputs.jsonl")).unwrap();
+    assert!(inputs.contains("fixtures_input.txt"), "真正的输入要记下来: {}", inputs);
+    assert!(
+        !inputs.contains("artifacts/metrics.json"),
+        "产物不能被记成输入（否则多 seed 表拒绝求均值）: {}",
+        inputs
+    );
+
+    // 校验必须真的数到 1 个产物
+    let out = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("产物 1 个校验通过"), "校验没数到产物: {}", text);
+}
