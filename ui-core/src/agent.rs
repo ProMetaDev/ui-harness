@@ -114,6 +114,8 @@ pub struct Agent {
     pub env_scrub: bool,
     /// ????(??)
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
+    /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动写进日志
+    pub env_observe: bool,
     /// 外部 MCP server（未配置时为 None）。
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
 
@@ -229,6 +231,10 @@ impl Agent {
             tool_chars: 2000,
             mode: crate::mode::Mode::default(),
             env_scrub: true,
+            // 观测式效果默认开：大仓库上可以 UI_OBSERVE=0 关掉（代价是审计看不到实际改动）
+            env_observe: std::env::var("UI_OBSERVE")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             plugins: None,
             mcp: None,
             tool_seq: 0,
@@ -270,6 +276,7 @@ impl Agent {
             mcp: self.mcp.clone(),
             env_scrub: self.env_scrub,
             plugins: self.plugins.clone(),
+            env_observe: self.env_observe,
         }
     }
 
@@ -812,6 +819,17 @@ impl Agent {
         // 输入血缘：读文件也要留指纹。否则「结果可复现」只做了一半——
         // 数据换了版本，产物哈希却还是对的。
         record_reads(&mut self.journal, &self.workspace, &name, &call.id, &effects)?;
+
+        // 观测式效果：这三个通道是"信任边界"——它们声明的是「要不要执行」，
+        // 内部到底读了什么、写了什么，声明里没有。执行前后各扫一次工作区，
+        // 把**实际改动**记进日志，审计才回答得了"到底改了什么"。
+        let trust_boundary = matches!(name.as_str(), "shell" | "plugin_call" | "mcp_call");
+        let before = if self.env_observe && trust_boundary {
+            Some(crate::observe::scan(&self.workspace))
+        } else {
+            None
+        };
+
         let result = (tool.run)(&call.args, &ctx);
         hooks.on_budget(
             self.budget.used(Dim::Tokens) as u64,
@@ -830,6 +848,23 @@ impl Agent {
                 ("meta", result.meta.clone()),
             ]),
         )?;
+
+        if let Some(before) = before {
+            let after = crate::observe::scan(&self.workspace);
+            let ch = crate::observe::diff(&before, &after);
+            // 没变就不记：日志里塞满「什么都没发生」会淹没真正的改动
+            if !ch.is_empty() || ch.truncated {
+                self.journal.append(
+                    "effect/observed",
+                    Json::obj(vec![
+                        ("callId", Json::from(call.id.as_str())),
+                        ("tool", Json::from(name.as_str())),
+                        ("summary", Json::from(ch.summary())),
+                        ("changes", ch.to_json()),
+                    ]),
+                )?;
+            }
+        }
         Ok((result, name))
     }
 
@@ -896,6 +931,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                     cancel: agent.cancel.clone(),
                     mcp: agent.mcp.clone(),
                     env_scrub: agent.env_scrub,
+                    env_observe: agent.env_observe,
                     plugins: agent.plugins.clone(),
                 };
                 let result = (tool.run)(&args, &ctx);
@@ -926,6 +962,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                         cancel: agent.cancel.clone(),
                         mcp: agent.mcp.clone(),
                         env_scrub: agent.env_scrub,
+                    env_observe: agent.env_observe,
                         plugins: agent.plugins.clone(),
                     },
                 );
@@ -954,6 +991,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                             cancel: agent.cancel.clone(),
                             mcp: agent.mcp.clone(),
                             env_scrub: agent.env_scrub,
+                    env_observe: agent.env_observe,
                             plugins: agent.plugins.clone(),
                         },
                     );

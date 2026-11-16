@@ -22,6 +22,7 @@ pub mod journal;
 pub mod mcp;
 pub mod mode;
 pub mod model;
+pub mod observe;
 pub mod plugin;
 pub mod policy;
 pub mod prompt;

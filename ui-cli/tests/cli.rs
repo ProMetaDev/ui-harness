@@ -487,6 +487,91 @@ fn mcp_tools_are_callable_and_policy_visible() {
 }
 
 #[test]
+fn shell_writes_are_observed_and_fine_grained_tools_are_not() {
+    // 观测式效果：shell 只声明 proc.exec，命令内部写了什么声明里没有，
+    // 所以执行前后各扫一次工作区，把**实际改动**记进日志。
+    // 反过来，fs_write 已经精确声明了路径，不该重复记一份 observed。
+    let ws = temp_ws("observe");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"shell 写文件","toolCalls":[{"name":"shell","args":{"command":"echo hi > by-shell.txt"}}]},
+            {"content":"精确写","toolCalls":[{"name":"fs_write","args":{"path":"by-tool.txt","content":"x"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let events = ui_core::journal::Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let observed: Vec<_> = events
+        .iter()
+        .filter(|e| e.str_at("kind") == Some("effect/observed"))
+        .collect();
+    assert_eq!(observed.len(), 1, "只该有一条观测记录（来自 shell）");
+    let ev = observed[0];
+    assert_eq!(ev.str_at("tool"), Some("shell"));
+    let added = ev
+        .get("changes")
+        .and_then(|c| c.arr_at("added").cloned())
+        .unwrap_or_default();
+    let names: Vec<&str> = added.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.contains(&"by-shell.txt"),
+        "观测要记下 shell 实际写的文件，实际: {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&"by-tool.txt"),
+        "fs_write 的写入由它自己的效果覆盖，不该出现在观测里"
+    );
+}
+
+#[test]
+fn observation_can_be_switched_off() {
+    let ws = temp_ws("observe-off");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"shell 写文件","toolCalls":[{"name":"shell","args":{"command":"echo hi > by-shell.txt"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .env("UI_OBSERVE", "0")
+        .args([
+            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+
+    let events = ui_core::journal::Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|e| e.str_at("kind") != Some("effect/observed")),
+        "UI_OBSERVE=0 时不该有观测记录"
+    );
+}
+
+#[test]
 fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
     // 回归（真模型跑出来的两个 bug）：
     //   1. 产物被复制成 bundle/artifacts/artifacts/metrics.json，对照表按目录扫数值扫不到；

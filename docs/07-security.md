@@ -67,3 +67,29 @@ bash tools/verify_concurrent.sh     # 3 个进程并发写同一份日志（链�
 这条来自一次外部评审的质疑（"顶层 proc.exec 获批，并不证明内部的
 secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确标注，
 而不是暗示"效果集覆盖一切"。
+
+## 观测式效果（对上面那条的部分补救）
+
+声明看不到内部行为，那就**观测**：`shell` / `plugin_call` / `mcp_call` 执行前后
+各扫一次工作区（只读元数据：大小 + mtime），把实际改动写成 `effect/observed`：
+
+```json
+{"kind":"effect/observed","callId":"c1","tool":"shell","summary":"+2 ~0 -0",
+ "changes":{"added":["out/a.txt","out/b.txt"],"changed":[],"removed":[],
+            "scanned":37,"truncated":false}}
+```
+
+`ui replay` 会显示成一行：`shell · 实际改动 +2 ~0 -0 · 例 out/a.txt`。
+
+**边界要说清楚**：
+
+| 说清楚 | 说明 |
+|---|---|
+| 只看工作区内 | 命令写到工作区外面，观测不到 |
+| 只看文件元数据 | 内容级别改动（同大小同 mtime）可能漏掉 |
+| 跳过重目录 | `.git` / `target` / `node_modules` / `.ui` 等不看 |
+| 超过 2 万文件截断 | 标记 `truncated:true`，不假装完整 |
+| 约 11ms / 2000 文件 | 大仓库可以 `UI_OBSERVE=0` 关掉，代价是审计看不到实际改动 |
+
+它补的是"**说了要执行，但没说做了什么**"这个缺口；它**不能**替代 OS 沙箱——
+观测是事后记账，沙箱是事前阻止。

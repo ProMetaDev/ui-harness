@@ -25,6 +25,8 @@ pub struct Ctx {
     pub env_scrub: bool,
     /// ????(??)
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
+    /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动记进日志
+    pub env_observe: bool,
 }
 
 impl Default for Ctx {
@@ -35,6 +37,7 @@ impl Default for Ctx {
             mcp: None,
             env_scrub: true,
             plugins: None,
+            env_observe: true,
         }
     }
 }

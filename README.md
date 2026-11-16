@@ -8,7 +8,7 @@ ui 是一个用 Rust 写的 agent harness：内核零第三方依赖，单二进
 主张“每一步都能解释”——把每一步工具调用写成追加式 JSONL 日志，再用 SHA-256 哈希链串起来，
 可校验、可回放、可崩溃对账。
 
-当前 v0.1.1：**38 项门禁、132 个测试**、13 个工具，支持 MCP 与本地插件。
+当前 v0.1.1：**39 项门禁、137 个测试**、13 个工具，支持 MCP 与本地插件。
 CI（GitHub Actions）在干净 checkout 上跑同一套：preflight → 构建 → 版本/密钥 → 测试 → 门禁 → 发布包。
 
 ## 30 秒上手
@@ -17,8 +17,8 @@ CI（GitHub Actions）在干净 checkout 上跑同一套：preflight → 构建 
 
 ```bash
 bash tools/bootstrap.sh   # 检查依赖：缺什么、怎么装，逐条说明
-bash tools/test.sh        # 同步构建副本并跑 132 个测试
-bash tools/debug.sh       # 38 项门禁：release 构建 + 端到端 + 7 个攻击场景
+bash tools/test.sh        # 同步构建副本并跑 137 个测试
+bash tools/debug.sh       # 39 项门禁：release 构建 + 端到端 + 7 个攻击场景
 ```
 
 构建产物在 `$UI_BIN`（由 `tools/env.sh` 定义，默认 `$HOME/ui-target/release/ui`）；
@@ -61,6 +61,9 @@ bash tools/debug.sh       # 38 项门禁：release 构建 + 端到端 + 7 个攻
 
 - **shell 是信任边界。** 批准一条命令，等于批准它内部的一切读写与联网；
   效果策略只决定“要不要执行这条命令”，不约束命令内部做什么。
+- **所以多了一道观测。** 每次 shell / 插件 / MCP 调用前后，内核对比工作区，
+  把**实际改动**记成 `effect/observed`（`ui replay` 可见）。这是事后记账，
+  不是事前阻止——防越权仍然只能靠 OS 沙箱，而我们还没有。
 - **插件声明不是强制约束。** `effects: []` 只表示它声称没有副作用，内核不会验证；
   声明之外的写入可以发生，也不会自动出现在日志里。
 - **MCP 同理。** 外部 server 在自己的进程里自主运行，工具效果记为
@@ -86,6 +89,6 @@ python3 tools/verify_journal.py JOURNAL  # 0 完好 / 2 链断或被改 / 3 尾�
   仍然**没有 CI**——改动靠手跑门禁。
 - Windows 已在真机验证（含 `serve` 与真模型），但**临时目录不可写**：
   `doctor` 会告警，相关工具退到工作区写临时文件。
-- 本文数字（38 项门禁、132 个测试、13 个工具、1.9 MB）来自本仓库自己的测量，
+- 本文数字（39 项门禁、137 个测试、13 个工具、1.9 MB）来自本仓库自己的测量，
   没有第三方独立评审。
 - 许可证：Apache-2.0。

@@ -106,6 +106,28 @@ pub fn event_row(e: &Json) -> String {
         ),
         "effect/unknown" => format!("{} · 状态未知", e.str_at("tool").unwrap_or("?")),
         "effect/rerun" => format!("{} · 重放", e.str_at("tool").unwrap_or("?")),
+        // 观测式效果：信任边界通道执行后「实际改了什么」。
+        // 这是审计里最值钱的一行——声明式效果只说了"要执行这条命令"。
+        "effect/observed" => {
+            let ch = e.get("changes").cloned().unwrap_or(Json::Null);
+            let added = ch.arr_at("added").map(|a| a.len()).unwrap_or(0);
+            let changed = ch.arr_at("changed").map(|a| a.len()).unwrap_or(0);
+            let removed = ch.arr_at("removed").map(|a| a.len()).unwrap_or(0);
+            let sample = ch
+                .arr_at("added")
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .map(|s| format!(" · 例 {}", s))
+                .unwrap_or_default();
+            format!(
+                "{} · 实际改动 +{} ~{} -{}{}",
+                e.str_at("tool").unwrap_or("?"),
+                added,
+                changed,
+                removed,
+                sample
+            )
+        }
         "journal/torn" => "崩溃留下的半条记录已截断".to_string(),
         "compact" => format!(
             "折叠 {} 条：{} → {} tok",
