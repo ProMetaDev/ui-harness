@@ -131,7 +131,31 @@ fn journal_path(ws: &Path) -> PathBuf {
     ws.join(".ui").join("journal.jsonl")
 }
 
-/// `--journal` 可覆盖日志路径：并行子代理要各写各的日志，否则会抢同一个文件。
+/// 会话目录：`<ws>/.ui/sessions/<名字>.jsonl`
+fn sessions_dir(ws: &Path) -> PathBuf {
+    ws.join(".ui").join("sessions")
+}
+
+/// 会话名只允许安全字符：会话名会变成文件名，不能让它跑出目录。
+fn valid_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn session_path(ws: &Path, name: &str) -> PathBuf {
+    // `default` 保持老路径，历史日志继续可读
+    if name == "default" {
+        journal_path(ws)
+    } else {
+        sessions_dir(ws).join(format!("{}.jsonl", name))
+    }
+}
+
+/// `--journal` 可覆盖日志路径（并行子代理各写各的）；
+/// `--session NAME` 选一个会话；都没给就是 default。
 fn resolve_journal(args: &Args, ws: &Path) -> PathBuf {
     match args.get("journal") {
         Some(p) => {
@@ -142,8 +166,100 @@ fn resolve_journal(args: &Args, ws: &Path) -> PathBuf {
                 ws.join(p)
             }
         }
-        None => journal_path(ws),
+        None => match args.get("session") {
+            Some(name) if valid_session_name(name) => session_path(ws, name),
+            // 名字非法时退回 default，而不是拼出一个奇怪的路径
+            _ => journal_path(ws),
+        },
     }
+}
+
+/// `ui sessions`：列出会话（名字、事件数、更新时间）；`--new NAME` 新建。
+fn cmd_sessions(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let dir = sessions_dir(&ws);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    if let Some(name) = args.get("new") {
+        if !valid_session_name(name) {
+            return Err("会话名只能用字母、数字、- 和 _（最长 64）".to_string());
+        }
+        let path = session_path(&ws, name);
+        if path.exists() {
+            return Err(format!("会话 `{}` 已经存在", name));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        println!("已新建会话 {}", name);
+        println!("用法：ui run --session {} ...", name);
+        return Ok(0);
+    }
+
+    let mut rows: Vec<(String, u64, u64, u64)> = Vec::new(); // name, events, bytes, mtime
+    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let p = e.path();
+        if p.extension().map(|x| x != "jsonl").unwrap_or(true) {
+            continue;
+        }
+        let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let events = std::fs::read_to_string(&p)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+            .unwrap_or(0);
+        let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        let mtime = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        rows.push((name, events, bytes, mtime));
+    }
+    // default 永远在列表里（老日志也用得上）
+    let dpath = journal_path(&ws);
+    if dpath.exists() {
+        let events = std::fs::read_to_string(&dpath)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+            .unwrap_or(0);
+        let bytes = std::fs::metadata(&dpath).map(|m| m.len()).unwrap_or(0);
+        let mtime = std::fs::metadata(&dpath)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        rows.push(("default".to_string(), events, bytes, mtime));
+    }
+    rows.sort_by(|a, b| b.3.cmp(&a.3));
+
+    if rows.is_empty() {
+        println!("还没有会话。新建一个：ui sessions --new work");
+        return Ok(0);
+    }
+    println!("{:<20} {:>8} {:>10}  最后活动", "会话", "事件", "字节");
+    for (name, events, bytes, mtime) in rows {
+        let age = if mtime == 0 {
+            "-".to_string()
+        } else {
+            let secs = (ui_core::time::now_ms().saturating_sub(mtime)) / 1000;
+            if secs < 60 {
+                format!("{} 秒前", secs)
+            } else if secs < 3600 {
+                format!("{} 分钟前", secs / 60)
+            } else if secs < 86400 {
+                format!("{} 小时前", secs / 3600)
+            } else {
+                format!("{} 天前", secs / 86400)
+            }
+        };
+        println!("{:<20} {:>8} {:>10}  {}", name, events, bytes, age);
+    }
+    Ok(0)
 }
 
 fn dispatch(argv: &[String]) -> Result<i32, String> {
@@ -165,6 +281,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("prompt") => cmd_prompt(&args),
         Some("providers") => cmd_providers(&args),
         Some("plugins") => cmd_plugins(&args),
+        Some("sessions") => cmd_sessions(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -566,7 +683,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let splash =
         !args.flag("no-splash") && std::env::var("UI_SPLASH").map(|v| v != "0").unwrap_or(true);
 
-    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"))?;
+    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"))?;
     Ok(0)
 }
 

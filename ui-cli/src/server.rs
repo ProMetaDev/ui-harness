@@ -37,6 +37,12 @@ struct Hub {
     splash: AtomicBool,
     /// 当前模式：页面切换后下一轮生效（只改严格度，不改日志格式）
     mode: Mutex<ui_core::Mode>,
+    /// 当前会话名
+    session: Mutex<String>,
+    /// 待切换的会话：worker 在下一轮开始前应用
+    pending_session: Mutex<Option<String>>,
+    /// 工作区（会话文件按它解析）
+    workspace: std::path::PathBuf,
     /// 实验包目录（默认 <workspace>/experiments）
     bundles: std::path::PathBuf,
     /// 访问令牌（空 = 不校验）
@@ -210,6 +216,7 @@ pub fn serve(
     bundles: Option<&str>,
     bench: Option<&str>,
     token: Option<&str>,
+    session_arg: Option<&str>,
 ) -> Result<(), String> {
     let mut hub0 = Hub::default();
     hub0.bench = bench.map(str::to_string);
@@ -223,6 +230,8 @@ pub fn serve(
         Some(p) => std::path::PathBuf::from(p),
         None => std::path::Path::new(ready.str_at("workspace").unwrap_or(".")).join("experiments"),
     };
+    hub0.workspace = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or("."));
+    *hub0.session.lock().unwrap() = session_arg.unwrap_or("default").to_string();
     let hub = Arc::new(hub0);
     let (task_tx, task_rx) = channel::<String>();
     hub.splash.store(splash, Ordering::SeqCst);
@@ -249,6 +258,25 @@ pub fn serve(
             while let Ok(text) = task_rx.recv() {
                 hub.busy.store(true, Ordering::SeqCst);
                 agent.mode = *hub.mode.lock().unwrap();
+                // 会话切换：换日志 + 重建历史（不能把上一条会话的上下文带过来）
+                if let Some(name) = hub.pending_session.lock().unwrap().take() {
+                    let path = session_file(&hub.workspace, &name);
+                    match agent.switch_journal(&path) {
+                        Ok(()) => {
+                            *hub.session.lock().unwrap() = name.clone();
+                            hub.push(Json::obj(vec![
+                                ("type", Json::from("session-switched")),
+                                ("session", Json::from(name.as_str())),
+                            ]));
+                        }
+                        Err(e) => {
+                            hub.push(Json::obj(vec![
+                                ("type", Json::from("error")),
+                                ("message", Json::from(format!("切换会话失败: {}", e))),
+                            ]));
+                        }
+                    }
+                }
                 let mut hooks = WebHooks {
                     hub: Arc::clone(&hub),
                     auto_yes,
@@ -559,6 +587,40 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             });
             json_response(&mut stream, "{\"ok\":true}")
         }
+        // 会话：列表 / 切换 / 新建
+        ("GET", "/api/sessions") => {
+            let current = hub.session.lock().unwrap().clone();
+            json_response(&mut stream, &session_list(&hub.workspace, &current).to_compact())
+        }
+        ("POST", "/api/session") => {
+            let value = json::parse(body.trim()).unwrap_or(Json::Null);
+            let name = value.str_at("name").unwrap_or("").to_string();
+            if !valid_session(&name) {
+                return json_response(&mut stream, "{\"ok\":false,\"reason\":\"非法会话名\"}");
+            }
+            if !session_file(&hub.workspace, &name).exists() && name != "default" {
+                return json_response(&mut stream, "{\"ok\":false,\"reason\":\"会话不存在\"}");
+            }
+            *hub.pending_session.lock().unwrap() = Some(name.clone());
+            json_response(&mut stream, "{\"ok\":true}")
+        }
+        ("POST", "/api/session/new") => {
+            let value = json::parse(body.trim()).unwrap_or(Json::Null);
+            let name = value.str_at("name").unwrap_or("").to_string();
+            if !valid_session(&name) {
+                return json_response(&mut stream, "{\"ok\":false,\"reason\":\"非法会话名\"}");
+            }
+            let path = session_file(&hub.workspace, &name);
+            if path.exists() {
+                return json_response(&mut stream, "{\"ok\":false,\"reason\":\"会话已存在\"}");
+            }
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+            *hub.pending_session.lock().unwrap() = Some(name);
+            json_response(&mut stream, "{\"ok\":true}")
+        }
         ("GET", "/api/state") => {
             let state = Json::obj(vec![
                 ("busy", Json::Bool(hub.busy.load(Ordering::SeqCst))),
@@ -670,6 +732,65 @@ fn make_token() -> String {
     let pid = std::process::id();
     let digest = ui_core::sha256::hex(format!("{}-{}", nanos, pid).as_bytes());
     digest[..12].to_string()
+}
+
+/// 会话名 → 日志文件。default 保持老路径（历史日志继续可读）。
+fn valid_session(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn session_file(ws: &std::path::Path, name: &str) -> std::path::PathBuf {
+    if name == "default" {
+        ws.join(".ui").join("journal.jsonl")
+    } else {
+        ws.join(".ui").join("sessions").join(format!("{}.jsonl", name))
+    }
+}
+
+/// 列出会话：名字、事件数、最后活动时间
+fn session_list(ws: &std::path::Path, current: &str) -> Json {
+    let mut rows: Vec<Json> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(ws.join(".ui").join("sessions")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                if let Some(stem) = p.file_stem() {
+                    names.push(stem.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    if ws.join(".ui").join("journal.jsonl").exists() {
+        names.push("default".to_string());
+    }
+    for name in names {
+        let p = session_file(ws, &name);
+        let events = std::fs::read_to_string(&p)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        let mtime = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        rows.push(Json::obj(vec![
+            ("name", Json::from(name.clone())),
+            ("events", Json::from(events)),
+            ("mtime", Json::from(mtime)),
+            ("current", Json::Bool(name == current)),
+        ]));
+    }
+    rows.sort_by(|a, b| b.u64_at("mtime").cmp(&a.u64_at("mtime")));
+    Json::obj(vec![
+        ("current", Json::from(current)),
+        ("sessions", Json::Arr(rows)),
+    ])
 }
 
 fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head = format!(

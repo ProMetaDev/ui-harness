@@ -360,6 +360,7 @@
                white-space:nowrap;overflow:hidden}
   .tree .t-row:hover{background:var(--panel);color:var(--text)}
   .tree .tcaret{width:10px;color:var(--faint);display:inline-block;text-align:center}
+  .side-item.sess.on{background:var(--accent-soft);color:var(--accent)}
   .sdot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
   .sdot.ok{background:var(--ok)}
   .sdot.bad{background:var(--bad)}
@@ -475,6 +476,9 @@
     <div class="side-sub" id="sideSub">Unleash your imagination</div>
 
     <div class="side-body" id="side-chat">
+      <div class="side-sec">会话</div>
+      <div id="sessionList"></div>
+      <div class="side-item" id="newSession">新建会话<span class="meta">＋</span></div>
       <div class="side-sec">模式</div>
       <div id="modeChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
       <div class="side-sec">上下文</div>
@@ -666,6 +670,76 @@
   const stateEl = document.getElementById('state');
   const tokEl = document.getElementById('tok');
   const callsEl = document.getElementById('calls');
+
+
+  // ── 会话：列表 / 切换 / 新建 ──
+  async function loadSessions() {
+    const box = document.getElementById('sessionList');
+    if (!box) return;
+    let data = { sessions: [], current: '' };
+    try {
+      data = await (await fetch('/api/sessions')).json();
+    } catch (e) {}
+    box.innerHTML = '';
+    for (const s of data.sessions || []) {
+      const row = document.createElement('div');
+      row.className = 'side-item sess' + (s.current ? ' on' : '');
+      row.title = s.events + ' 个事件';
+      row.innerHTML =
+        String(s.name).replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+        '<span class="meta">' + (s.events || 0) + '</span>';
+      row.onclick = () => switchSession(s.name);
+      box.appendChild(row);
+    }
+    if (!(data.sessions || []).length) {
+      box.innerHTML = '<div class="side-item" style="color:var(--faint)">（还没有会话）</div>';
+    }
+  }
+
+  async function switchSession(name) {
+    try {
+      const r = await (await fetch('/api/session', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })).json();
+      if (r.ok) loadSessions();
+    } catch (e) {}
+  }
+
+  const newSessionBtn = document.getElementById('newSession');
+  if (newSessionBtn) {
+    newSessionBtn.onclick = async () => {
+      const name = (window.prompt('新会话名字（字母/数字/-/_）') || '').trim();
+      if (!name) return;
+      try {
+        const r = await (await fetch('/api/session/new', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name }),
+        })).json();
+        if (!r.ok) {
+          alert(r.reason || '建不了');
+          return;
+        }
+        loadSessions();
+      } catch (e) {}
+    };
+  }
+
+  window.__uiSessionSwitched = (name) => {
+    loadSessions();
+    const log = document.getElementById('log');
+    if (log) log.innerHTML = '';
+    const empty = document.getElementById('empty');
+    if (empty) {
+      empty.style.display = '';
+      empty.classList.add('show');
+    }
+    const hint = document.getElementById('hint');
+    if (hint) hint.textContent = '当前会话：' + name;
+  };
+  loadSessions();
 
   function row(kind, who, ts) {
     const div = document.createElement('div');
@@ -883,6 +957,9 @@
       case 'approval': showApproval(ev); break;
       case 'approved': addSystem('审批结果：' + ev.verdict, ev.ts); break;
       case 'cancel-requested': addSystem('已请求停止…', ev.ts); break;
+      case 'session-switched':
+        if (window.__uiSessionSwitched) window.__uiSessionSwitched(ev.session);
+        break;
       case 'lab-run':
         if (window.__uiLab) window.__uiLab(ev);
         break;

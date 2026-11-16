@@ -165,6 +165,41 @@ fn record_reads(
 }
 
 impl Agent {
+    /// 切换到另一个会话：换日志文件，并按新日志重建对话历史。
+    ///
+    /// 会话在磁盘上就是「另一个 JSONL」，不需要新概念；但历史必须跟着换，
+    /// 否则会把上一条会话的上下文带进新会话（那是数据泄漏）。
+    pub fn switch_journal(&mut self, path: &Path) -> Result<(), AgentError> {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let journal = crate::journal::Journal::open(path)?;
+        let events = crate::journal::Journal::read(path)
+            .map(|(e, _)| e)
+            .unwrap_or_default();
+        let mut history: Vec<crate::prompt::Message> = Vec::new();
+        for e in &events {
+            match e.str_at("kind") {
+                Some("turn/start") => {
+                    if let Some(p) = e.str_at("prompt") {
+                        history.push(crate::prompt::Message::user(p));
+                    }
+                }
+                Some("model/response") => {
+                    if let Some(c) = e.str_at("content") {
+                        if !c.is_empty() {
+                            history.push(crate::prompt::Message::assistant(c));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.journal = journal;
+        self.history = history;
+        Ok(())
+    }
+
     pub fn new(
         journal: Journal,
         model: Box<dyn Model + Send>,
