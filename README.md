@@ -1,6 +1,6 @@
 ﻿# UI
 
-一个只认七条契约的 harness。零依赖 Rust，单二进制，约 4700 行（含测试）。
+一个只认七条契约的 harness。零依赖 Rust，单二进制，约 1 万行（含测试）。
 
 > 起因：对 DSH 的解包诊断见 [docs/01-diagnosis.md](docs/01-diagnosis.md)。
 > 305 个包、55 个 UI 插件、5 代会话格式之后，harness 缺的不是能力，是一根脊梁。
@@ -17,12 +17,12 @@
 
 ## 状态
 
-可运行、有测试（**117 个**，含真实 SIGKILL 后的恢复、父死子停、跨轮历史、隔离回写与漂移拒绝、
+可运行、有测试（**131 个**，含真实 SIGKILL 后的恢复、父死子停、跨轮历史、隔离回写与漂移拒绝、
 21 个对抗性安全用例）。**已接通真模型**（DeepSeek，经 `tools/deepseek.mjs` 子进程适配器），
-模型回复**流式**输出到网页端。
+模型回复**流式**输出到网页端；全屏 TUI 在 ≥100 列时带「当前步」右栏（快照分段 + 决策时间线）。
 
 ```bash
-bash tools/debug.sh       # 一条命令验证全部能力（14 项分层检查）
+bash tools/debug.sh       # 一条命令验证全部能力（23 项分层检查）
 bash tools/test.sh        # 只跑测试（失败会返回非零）
 bash tools/eval.sh --task demo/task.txt --workspace fixtures/eval-workspace \
   --mock fixtures/scenarios/fix-bug.json --runs 3   # 重复跑，出 tokens/步数/耗时中位数
@@ -140,15 +140,13 @@ docs/          设计文档
 
 ## 明确的缺口
 
-- **没有真实模型**：`model.rs` 里 `ExternalModel` 是给外部进程（未来的 TS 侧
-  或带 TLS 的 helper）用的缝，`ScriptedModel` 是回放。HTTP+TLS 适配器没写。
-- **没有流式**：模型响应是一次性的，所以 TUI 是整段刷新而非逐字。
-- **TUI 还没有颜色**：帧是纯文本，256 色配色方案（见 `docs/03-frontend.md`）尚未接。
-  右栏（快照分段 + 决策时间线）也还没做，当前只有单栏 + 底部状态行。
-- **没有委派**：契约 6 只有设计，没有代码。
-- **没有压缩**：历史未超预算，压测待做。
-- **无网络/进程沙箱**：策略层能表达 `net.fetch` / `proc.exec`，但执行侧只做了
-  文件效果；进程执行是真实执行的，靠 `ask` 拦。
+- **委派只做了最小实现**：并行组有独立进程 / 日志 / 工作区副本与 `apply` 回写，
+  但没有契约 6 设想的跨进程邮箱与父指针恢复。
+- **TUI 还不逐字流式**：`on_delta` 只有网页端用了；TUI 等整段回复。
+- **无网络/进程沙箱**：策略层能表达 `net.fetch` / `proc.exec`，但执行侧没有 OS 级
+  隔离；进程执行是真执行的，靠 `ask` 拦。
+- **MCP 只接了 tools**：没有 `inputSchema` 透传、resources/prompts、超时重连。
+- **日志无轮转/删除**：单写者假设靠 `flock` 与补读缓解，但文件会一直长。
 
 ## 许可
 

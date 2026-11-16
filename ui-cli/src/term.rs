@@ -6,7 +6,7 @@
 use crate::frame::{frame, ScreenState, Style};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Read, Write};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use ui_core::cancel::Cancel;
@@ -128,7 +128,14 @@ fn stty(args: &[&str]) -> io::Result<()> {
 }
 
 fn terminal_size() -> Option<(usize, usize)> {
-    let out = Command::new("stty").arg("size").output().ok()?;
+    // `Command::output()` 默认把 stdin 接到 /dev/null；而 `stty` 必须从
+    // **终端的 stdin** 取 ioctl。之前没继承 stdin，于是永远读不到尺寸，
+    // TUI 一直退化成 80×24（宽屏右栏因此永远不出现）。
+    let out = Command::new("stty")
+        .arg("size")
+        .stdin(Stdio::inherit())
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut it = text.split_whitespace();
     let rows: usize = it.next()?.parse().ok()?;

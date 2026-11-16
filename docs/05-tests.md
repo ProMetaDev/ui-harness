@@ -3,7 +3,7 @@
 一条命令验证全部能力：
 
 ```bash
-bash tools/debug.sh      # 14 项分层检查（内核 / 帧 / 终端 / 功能闭环）
+bash tools/debug.sh      # 23 项分层检查（内核 / 帧 / 终端 / 功能闭环）
 bash tools/test.sh       # 全部单元与集成测试（数量以输出为准）
 ```
 
@@ -25,6 +25,8 @@ bash tools/test.sh       # 全部单元与集成测试（数量以输出为准�
 | 模型适配 | `ui-core/src/model.rs::tests` | 围栏剥离、截断抢救、彻底失败要报错 |
 | 工具 | `ui-core/src/tools.rs::tests` | 读写编辑、歧义拒绝、shell 退出码 |
 | 帧渲染 | `ui-cli/src/frame.rs::tests` | 每行恰好 N 列、CJK 双宽、换行切分、样式归属、浮层完整 |
+| 右栏「当前步」 | `ui-cli/src/frame.rs::tests` | ≥100 列出现 / 99 列消失、快照分段、决策时间线、放不下时明说「更早 N 条」、账本贴底 |
+| 终端尺寸 | `tools/tui_smoke.sh` | 伪 tty 设成 120×30，右栏必须真的出现（抓 `stty size` 读不到 tty 的回退） |
 | 终端按键 | `ui-cli/src/term.rs::tests` | 方向键/翻页转义、UTF-8 多字节、按键队列 |
 | 行式会话 | `ui-cli/tests/chat.rs` | 两轮共享一份日志 |
 | 崩溃恢复 | `ui-cli/tests/crash_resume.rs` | 真 SIGKILL 后日志仍可验证、resume 对账 |
@@ -37,6 +39,7 @@ bash tools/test.sh       # 全部单元与集成测试（数量以输出为准�
 |---|---|
 | `skills 列表` | 目录发现 + 描述解析 |
 | `workflow --json` | 结果单行 JSON、进度走 stderr |
+| `pty 全屏冒烟` | 备用屏进出、输入发送、审批键、**120 列右栏** |
 | `web 端（HTTP + SSE）` | 页面可取、`/api/state`、发消息、SSE 收到 user/assistant/tool/turn |
 | `gate 未批准则停` | 闸门返回 1 且不产生 turn |
 | `隔离 + apply + 漂移` | 副本不污染父工作区、apply 回写、**再 apply 判漂移** |

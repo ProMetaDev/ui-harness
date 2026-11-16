@@ -429,6 +429,43 @@ fn cmd_preview(args: &Args) -> Result<i32, String> {
         frame::Line::user("跑吧。"),
         frame::Line::assistant("需要执行命令，先要你批准。"),
     ];
+    state.rail.step = 3;
+    state.rail.snapshot = Some(frame::RailSnapshot {
+        id: "8f2a1c7d9e0b4a12".into(),
+        tokens: 1719,
+        bytes: 6840,
+        sections: vec![
+            frame::RailSection {
+                id: "core".into(),
+                owner: "kernel".into(),
+                tokens: 520,
+            },
+            frame::RailSection {
+                id: "env".into(),
+                owner: "kernel".into(),
+                tokens: 96,
+            },
+            frame::RailSection {
+                id: "tools".into(),
+                owner: "tools".into(),
+                tokens: 340,
+            },
+            frame::RailSection {
+                id: "history".into(),
+                owner: "session".into(),
+                tokens: 763,
+            },
+        ],
+    });
+    state
+        .rail
+        .push_decision("c1", "fs_read", "allow", "读取 demo/greet.js");
+    state
+        .rail
+        .push_decision("c2", "fs_edit", "allow", "编辑 demo/greet.js");
+    state
+        .rail
+        .push_decision("c3", "shell", "ask", "执行 cargo test");
     state.approval = if args.flag("no-approval") {
         None
     } else {
@@ -609,6 +646,7 @@ fn handle_command(agent: &mut Agent, hooks: &mut TuiHooks, text: &str) {
 }
 
 fn run_one(agent: &mut Agent, hooks: &mut TuiHooks, text: &str) {
+    hooks.state.rail.begin_turn();
     hooks.state.lines.push(frame::Line::user(text.to_string()));
     hooks.state.scroll = 0;
     hooks.redraw();
@@ -658,6 +696,19 @@ impl Hooks for TuiHooks {
         self.redraw();
     }
 
+    fn on_snapshot(&mut self, snapshot: &Snapshot) {
+        self.state.rail.step += 1;
+        self.state.rail.snapshot = Some(frame::RailSnapshot::from_snapshot(snapshot));
+        self.redraw();
+    }
+
+    fn on_decision(&mut self, call_id: &str, tool: &str, decision: Decision, reason: &str) {
+        self.state
+            .rail
+            .push_decision(call_id, tool, decision.name(), reason);
+        self.redraw();
+    }
+
     fn on_budget(&mut self, tokens: u64, tool_calls: u64) {
         self.state.tokens = tokens;
         self.state.calls = tool_calls;
@@ -690,6 +741,7 @@ impl Hooks for TuiHooks {
             self.state
                 .lines
                 .push(frame::Line::info(format!("[auto] 已批准 {}", req.tool)));
+            self.state.rail.resolve(&req.call_id, "allow");
             self.redraw();
             return Decision::Allow;
         }
@@ -703,12 +755,14 @@ impl Hooks for TuiHooks {
             match self.tui.wait_key() {
                 Ok(term::Key::Char('y')) | Ok(term::Key::Char('Y')) => {
                     self.state.approval = None;
+                    self.state.rail.resolve(&req.call_id, "allow");
                     self.redraw();
                     return Decision::Allow;
                 }
                 Ok(term::Key::Char('a')) | Ok(term::Key::Char('A')) => {
                     self.allow_all = true;
                     self.state.approval = None;
+                    self.state.rail.resolve(&req.call_id, "allow");
                     self.redraw();
                     return Decision::Allow;
                 }
@@ -717,11 +771,15 @@ impl Hooks for TuiHooks {
                 | Ok(term::Key::Esc)
                 | Ok(term::Key::CtrlC) => {
                     self.state.approval = None;
+                    self.state.rail.resolve(&req.call_id, "deny");
                     self.redraw();
                     return Decision::Deny;
                 }
                 Ok(_) => {}
-                Err(_) => return Decision::Deny,
+                Err(_) => {
+                    self.state.rail.resolve(&req.call_id, "deny");
+                    return Decision::Deny;
+                }
             }
         }
     }
@@ -769,7 +827,8 @@ fn compact_policy(args: &Args) -> CompactPolicy {
     p
 }
 
-fn limits_from(args: &Args) -> Limits {    let mut limits = Limits::default();
+fn limits_from(args: &Args) -> Limits {
+    let mut limits = Limits::default();
     if let Some(v) = args.get("max-tokens").and_then(|v| v.parse().ok()) {
         limits.tokens = v;
     }

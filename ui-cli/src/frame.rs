@@ -193,6 +193,96 @@ pub struct Approval {
     pub args: String,
 }
 
+/// 右栏「当前步」的一段快照：谁、多少 tok、多少字节。
+#[derive(Debug, Clone)]
+pub struct RailSection {
+    pub id: String,
+    pub owner: String,
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RailSnapshot {
+    pub id: String,
+    pub tokens: u64,
+    pub bytes: usize,
+    pub sections: Vec<RailSection>,
+}
+
+impl RailSnapshot {
+    pub fn from_snapshot(snapshot: &ui_core::prompt::Snapshot) -> RailSnapshot {
+        RailSnapshot {
+            id: snapshot.id.clone(),
+            tokens: snapshot.tokens,
+            bytes: snapshot.bytes,
+            sections: snapshot
+                .sections
+                .iter()
+                .map(|s| RailSection {
+                    id: s.id.to_string(),
+                    owner: s.owner.to_string(),
+                    tokens: s.tokens,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// 一次工具调用的策略结论。`call_id` 用来在用户批准/拒绝后原地改结论。
+#[derive(Debug, Clone)]
+pub struct RailDecision {
+    pub call_id: String,
+    pub tool: String,
+    pub decision: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RightRail {
+    /// 本轮第几步（每收到一份快照 +1）。
+    pub step: usize,
+    pub snapshot: Option<RailSnapshot>,
+    pub decisions: Vec<RailDecision>,
+}
+
+impl RightRail {
+    /// 新一轮开始：右栏只讲「当前这一轮」，不把上一轮的决策混进来。
+    pub fn begin_turn(&mut self) {
+        self.step = 0;
+        self.snapshot = None;
+        self.decisions.clear();
+    }
+
+    pub fn push_decision(
+        &mut self,
+        call_id: &str,
+        tool: &str,
+        decision: &str,
+        reason: &str,
+    ) {
+        self.decisions.push(RailDecision {
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            decision: decision.to_string(),
+            reason: reason.to_string(),
+        });
+        // 终端一屏放不下太多；保留最近的，避免无限涨。
+        if self.decisions.len() > 24 {
+            self.decisions.remove(0);
+        }
+    }
+
+    /// 审批完成后把 `ask` 改成用户的实际结论。
+    pub fn resolve(&mut self, call_id: &str, decision: &str) {
+        for d in self.decisions.iter_mut().rev() {
+            if d.call_id == call_id {
+                d.decision = decision.to_string();
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScreenState {
     pub workspace: String,
@@ -208,6 +298,8 @@ pub struct ScreenState {
     pub approval: Option<Approval>,
     pub input: String,
     pub hint: String,
+    /// 右栏：宽终端（≥100 列）才渲染。
+    pub rail: RightRail,
 }
 
 impl Default for ScreenState {
@@ -225,6 +317,7 @@ impl Default for ScreenState {
             approval: None,
             input: String::new(),
             hint: "/status · /policy · /quit".into(),
+            rail: RightRail::default(),
         }
     }
 }
@@ -411,9 +504,21 @@ fn render_bar(used: u64, limit: u64, width: usize) -> String {
 }
 
 /// 生成整屏。每一行都恰好 `width` 显示列。
+const RAIL_WIDTH: usize = 34;
+const RAIL_MIN_TOTAL: usize = 100;
+
 pub fn frame(state: &ScreenState, width: usize, height: usize) -> Vec<Row> {
     let width = width.max(20);
     let height = height.max(6);
+
+    // 「当前步」右栏：只在宽终端出现。窄屏宁可不要，也不能挤压正文。
+    let show_rail = width >= RAIL_MIN_TOTAL;
+    let rail_w = if show_rail { RAIL_WIDTH } else { 0 };
+    let main_w = if show_rail {
+        width.saturating_sub(rail_w + 1)
+    } else {
+        width
+    };
 
     let header = header_rows(state, width);
 
@@ -434,7 +539,7 @@ pub fn frame(state: &ScreenState, width: usize, height: usize) -> Vec<Row> {
     let body_rows = height.saturating_sub(header.len() + footer.len()).max(1);
 
     // 正文：每条逻辑行按「8 列标签 + 正文」包成显示行；换说话人时留一个空行。
-    let body_w = width.saturating_sub(8).max(8);
+    let body_w = main_w.saturating_sub(8).max(8);
     let mut visual: Vec<Row> = Vec::new();
     let mut prev: Option<Kind> = None;
     for line in &state.lines {
@@ -479,7 +584,17 @@ pub fn frame(state: &ScreenState, width: usize, height: usize) -> Vec<Row> {
 
     let mut rows: Vec<Row> = Vec::new();
     rows.extend(header);
-    rows.extend(body.into_iter().map(|r| r.pad_to(width)));
+    if show_rail {
+        let rail = rail_rows(&state.rail, state, rail_w, body_rows);
+        for (i, row) in body.iter().enumerate() {
+            let mut spans = row.pad_to(main_w).spans;
+            spans.push(Span::new("│", Style::Dim));
+            spans.extend(rail[i].spans.clone());
+            rows.push(Row::of(spans));
+        }
+    } else {
+        rows.extend(body.into_iter().map(|r| r.pad_to(width)));
+    }
     rows.extend(footer);
 
     // 审批浮层：不透明，盖住正文中部
@@ -505,6 +620,133 @@ pub fn frame(state: &ScreenState, width: usize, height: usize) -> Vec<Row> {
         rows.push(Row::plain(" ".repeat(width)));
     }
     rows
+}
+
+fn rail_rule(width: usize) -> Row {
+    Row::of(vec![Span::new("─".repeat(width), Style::Dim)])
+}
+
+fn decision_row(d: &RailDecision, width: usize) -> Row {
+    let style = match d.decision.as_str() {
+        "deny" => Style::Err,
+        "ask" => Style::Warn,
+        _ => Style::Dim,
+    };
+    let mut row = Row::of(vec![
+        Span::new(format!(" {:<5} ", d.decision), style),
+        Span::new(format!("{:<9}", truncate_cols(&d.tool, 9)), Style::Normal),
+    ]);
+    let room = width.saturating_sub(row.width() + 1);
+    if room > 3 && !d.reason.is_empty() {
+        let reason = d.reason.replace('\n', " ");
+        row.spans.push(Span::new(
+            truncate_cols(reason.trim(), room),
+            Style::Dim,
+        ));
+    }
+    row
+}
+
+/// 右栏「当前步」：快照分段（契约 1）+ 决策时间线（契约 3）+ 账本。
+///
+/// 返回恰好 `height` 行、每行 `width` 列。放不下时优先保住结论与账本，
+/// 决策从最旧的开始丢，并明确写「更早 N 条」——不假装全都看得见。
+fn rail_rows(rail: &RightRail, state: &ScreenState, width: usize, height: usize) -> Vec<Row> {
+    let tok = rail
+        .snapshot
+        .as_ref()
+        .map(|s| s.tokens)
+        .unwrap_or(state.tokens);
+    let title = if rail.step == 0 {
+        " 当前步 · 等待第一步".to_string()
+    } else {
+        format!(" 当前步 {} · {} tok", rail.step, tok)
+    };
+
+    let mut top: Vec<Row> = vec![
+        Row::plain(""),
+        Row::of(vec![Span::new(title, Style::Accent)]),
+        rail_rule(width),
+    ];
+    if let Some(s) = &rail.snapshot {
+        top.push(Row::of(vec![Span::new(
+            format!(" 快照 {} · {} B", truncate_cols(&s.id, 12), s.bytes),
+            Style::Dim,
+        )]));
+        for section in s.sections.iter().take(6) {
+            top.push(Row::of(vec![
+                Span::new(
+                    format!(" {:<8}", truncate_cols(&section.id, 8)),
+                    Style::Normal,
+                ),
+                Span::new(
+                    format!("{:<7}", truncate_cols(&section.owner, 7)),
+                    Style::Dim,
+                ),
+                Span::new(format!("{:>5} tok", section.tokens), Style::Dim),
+            ]));
+        }
+    } else {
+        top.push(Row::of(vec![Span::new(
+            " 还没有快照：发一条消息后出现",
+            Style::Dim,
+        )]));
+    }
+    top.push(rail_rule(width));
+    top.push(Row::of(vec![Span::new(" 决策", Style::Dim)]));
+
+    let bottom: Vec<Row> = vec![
+        rail_rule(width),
+        Row::of(vec![Span::new(" 账本", Style::Dim)]),
+        Row::of(vec![Span::new(
+            format!(" tok {}/{}", state.tokens, state.token_limit),
+            Style::Dim,
+        )]),
+        Row::of(vec![Span::new(
+            format!(" calls {}/{}", state.calls, state.call_limit),
+            Style::Dim,
+        )]),
+        Row::of(vec![Span::new(
+            format!(" {} · ${:.3}", human_duration(state.wall_ms), 0.0),
+            Style::Dim,
+        )]),
+    ];
+
+    let room = height.saturating_sub(top.len() + bottom.len());
+    let mut out = top;
+    if rail.decisions.is_empty() {
+        if room > 0 {
+            out.push(Row::of(vec![Span::new(
+                " 本轮还没有工具调用",
+                Style::Dim,
+            )]));
+        }
+    } else if room > 0 {
+        let mut shown = rail.decisions.len().min(room);
+        let hidden = rail.decisions.len() - shown;
+        if hidden > 0 && room >= 2 {
+            out.push(Row::of(vec![Span::new(
+                format!(" … 更早 {} 条", hidden),
+                Style::Dim,
+            )]));
+            shown = room - 1;
+        }
+        for d in &rail.decisions[rail.decisions.len() - shown..] {
+            out.push(decision_row(d, width));
+        }
+    }
+    // 账本贴底：位置稳定，长决策列表不会把它挤走。
+    let bottom_at = height.saturating_sub(bottom.len());
+    while out.len() < bottom_at {
+        out.push(Row::plain(""));
+    }
+    out.extend(bottom);
+
+    out.truncate(height);
+    while out.len() < height {
+        out.push(Row::plain(""));
+    }
+    out.iter().map(|row| row.pad_to(width)).collect()
 }
 
 /// 纯文本版本：测试、`ui preview`、非 tty 输出都用它。
@@ -660,6 +902,79 @@ mod tests {
         for row in &rows {
             assert_eq!(row.width(), 80);
         }
+    }
+
+    fn demo_with_rail() -> ScreenState {
+        let mut s = demo();
+        s.rail.step = 2;
+        s.rail.snapshot = Some(RailSnapshot {
+            id: "8f2a1c7d9e0b4a12".into(),
+            tokens: 1719,
+            bytes: 6840,
+            sections: vec![
+                RailSection {
+                    id: "core".into(),
+                    owner: "kernel".into(),
+                    tokens: 520,
+                },
+                RailSection {
+                    id: "history".into(),
+                    owner: "session".into(),
+                    tokens: 980,
+                },
+            ],
+        });
+        s.rail.push_decision("c1", "fs_read", "allow", "读取 demo/greet.js");
+        s.rail.push_decision("c2", "fs_edit", "allow", "编辑 demo/greet.js");
+        s.rail.push_decision("c3", "shell", "ask", "执行 cargo test");
+        s
+    }
+
+    #[test]
+    fn right_rail_appears_only_on_wide_terminals() {
+        let wide: String = frame_text(&demo_with_rail(), 120, 30).join("\n");
+        assert!(wide.contains("当前步 2"), "{}", wide);
+        assert!(wide.contains("快照 8f2a1c7d9"), "{}", wide);
+        assert!(wide.contains("history"), "{}", wide);
+        assert!(wide.contains("fs_edit"), "{}", wide);
+        assert!(wide.contains("cargo test"), "{}", wide);
+
+        let narrow: String = frame_text(&demo_with_rail(), 99, 30).join("\n");
+        assert!(!narrow.contains("当前步"), "99 列不应出现右栏:\n{}", narrow);
+    }
+
+    #[test]
+    fn right_rail_keeps_every_row_exactly_wide() {
+        for (w, h) in [(100, 24), (120, 30), (140, 18)] {
+            let rows = frame_text(&demo_with_rail(), w, h);
+            assert_eq!(rows.len(), h);
+            for (i, row) in rows.iter().enumerate() {
+                assert_eq!(
+                    disp_width(row),
+                    w,
+                    "row {} at {}x{}: {:?}",
+                    i,
+                    w,
+                    h,
+                    row
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn right_rail_reports_hidden_older_decisions_instead_of_pretending() {
+        let mut s = demo_with_rail();
+        for i in 0..39 {
+            s.rail.push_decision(&format!("x{}", i), "fs_read", "allow", "读取文件");
+        }
+        s.rail
+            .push_decision("x39", "fs_read", "allow", "读取最后一个文件");
+        assert_eq!(s.rail.decisions.len(), 24, "内存里只保留最近 24 条");
+        let text = frame_text(&s, 120, 24).join("\n");
+        assert!(text.contains("更早"), "决策放不下时要明说:\n{}", text);
+        // 最新的决策必须在，最旧的可以不在
+        assert!(text.contains("读取最后一个文件"));
     }
 
     #[test]

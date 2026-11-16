@@ -34,3 +34,21 @@ echo "exit=$?"
 echo "approval drawn: $(grep -c '需要批准' /tmp/tui2.out || true)"
 echo "typed line echoed: $(grep -c '跑一下' /tmp/tui2.out || true)"
 sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' /tmp/tui2.out | tr -d '\r' | tail -6
+
+echo
+echo "=== 3. 宽终端右栏（120x30）：当前步 / 快照 / 决策 / 账本 ==="
+rm -rf /tmp/ui-tui-wide
+cp -a demo /tmp/ui-tui-wide
+rm -rf /tmp/ui-tui-wide/.ui /tmp/ui-tui-wide/.loom
+printf 'fix the empty-name bug\r\x1b' | timeout 40 script -qec \
+  "stty rows 30 cols 120; $BIN tui --mock $PWD/fixtures/scenarios/fix-bug.json --workspace /tmp/ui-tui-wide --yes" \
+  /dev/null > /tmp/tui3.out 2>&1
+echo "exit=$?"
+RAIL=$(grep -c '当前步' /tmp/tui3.out || true)
+LEDGER=$(grep -c '账本' /tmp/tui3.out || true)
+# `stty size` 读不到 tty 时 TUI 会退化 80×24，右栏（≥100 列）就不会出现——这条能抓住。
+echo "rail frames: $RAIL · ledger: $LEDGER"
+if [ "$RAIL" -lt 1 ] || [ "$LEDGER" -lt 1 ]; then
+  echo "FAIL: 120 列下没有出现右栏（检查 terminal_size 是否真的读到了 tty 尺寸）"
+  exit 1
+fi

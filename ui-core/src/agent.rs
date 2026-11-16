@@ -62,6 +62,10 @@ pub trait Hooks {
     /// 模型正在逐字输出（用于展示的增量，不是最终结果；最终以 on_assistant 为准）。
     fn on_delta(&mut self, _text: &str) {}
     fn on_assistant(&mut self, _text: &str) {}
+    /// 一步的快照已生成：右栏据此显示分段与计价（契约 1）。
+    fn on_snapshot(&mut self, _snapshot: &Snapshot) {}
+    /// 一次工具调用的策略结论（allow/ask/deny + 依据）（契约 3）。
+    fn on_decision(&mut self, _call_id: &str, _tool: &str, _decision: Decision, _reason: &str) {}
     fn on_tool(&mut self, _name: &str, _args: &Json, _result: &ToolResult) {}
     /// 账本变化：前端据此实时更新预算条，而不是等一轮结束才知道花了多少。
     fn on_budget(&mut self, _tokens: u64, _tool_calls: u64) {}
@@ -106,9 +110,9 @@ pub struct Agent {
     pub tool_chars: usize,
     /// 运行模式：只调决策严格度，不改日志格式
     pub mode: crate::mode::Mode,
-    /// ?? MCP ??(??)
+    /// 外部 MCP server（未配置时为 None）。
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
-    
+
     tool_seq: u64,
     turn: u64,
 }
@@ -354,6 +358,7 @@ impl Agent {
                 return Err(AgentError::Budget(e));
             }
             self.journal.append("prompt/snapshot", snapshot.to_json())?;
+            hooks.on_snapshot(&snapshot);
             hooks.on_budget(
                 self.budget.used(Dim::Tokens) as u64,
                 self.budget.used(Dim::ToolCalls) as u64,
@@ -650,6 +655,7 @@ impl Agent {
                 ("reason", Json::from(verdict.reason.as_str())),
             ]),
         )?;
+        hooks.on_decision(&call.id, &name, verdict.decision, &verdict.reason);
 
         let mut allowed = verdict.decision != Decision::Deny;
         if verdict.decision == Decision::Deny {
