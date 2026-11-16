@@ -642,6 +642,66 @@ pub fn plan_tool() -> Tool {
 pub fn registry() -> Vec<Tool> {
     vec![
         Tool {
+            name: "grep",
+            summary: "正则搜索（POSIX ERE）：返回 路径:行号:内容，可用 include 限定文件",
+            idempotent: true,
+            params: &[
+                ("pattern", "string", true),
+                ("path", "string", false),
+                ("include", "string (glob)", false),
+                ("ignoreCase", "bool", false),
+                ("maxHits", "number", false),
+            ],
+            effects: |args, ctx| {
+                let p = args.str_at("path").unwrap_or(".");
+                vec![Effect::new("fs.read", ctx.resolve(p).to_string_lossy().to_string())]
+            },
+            run: |args, ctx| run_grep(args, ctx),
+        },
+        Tool {
+            name: "patch",
+            summary: "按 unified diff 修改文件（@@ 块，带上下文）；比整文件覆盖更安全",
+            idempotent: false,
+            params: &[("path", "string", true), ("diff", "string (unified)", true)],
+            effects: |args, ctx| {
+                let p = args.str_at("path").unwrap_or("");
+                vec![Effect::new("fs.write", ctx.resolve(p).to_string_lossy().to_string())]
+            },
+            run: |args, ctx| run_patch(args, ctx),
+        },
+        Tool {
+            name: "todo",
+            summary: "任务清单：add / done / list，存在 .ui/todos.json",
+            idempotent: false,
+            params: &[("action", "add|done|list", true), ("text", "string", false), ("index", "number", false)],
+            effects: |_args, _ctx| Vec::new(),
+            run: |args, ctx| run_todo(args, ctx),
+        },
+        Tool {
+            name: "tree",
+            summary: "列目录树（跳过 .git/target/node_modules/.ui），可限深度",
+            idempotent: true,
+            params: &[("path", "string", false), ("depth", "number", false), ("maxEntries", "number", false)],
+            effects: |args, ctx| {
+                let p = args.str_at("path").unwrap_or(".");
+                vec![Effect::new("fs.read", ctx.resolve(p).to_string_lossy().to_string())]
+            },
+            run: |args, ctx| run_tree(args, ctx),
+        },
+        Tool {
+            name: "fs_mv",
+            summary: "移动/重命名文件或目录（源和目标都必须在工作区内）",
+            idempotent: false,
+            params: &[("from", "string", true), ("to", "string", true)],
+            effects: |args, ctx| {
+                vec![
+                    Effect::new("fs.write", ctx.resolve(args.str_at("from").unwrap_or("")).to_string_lossy().to_string()),
+                    Effect::new("fs.write", ctx.resolve(args.str_at("to").unwrap_or("")).to_string_lossy().to_string()),
+                ]
+            },
+            run: |args, ctx| run_mv(args, ctx),
+        },
+        Tool {
             name: "mcp_call",
             summary: "调用外部 MCP 工具：{server, tool, args}（工具名见提示里的 MCP 清单）",
             idempotent: false,
@@ -845,5 +905,270 @@ mod tests {
         );
         assert!(!r.ok);
         assert_eq!(r.meta.num_at("status"), Some(3.0));
+    }
+}
+// ── 新增工具的实现 ──────────────────────────────────────────────
+
+fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
+    let pattern = args.str_at("pattern").unwrap_or("");
+    if pattern.is_empty() {
+        return ToolResult::err("grep 需要 pattern");
+    }
+    let path = args.str_at("path").unwrap_or(".");
+    let include = args.str_at("include");
+    let max_hits = args.u64_at("maxHits").unwrap_or(200).min(1000);
+
+    // 用系统 GNU grep：支持 POSIX ERE 正则，零依赖。找不到就退化成字面匹配。
+    let mut cmd = std::process::Command::new("grep");
+    cmd.arg("-rEn").arg("--binary-files=without-match");
+    if args.bool_at("ignoreCase") == Some(true) {
+        cmd.arg("-i");
+    }
+    if let Some(glob) = include {
+        cmd.arg(format!("--include={}", glob));
+    }
+    cmd.arg("--").arg(pattern).arg(path);
+    cmd.current_dir(&ctx.workspace);
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+
+    match cmd.output() {
+        Ok(out) if out.status.code() == Some(0) || out.status.code() == Some(1) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut lines: Vec<&str> = text.lines().collect();
+            let total = lines.len();
+            if total == 0 {
+                return ToolResult::ok("（无匹配）");
+            }
+            let truncated = total > max_hits as usize;
+            if truncated {
+                lines.truncate(max_hits as usize);
+            }
+            let mut body = lines.join("\n");
+            if truncated {
+                body.push_str(&format!("\n…（共 {} 行，已截断到 {}）", total, max_hits));
+            }
+            ToolResult::ok(body)
+        }
+        Ok(out) => ToolResult::err(format!(
+            "grep 失败（退出码 {:?}）：{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => ToolResult::err(format!("没有可用的 grep：{}（可以用 fs_search 做字面搜索）", e)),
+    }
+}
+
+/// 应用一个 unified diff：按 @@ 块逐段定位「旧行序列」，替换成「新行序列」。
+fn run_patch(args: &Json, ctx: &Ctx) -> ToolResult {
+    let rel = args.str_at("path").unwrap_or("");
+    let diff = args.str_at("diff").unwrap_or("");
+    if rel.is_empty() || diff.is_empty() {
+        return ToolResult::err("patch 需要 path 与 diff");
+    }
+    let path = ctx.resolve(rel);
+    let original = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return ToolResult::err(format!("读不到 {}: {}", rel, e)),
+    };
+    match apply_unified(&original, diff) {
+        Ok(updated) => {
+            if let Err(e) = std::fs::write(&path, &updated) {
+                return ToolResult::err(format!("写回失败: {}", e));
+            }
+            ToolResult::ok(format!(
+                "已应用 diff：{} → {} 字节",
+                original.len(),
+                updated.len()
+            ))
+        }
+        Err(e) => ToolResult::err(e),
+    }
+}
+
+pub fn apply_unified(original: &str, diff: &str) -> Result<String, String> {
+    let mut out: Vec<String> = original.lines().map(str::to_string).collect();
+    let diff_lines: Vec<&str> = diff.lines().collect();
+    let mut i = 0usize;
+    let mut hunks = 0usize;
+
+    while i < diff_lines.len() {
+        let line = diff_lines[i];
+        if !line.starts_with("@@") {
+            i += 1;
+            continue;
+        }
+        hunks += 1;
+        i += 1;
+        // 收集这一块的上下文/删除/新增
+        let mut old_seq: Vec<String> = Vec::new();
+        let mut new_seq: Vec<String> = Vec::new();
+        while i < diff_lines.len() && !diff_lines[i].starts_with("@@") {
+            let l = diff_lines[i];
+            if l.starts_with("---") || l.starts_with("+++") {
+                i += 1;
+                continue;
+            }
+            let (tag, rest) = match l.chars().next() {
+                Some(c) => (c, &l[1..]),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+            match tag {
+                ' ' => {
+                    old_seq.push(rest.to_string());
+                    new_seq.push(rest.to_string());
+                }
+                '-' => old_seq.push(rest.to_string()),
+                '+' => new_seq.push(rest.to_string()),
+                '\\' => {} // "\ No newline at end of file"
+                _ => {
+                    // 块结束（别的内容）
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        // 在原文里找 old_seq（从当前位置起）
+        let found = if old_seq.is_empty() {
+            None
+        } else {
+            (0..out.len()).find(|&start| {
+                start + old_seq.len() <= out.len()
+                    && out[start..start + old_seq.len()]
+                        .iter()
+                        .zip(&old_seq)
+                        .all(|(a, b)| a == b)
+            })
+        };
+        match found {
+            Some(start) => {
+                let end = start + old_seq.len();
+                out.splice(start..end, new_seq.clone());
+            }
+            None => {
+                return Err(format!(
+                    "第 {} 个 @@ 块在原文里找不到对应内容（上下文不匹配）",
+                    hunks
+                ))
+            }
+        }
+    }
+    if hunks == 0 {
+        return Err("diff 里没有 @@ 块".to_string());
+    }
+    let mut text = out.join("\n");
+    if original.ends_with('\n') {
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+fn run_todo(args: &Json, ctx: &Ctx) -> ToolResult {
+    let path = ctx.workspace.join(".ui").join("todos.json");
+    let mut items: Vec<Json> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| crate::json::parse(&t).ok())
+        .and_then(|v| v.arr_at("todos").cloned())
+        .unwrap_or_default();
+
+    match args.str_at("action").unwrap_or("list") {
+        "add" => {
+            let text = args.str_at("text").unwrap_or("");
+            if text.is_empty() {
+                return ToolResult::err("add 需要 text");
+            }
+            items.push(Json::obj(vec![
+                ("text", Json::from(text)),
+                ("done", Json::Bool(false)),
+            ]));
+        }
+        "done" => {
+            let idx = args.u64_at("index").unwrap_or(0) as usize;
+            if idx == 0 || idx > items.len() {
+                return ToolResult::err(format!("index 超出范围（1..{}）", items.len()));
+            }
+            items[idx - 1].set("done", Json::Bool(true));
+        }
+        "list" => {}
+        other => return ToolResult::err(format!("不认识的动作 {}", other)),
+    }
+
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let doc = Json::obj(vec![("todos", Json::Arr(items.clone()))]);
+    if let Err(e) = std::fs::write(&path, doc.to_pretty()) {
+        return ToolResult::err(format!("写 todo 失败: {}", e));
+    }
+    let mut out = String::new();
+    for (i, it) in items.iter().enumerate() {
+        let mark = if it.bool_at("done") == Some(true) { "x" } else { " " };
+        out.push_str(&format!("{}. [{}] {}\n", i + 1, mark, it.str_at("text").unwrap_or("")));
+    }
+    if out.is_empty() {
+        out.push_str("（清单是空的）");
+    }
+    ToolResult::ok(out.trim_end().to_string())
+}
+
+fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
+    let rel = args.str_at("path").unwrap_or(".");
+    let root = ctx.resolve(rel);
+    let depth = args.u64_at("depth").unwrap_or(2).min(6) as usize;
+    let max_entries = args.u64_at("maxEntries").unwrap_or(200).min(2000) as usize;
+    let mut lines: Vec<String> = Vec::new();
+
+    fn walk(dir: &Path, prefix: &str, level: usize, depth: usize, max: usize, out: &mut Vec<String>) {
+        if level > depth || out.len() >= max {
+            return;
+        }
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            if out.len() >= max {
+                out.push(format!("{}…（已截断）", prefix));
+                return;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui" | "dist") {
+                continue;
+            }
+            let p = e.path();
+            let is_dir = p.is_dir();
+            out.push(format!("{}{}{}", prefix, name, if is_dir { "/" } else { "" }));
+            if is_dir {
+                walk(&p, &format!("{}  ", prefix), level + 1, depth, max, out);
+            }
+        }
+    }
+    walk(&root, "", 0, depth, max_entries, &mut lines);
+    if lines.is_empty() {
+        return ToolResult::ok("（空目录）");
+    }
+    ToolResult::ok(lines.join("\n"))
+}
+
+fn run_mv(args: &Json, ctx: &Ctx) -> ToolResult {
+    let from = ctx.resolve(args.str_at("from").unwrap_or(""));
+    let to = ctx.resolve(args.str_at("to").unwrap_or(""));
+    if !from.starts_with(&ctx.workspace) || !to.starts_with(&ctx.workspace) {
+        return ToolResult::err("源和目标都必须在工作区内");
+    }
+    if !from.exists() {
+        return ToolResult::err(format!("源不存在: {}", from.display()));
+    }
+    if let Some(dir) = to.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::rename(&from, &to) {
+        Ok(_) => ToolResult::ok(format!("{} → {}", from.display(), to.display())),
+        Err(e) => ToolResult::err(format!("移动失败: {}", e)),
     }
 }

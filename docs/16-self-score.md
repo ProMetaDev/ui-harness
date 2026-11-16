@@ -79,3 +79,18 @@
 重算：**≈ 57 → 63**，与 DSH（65.6）差 2.6 分，已经贴到 Pi（60.9）之上。
 
 剩下的大头：C（多 provider / OAuth）、F（工具力）、G（插件）、H3（Windows 未测）。
+
+## 再更新：工具面补到 12 个
+
+| 新增工具 | 作用 |
+|---|---|
+| `grep` | POSIX ERE 正则（走系统 GNU grep），可限 include |
+| `patch` | unified diff 精确改文件；上下文不匹配直接拒绝 |
+| `todo` | 任务清单，落 `.ui/todos.json` |
+| `tree` | 目录树，跳 .git/target/node_modules |
+| `fs_mv` | 移动/改名（源和目标都必须在工作区内） |
+
+F1 1→2、F2 2→3，F 类 0.8 → 1.4，**总分 ≈ 64**（DSH 65.6）。
+
+剩下 F3（LSP）和 F5（computer-use）我建议不做：
+前者收益低（MCP 可兜），后者不是我们的场景。

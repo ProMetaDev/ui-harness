@@ -113,6 +113,7 @@ run "空状态守卫（元事件不该藏欢迎页）" bash tools/check_empty_gu
 run "MCP 工具（外部 server 可调用 + 策略留痕）" bash tools/verify_mcp.sh
 run "访问鉴权（401 / Cookie / --token off）" bash tools/verify_auth.sh
 run "工具白名单（--no-tools / --tools）" bash tools/verify_tool_filter.sh
+run "新工具（grep/patch/todo/tree/fs_mv）" bash tools/verify_tools2.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
