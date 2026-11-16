@@ -1976,18 +1976,29 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     let mut planner = Agent::new(journal, model, ws.clone(), limits_from(args));
     planner.mode = ui_core::Mode::Quiet;
     planner.tool_chars = tool_chars(args);
+    // 规划阶段只给一个工具：提交计划。
+    // 正文里写 JSON 会违反内核的输出协议（整条回复只能是一个 {content,toolCalls}），
+    // 真模型会拒绝；用工具提交既合规又好审计。
+    planner.tools = vec![ui_core::tools::plan_tool()];
     let mut hooks = ConsoleHooks::new(args.flag("yes"), args.flag("json"));
     let prompt = format!(
-        "把下面这个任务拆成 {agents} 个可以并行的子任务。每个子任务要能独立完成、边界清楚。\n\
-         只输出一个 JSON 对象，不要任何解释、不要代码块围栏：\n\
-         {{\"parallel\":[{{\"prompt\":\"子任务 1\"}},{{\"prompt\":\"子任务 2\"}}],\"summary\":\"汇总阶段的提示\"}}\n\n\
+        "把下面这个任务拆成 {agents} 个可以并行的子任务，每个子任务要能独立完成、边界清楚。\n\
+         用 plan 工具提交：parallel 里每项是 {{\"prompt\": \"子任务说明\"}}，summary 写汇总阶段的提示。\n\
+         不要修改任何文件，也不要输出 JSON 正文。\n\n\
          任务：{task}"
     );
     let report = planner
         .run_turn(&prompt, &mut hooks)
         .map_err(|e| e.to_string())?;
-    let plan = extract_plan(&report.final_text)
-        .ok_or_else(|| format!("规划结果里找不到 JSON 计划：{}", report.final_text))?;
+    // 计划优先从工具调用里取（协议内），其次才退回正文里抠 JSON（剧本模式用）
+    let mut plan = plan_from_journal(&jp).or_else(|| extract_plan(&report.final_text));
+    if plan.is_none() {
+        eprintln!("（没有拿到 plan 工具调用，要求重试一次）");
+        let repair = "你刚才没有调用 plan 工具。请现在调用 plan，参数 parallel 是子任务数组。";
+        let _ = planner.run_turn(repair, &mut hooks);
+        plan = plan_from_journal(&jp).or_else(|| extract_plan(&report.final_text));
+    }
+    let plan = plan.ok_or_else(|| "没有拿到计划（plan 工具未被调用）".to_string())?;
 
     let items = plan.arr_at("parallel").cloned().unwrap_or_default();
     if items.is_empty() {
@@ -2052,7 +2063,71 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
         wf_args.flags.push("isolate".to_string());
     }
     println!("交给 workflow 执行（并行 + 隔离）…");
-    cmd_workflow(&wf_args)
+    let wf_code = cmd_workflow(&wf_args)?;
+
+    // ── 4. 把子代理的改动合并回主工作区（冲突/漂移闸都在 apply 里）──
+    let mut apply_args = Args {
+        values: std::collections::HashMap::new(),
+        flags: Vec::new(),
+        rest: Vec::new(),
+    };
+    apply_args.values.insert(
+        "workspace".to_string(),
+        ws.to_string_lossy().to_string(),
+    );
+    apply_args.flags.push("all".to_string());
+    if args.flag("yes") {
+        apply_args.flags.push("yes".to_string());
+    }
+    println!("\n合并各子代理的改动…");
+    let apply_code = cmd_apply(&apply_args)?;
+    if apply_code != 0 {
+        eprintln!("合并时有问题（退出码 {}），见上面的冲突/漂移报告", apply_code);
+    }
+
+    // ── 5. 汇总在 apply 之后跑：看的是真实磁盘，而不是子代理的自述 ──
+    let model2 = build_model(args)?;
+    let journal2 = Journal::open(&jp).map_err(|e| e.to_string())?;
+    let mut summarizer = Agent::new(journal2, model2, ws.clone(), limits_from(args));
+    summarizer.mode = mode_from(args);
+    summarizer.tool_chars = tool_chars(args);
+    attach_mcp(&mut summarizer, args)?;
+    let mut hooks2 = ConsoleHooks::new(args.flag("yes"), args.flag("json"));
+    println!("\n── 汇总 ──");
+    let final_prompt = format!(
+        "各子代理已完成并已合并回工作区。现在做汇总：\n\
+         1) 用工具核对每项产出是否真的落地（不要只信描述）；\n\
+         2) 说明哪些完成、哪些没完成、原因是什么；\n\
+         3) 给出一句话结论。\n\n\
+         原始目标：{task}\n汇总提示：{summary}"
+    );
+    let final_report = summarizer
+        .run_turn(&final_prompt, &mut hooks2)
+        .map_err(|e| e.to_string())?;
+
+    println!(
+        "\n协作结束 · workflow={} · apply={} · 汇总 {} 步 / {} tok",
+        wf_code, apply_code, final_report.steps, final_report.tokens
+    );
+    Ok(if wf_code == 0 { apply_code } else { wf_code })
+}
+
+/// 从日志里取最后一次 plan 工具调用的参数。
+fn plan_from_journal(jp: &Path) -> Option<Json> {
+    let events = Journal::load(jp).ok()?;
+    let mut found: Option<Json> = None;
+    for e in &events {
+        if e.str_at("kind") != Some("tool/request") || e.str_at("tool") != Some("plan") {
+            continue;
+        }
+        if e.str_at("decision") == Some("deny") {
+            continue;
+        }
+        if let Some(args) = e.get("args") {
+            found = Some(args.clone());
+        }
+    }
+    found
 }
 
 /// 从模型的回答里抠出 JSON 计划：容忍 ```json 围栏和前后废话。

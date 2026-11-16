@@ -593,6 +593,28 @@ fn skill_run(args: &Json, ctx: &Ctx) -> ToolResult {
     }
 }
 
+/// 协作模式专用的「提交计划」工具。
+///
+/// 为什么要一个工具而不是让模型在正文里写 JSON：内核的输出协议要求整条回复
+/// 是一个 `{content, toolCalls}` 对象，正文里再嵌 JSON 会违反协议——
+/// 真模型会（正确地）拒绝。用工具调用提交，既合规又可审计。
+pub fn plan_tool() -> Tool {
+    Tool {
+        name: "plan",
+        summary: "提交任务拆分计划：parallel 是并行的子任务列表",
+        idempotent: true,
+        params: &[("parallel", "array of {prompt}", true), ("summary", "string", false)],
+        effects: |_args, _ctx| Vec::new(),
+        run: |args, _ctx| {
+            let n = args.arr_at("parallel").map(|a| a.len()).unwrap_or(0);
+            if n == 0 {
+                return ToolResult::err("parallel 不能为空");
+            }
+            ToolResult::ok(format!("计划已记录：{} 个并行子任务", n))
+        },
+    }
+}
+
 pub fn registry() -> Vec<Tool> {
     vec![
         Tool {
