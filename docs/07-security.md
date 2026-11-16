@@ -48,3 +48,22 @@ bash tools/verify_pending.sh        # 退出码 + 符号链接（应被拒绝）
 bash tools/verify_shell_timeout.sh  # 超时必须连后台进程一起收掉（应 < 300ms）
 bash tools/verify_concurrent.sh     # 3 个进程并发写同一份日志（链必须完整）
 ```
+
+
+## 信任边界（必须说清楚的一条）
+
+策略仲裁的是**"要不要执行某个动作"**，不是"这个动作内部做了什么"。
+
+| 通道 | 我们仲裁什么 | 我们**不**仲裁什么 |
+|---|---|---|
+| `fs_*` / `grep` / `tree` | 每个具体路径 | —— |
+| `shell` | 这条命令要不要跑 | 命令内部的读写、联网、读密钥 |
+| `plugin_call` | 声明的那几条 effects | 声明之外的任何行为 |
+| `mcp_call` | server/tool 这一层 | 外部 server 进程内的行为 |
+
+所以：**shell / 插件 / MCP 是"可执行程序"级别的信任，不是沙箱内的受限代码。**
+`ui doctor` 会把这条直接打在输出里，不让它藏在文档里。
+
+这条来自一次外部评审的质疑（"顶层 proc.exec 获批，并不证明内部的
+secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确标注，
+而不是暗示"效果集覆盖一切"。

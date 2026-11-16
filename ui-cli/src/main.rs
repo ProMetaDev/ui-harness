@@ -336,6 +336,14 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
         println!("  {}", line);
     }
 
+    // 诚实标注能力边界：shell / 插件 / MCP 是"声明式"的信任边界——
+    // 我们只仲裁"要不要执行这条命令"，不仲裁命令内部做了什么。
+    println!("\n信任边界（说清楚，不含糊）");
+    println!("  shell   ：获得批准后，命令内部的读写/联网不受效果策略约束");
+    println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
+    println!("  mcp_call：同上，外部 server 在进程内自主");
+    println!("  结论    ：把它们当「可执行程序」，不是「沙箱里的受限代码」");
+
     println!("\n工具与效果");
     for tool in registry() {
         let sample = match tool.name {
@@ -2427,11 +2435,47 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     if args.flag("yes") {
         apply_args.flags.push("yes".to_string());
     }
-    println!("\n合并各子代理的改动…");
-    let apply_code = cmd_apply(&apply_args)?;
-    if apply_code != 0 {
-        eprintln!("合并时有问题（退出码 {}），见上面的冲突/漂移报告", apply_code);
-    }
+    // 默认**不自动落地**：先给出可审查的改动清单，合并要显式 --apply。
+    // 理由：自动落地让"子代理改了什么"越过人的眼睛，而恢复成本远高于审查成本。
+    let auto_apply = args.flag("apply");
+    let apply_code = if auto_apply {
+        println!("\n合并各子代理的改动…");
+        let code = cmd_apply(&apply_args)?;
+        if code != 0 {
+            eprintln!("合并时有问题（退出码 {}），见上面的冲突/漂移报告", code);
+        }
+        code
+    } else {
+        println!("\n子代理产出（未合并）：");
+        let events = Journal::load(&jp).map_err(|e| e.to_string())?;
+        let mut any = false;
+        for e in &events {
+            if e.str_at("kind") != Some("delegate/end") {
+                continue;
+            }
+            let changed = e.arr_at("changed").cloned().unwrap_or_default();
+            if changed.is_empty() {
+                continue;
+            }
+            any = true;
+            let id = e
+                .str_at("workdir")
+                .and_then(|w| w.rsplit('/').next())
+                .unwrap_or("?")
+                .to_string();
+            let files: Vec<String> = changed
+                .iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect();
+            println!("  {} → {}", id, files.join(", "));
+            println!("    合并：ui apply --id {} --yes", id);
+        }
+        if !any {
+            println!("  （没有子代理产出改动）");
+        }
+        println!("\n想自动合并：ui team ... --apply");
+        0
+    };
 
     // ── 5. 汇总用一个新的 agent（在 apply 之后看真实磁盘）──
     let model2 = build_model(args)?;
