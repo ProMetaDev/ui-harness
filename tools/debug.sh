@@ -73,7 +73,7 @@ EOF
 
 check_viewer() {
   "$BIN" export --workspace "$WS" --html "$WS/trace.html" >/dev/null 2>&1 || return 1
-  bash tools/_node.sh tools/check_viewer.mjs "$WS/trace.html" >/dev/null 2>&1
+  python3 tools/check_viewer.py "$WS/trace.html" >/dev/null 2>&1
 }
 
 check_verify_clean() {
