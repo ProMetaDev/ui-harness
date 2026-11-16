@@ -33,7 +33,7 @@ fn main() {
     // commit：有 git 就取短 sha，没有就标 unknown（源码包场景）
     let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     // 是否在脏工作区构建：这比 commit 更能说明"测的是哪份代码"
-    let dirty = git(&["status", "--porcelain"])
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
         .map(|s| !s.is_empty())
         .unwrap_or(false);
     let commit = if dirty { format!("{}-dirty", commit) } else { commit };
