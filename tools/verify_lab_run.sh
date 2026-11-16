@@ -8,7 +8,7 @@ WS=/tmp/ui-labrun
 rm -rf "$WS"; mkdir -p "$WS/bundles"
 
 fuser -k "$PORT/tcp" >/dev/null 2>&1 && sleep 0.3
-"$BIN" serve --port $PORT --workspace "$WS" --mock fixtures/mock.json --yes \
+"$BIN" serve --port $PORT --workspace "$WS" --mock fixtures/mock.json --yes --token off \
   --bundles "$WS/bundles" --bench-cmd "sleep 0.4; echo done" > "$WS/server.log" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT

@@ -18,7 +18,7 @@ EOF
 
 # ?????????????????(?????)
 fuser -k "$PORT/tcp" >/dev/null 2>&1 && sleep 0.3
-"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/scenario.json" --yes >/tmp/serve.log 2>&1 &
+"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/scenario.json" --yes --token off >/tmp/serve.log 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 

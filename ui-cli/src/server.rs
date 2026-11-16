@@ -39,6 +39,8 @@ struct Hub {
     mode: Mutex<ui_core::Mode>,
     /// 实验包目录（默认 <workspace>/experiments）
     bundles: std::path::PathBuf,
+    /// 访问令牌（空 = 不校验）
+    token: String,
     /// 「跑一次」要执行的命令（None = 没有配置，按钮禁用）
     bench: Option<String>,
     lab_busy: AtomicBool,
@@ -207,9 +209,16 @@ pub fn serve(
     auto_yes: bool,
     bundles: Option<&str>,
     bench: Option<&str>,
+    token: Option<&str>,
 ) -> Result<(), String> {
     let mut hub0 = Hub::default();
     hub0.bench = bench.map(str::to_string);
+    hub0.token = match token {
+        // `--token off` 明确表示不校验（本地脚本/截图用）
+        Some("off") | Some("none") => String::new(),
+        Some(t) => t.to_string(),
+        None => make_token(),
+    };
     hub0.bundles = match bundles {
         Some(p) => std::path::PathBuf::from(p),
         None => std::path::Path::new(ready.str_at("workspace").unwrap_or(".")).join("experiments"),
@@ -262,7 +271,13 @@ pub fn serve(
     }
 
     let listener = TcpListener::bind(addr).map_err(|e| format!("监听 {} 失败: {}", addr, e))?;
-    println!("UI 已启动  http://{}", addr);
+    if hub.token.is_empty() {
+        println!("UI 已启动  http://{}", addr);
+        println!("鉴权       已关闭（--token off）：本机任何程序都能调用");
+    } else {
+        println!("UI 已启动  http://{}/?t={}", addr, hub.token);
+        println!("鉴权       需要 token：首次带 ?t= 打开，之后浏览器用 Cookie");
+    }
     println!("工作区     {}", agent_workspace_hint());
     println!("Ctrl-C 退出");
 
@@ -298,6 +313,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
     let path = raw_path.split('?').next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
+    let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -306,6 +322,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
         let h = header.trim();
         if h.is_empty() {
             break;
+        }
+        if let Some((k, v)) = h.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
         }
         if let Some(rest) = h.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = rest.trim().parse().unwrap_or(0);
@@ -320,6 +339,30 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
 
     // 查询串：`since=<seq>` 用于断线重连只补新事件
     let query = raw_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    // ── 鉴权 ──
+    // 绑的是 127.0.0.1，局域网进不来；真正的威胁是「本机其它程序」和
+    // 「你浏览器里访问的恶意网页能 POST 到 localhost」。所以默认要求 token。
+    if !hub.token.is_empty() {
+        let bearer = headers
+            .get("cookie")
+            .map(|c| c.contains(&format!("ui_token={}", hub.token)))
+            .unwrap_or(false);
+        let from_query = query
+            .split('&')
+            .any(|kv| kv == format!("t={}", hub.token));
+        if !bearer && !from_query {
+            return unauthorized(&mut stream, path.starts_with("/api"));
+        }
+        if from_query && !bearer {
+            // 首次带 ?t= 进来：种 Cookie 并跳回同路径，URL 里不留 token
+            let set = format!(
+                "HTTP/1.1 303 See Other\r\nLocation: {}\r\nSet-Cookie: ui_token={}; Path=/; HttpOnly; SameSite=Lax\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                path, hub.token
+            );
+            return stream.write_all(set.as_bytes());
+        }
+    }
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/") => html(&mut stream, CHAT_HTML),
@@ -594,8 +637,42 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
     }
 }
 
-fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+/// 没有 token：不给页面、不给数据，也不泄露任何工作区信息。
+fn unauthorized(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {
+    if api {
+        let body = "{\"error\":\"unauthorized\"}";
+        let head = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        return stream.write_all(body.as_bytes());
+    }
+    let body = "<!doctype html><meta charset=utf-8><title>需要 token</title>\
+         <body style=\"font:14px/1.7 system-ui;padding:12vh 10vw;color:#333\">\
+         <h1 style=\"font-size:18px\">需要访问 token</h1>\
+         <p>启动 <code>ui serve</code> 时终端会打印带 token 的地址，用它打开一次即可（之后走 Cookie）。</p>\
+         </body>";
     let head = format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())
+}
+
+/// 令牌：时间 + pid 派生的 12 位十六进制，够用且不引入依赖。
+fn make_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let digest = ui_core::sha256::hex(format!("{}-{}", nanos, pid).as_bytes());
+    digest[..12].to_string()
+}
+
+fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     );

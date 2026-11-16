@@ -15,7 +15,7 @@ cat > "$WS/slow.json" <<'EOF'
   {"content":"不该到这里"}]}
 EOF
 
-"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/slow.json" --yes >/tmp/web-features.log 2>&1 &
+"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/slow.json" --yes --token off >/tmp/web-features.log 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 for _ in $(seq 1 80); do curl -sf "$BASE/api/state" >/dev/null && break; sleep 0.1; done
@@ -54,7 +54,7 @@ cat > "$WS/read.json" <<'EOF'
   {"content":"读一下","toolCalls":[{"name":"fs_read","args":{"path":"greet.js"}}]},
   {"content":"读完了"}]}
 EOF
-"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/read.json" --yes >/tmp/web-features2.log 2>&1 &
+"$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/read.json" --yes --token off >/tmp/web-features2.log 2>&1 &
 SRV=$!
 for _ in $(seq 1 80); do curl -sf "$BASE/api/state" >/dev/null && break; sleep 0.1; done
 ( curl -sN --max-time 8 "$BASE/api/events" > "$WS/events2.txt" ) &

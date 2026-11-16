@@ -111,6 +111,7 @@ run "结论对账（声明必须有产物背书）" bash tools/verify_claims.sh
 run "实验室跑一次（并发保护 + SSE）" bash tools/verify_lab_run.sh
 run "空状态守卫（元事件不该藏欢迎页）" bash tools/check_empty_guard.sh
 run "MCP 工具（外部 server 可调用 + 策略留痕）" bash tools/verify_mcp.sh
+run "访问鉴权（401 / Cookie / --token off）" bash tools/verify_auth.sh
 run "导出查看器并校验" check_viewer
 
 echo

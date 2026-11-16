@@ -402,7 +402,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let splash =
         !args.flag("no-splash") && std::env::var("UI_SPLASH").map(|v| v != "0").unwrap_or(true);
 
-    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"))?;
+    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"))?;
     Ok(0)
 }
 
