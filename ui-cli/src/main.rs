@@ -260,6 +260,7 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    apply_tool_filter(&mut agent, args);
 
     println!("ui · workspace {}", ws.display());
     println!("/status 账本 · /policy 规则 · /journal 日志 · /quit 退出");
@@ -388,6 +389,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    apply_tool_filter(&mut agent, args);
     let label = agent.model.name().to_string();
     let ws_label = ws.to_string_lossy().to_string();
 
@@ -551,6 +553,7 @@ fn cmd_tui(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    apply_tool_filter(&mut agent, args);
     agent.cancel = hooks.tui.cancel_token();
     hooks.redraw();
 
@@ -805,6 +808,19 @@ fn attach_mcp(agent: &mut Agent, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// `--no-tools` / `--tools a,b,c`：每轮的工具白名单（A4）。
+/// 关掉工具时提示词里也不会列出它们——不列比列了再拒绝更诚实。
+fn apply_tool_filter(agent: &mut Agent, args: &Args) {
+    if args.flag("no-tools") {
+        agent.tools.clear();
+        return;
+    }
+    if let Some(list) = args.get("tools") {
+        let want: Vec<&str> = list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        agent.tools.retain(|t| want.iter().any(|w| *w == t.name));
+    }
+}
+
 fn mode_from(args: &Args) -> ui_core::Mode {
     args.get("mode")
         .and_then(ui_core::Mode::parse)
@@ -871,6 +887,7 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    apply_tool_filter(&mut agent, args);
     // `--skills a,b`：并行子代理或脚本化调用时，直接在开场前预加载
     preload_skills(&mut agent, &ws, &skill_list(args))?;
     let mut hooks = ConsoleHooks::new(args.flag("yes"), false);
@@ -2236,6 +2253,7 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
+    apply_tool_filter(&mut agent, args);
     let mut hooks = ConsoleHooks::new(args.flag("yes"), json_out);
 
     append_log(
