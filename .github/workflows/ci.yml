@@ -28,18 +28,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # 先打印真实环境：脚本假设有 fuser/pkill/script/rsync，缺哪个一目了然
       - name: 环境诊断
         run: |
           set +e
           echo "== uname =="; uname -a
           echo "== 工具 =="
-          for c in python3 cargo git curl rsync fuser pkill pgrep script ss awk sed grep; do
+          for c in python3 cargo git curl rsync fuser pkill pgrep script ss awk sed grep diff timeout; do
             printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
           done
           echo "== 版本 =="; python3 --version; cargo --version
           echo "== UI_ 环境 =="; env | grep -E '^UI_' || true
-          echo "== 磁盘 =="; df -h . | tail -1
 
       - name: CI（preflight → 构建 → 版本/密钥 → 测试 → 门禁）
         run: bash tools/ci.sh
@@ -56,14 +54,26 @@ jobs:
             dist/**/*.sha256
           if-no-files-found: error
 
-      # 失败时把 CI 日志作为 artifact 留下，便于事后查（网页上看不到时也能下载）
-      - name: 失败时保存日志
+      # 失败时把「失败步骤的日志」直接打进这一步的输出：
+      # 这样贴最后一步的日志就等于贴到了出错现场，不需要再去翻上面的步骤。
+      - name: 失败诊断
         if: failure()
         run: |
+          echo "===================== 失败诊断开始 ====================="
+          echo "---- 失败步骤的最后 80 行 ----"
+          if [ -f .ci-step.log ]; then
+            tail -80 .ci-step.log
+          else
+            echo "（没有 .ci-step.log）"
+          fi
+          echo "---- 环境再确认 ----"
+          for c in fuser pkill pgrep script rsync python3; do
+            printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
+          done
+          echo "aria2c/diffutils 无关，仅确认基础工具"
+          echo "===================== 失败诊断结束 ====================="
           mkdir -p ci-logs
-          cp -f /tmp/ci-step.log ci-logs/ 2>/dev/null || true
-          bash tools/preflight.sh > ci-logs/preflight.txt 2>&1 || true
-          env | grep -E '^UI_' > ci-logs/env.txt 2>/dev/null || true
+          cp -f .ci-step.log ci-logs/ 2>/dev/null || true
 
       - name: 上传失败日志
         if: failure()
