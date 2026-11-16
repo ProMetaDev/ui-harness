@@ -56,3 +56,33 @@ X:\dsh_ws\harness-v2\out\win\ui.exe doctor
 - `serve` 网页端在 Windows 上（端口/进程/token 全链路）；
 - 中文路径、长路径（>260 字符）、UNC 路径；
 - 临时目录不可写的**根因**（可能是 Defender 的受控文件夹访问）。
+
+## 第二批：真模型 + 网页端（同一天）
+
+### 又找到两个 Windows 专属 bug
+
+| # | 问题 | 现象 | 修法 |
+|---|---|---|---|
+| 5 | **`cmd /C` 把引号参数转义坏** | `'"X:\...\node.exe"' is not recognized` | 适配器命令在 Windows 上拆成 argv 直接起进程（`split_command_line`），只有含 `| > & <` 时才退回 cmd |
+| 6 | **中文控制台乱码** | 启动横幅变成 `UI 宸插惎鍔?` | 启动时 `SetConsoleOutputCP(65001)` + `SetConsoleCP(65001)` |
+
+第 5 条踩了两次：先试 `arg()`，再试 `raw_arg()`，都不行——`cmd.exe` 对
+"以引号开头的命令"有去引号的历史行为。最后绕开 shell 才彻底解决。
+
+第 6 条还有个**假象**：把 stdout 重定向到文件后，PowerShell 用 GBK 读回来仍是乱码，
+看着像程序没修好。用 `-Encoding UTF8` 读就正常——**文件本身是对的**。
+
+### 实机验证通过的能力
+
+| 能力 | 结果 |
+|---|---|
+| **真模型**（DeepSeek 适配器） | 1234 tok / 2s，回答正常 |
+| **serve 网页端** | 401 无 token / 303 种 Cookie / API 200 / SSE 有 session 事件 |
+| serve 的 `POST /api/say` | UTF-8 请求体返回 `{"ok":true}`（ASCII 那次是我的测试被 PowerShell 吃了引号） |
+| console 中文 | 正常 |
+
+### 仍未解决
+
+- 临时目录不可写（`os error 5`）：doctor 如实告警，工具退到工作区；
+- 中文路径 / 长路径 / UNC 路径没测；
+- 浏览器里的完整交互（只验了 HTTP 层）。

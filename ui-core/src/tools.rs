@@ -480,8 +480,10 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
 
     #[cfg(windows)]
     let mut cmd = {
+        use std::os::windows::process::CommandExt;
         let mut c = Command::new("cmd");
-        c.arg("/C").arg(&command);
+        // raw_arg：命令里带引号时，Command::arg 的转义会让 cmd.exe 解析失败
+        c.arg("/C").raw_arg(&command);
         c
     };
     #[cfg(not(windows))]

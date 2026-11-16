@@ -306,7 +306,45 @@ impl ExternalModel {
         }
     }
 
-    /// 启动模型子进程并把快照写进它的 stdin；`respond` 与 `respond_stream` 共用。
+/// 把一条命令行拆成 argv：支持双引号包住带空格的参数。
+/// 只在 Windows 的适配器启动路径用（`cmd /C` 的引号处理太容易出事）。
+fn split_command_line(cmd: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in cmd.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if quoted {
+        return None; // 引号没闭合，交给 shell 处理
+    }
+    if started {
+        out.push(cur);
+    }
+    Some(out)
+}
+
+fn needs_shell(cmd: &str) -> bool {
+    cmd.contains('|') || cmd.contains('>') || cmd.contains('&') || cmd.contains('<')
+}
+
+/// 启动模型子进程并把快照写进它的 stdin；`respond` 与 `respond_stream` 共用。
     fn spawn_child(
         &self,
         snapshot: &Snapshot,
@@ -323,9 +361,23 @@ impl ExternalModel {
 
         #[cfg(windows)]
         let mut cmd = {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&self.command);
-            c
+            // Windows 的 cmd /C 对「以引号开头的命令」有去引号的历史行为，
+            // 无论用 arg 还是 raw_arg 都可能把 "C:\...\node.exe" 变成非法命令（实机踩到两次）。
+            // 适配器命令本质是「程序 + 参数」，直接拆成 argv 起进程最稳；
+            // 只有真的带 shell 元字符（| > & 等）时才退回 cmd。
+            match Self::split_command_line(&self.command) {
+                Some(parts) if !parts.is_empty() && !Self::needs_shell(&self.command) => {
+                    let mut c = Command::new(&parts[0]);
+                    c.args(&parts[1..]);
+                    c
+                }
+                _ => {
+                    use std::os::windows::process::CommandExt;
+                    let mut c = Command::new("cmd");
+                    c.arg("/C").raw_arg(&self.command);
+                    c
+                }
+            }
         };
         #[cfg(not(windows))]
         let mut cmd = {

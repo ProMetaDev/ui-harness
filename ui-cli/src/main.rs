@@ -27,7 +27,25 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Windows 控制台默认是 GBK，直接输出 UTF-8 会变成乱码（实机看到「UI 宸插惎鍔?」）。
+/// 启动时把输入输出代码页都切到 65001。
+#[cfg(windows)]
+fn init_console() {
+    extern "system" {
+        fn SetConsoleOutputCP(code_page: u32) -> i32;
+        fn SetConsoleCP(code_page: u32) -> i32;
+    }
+    unsafe {
+        SetConsoleOutputCP(65001);
+        SetConsoleCP(65001);
+    }
+}
+
+#[cfg(not(windows))]
+fn init_console() {}
+
 fn main() {
+    init_console();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let code = match dispatch(&argv) {
         Ok(code) => code,
