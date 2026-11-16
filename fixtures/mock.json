@@ -1,0 +1,8 @@
+{
+  "model": "scripted-check",
+  "steps": [
+    { "content": "第一步完成" },
+    { "content": "第二步完成" },
+    { "content": "第三步完成" }
+  ]
+}

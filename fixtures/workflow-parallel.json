@@ -1,0 +1,21 @@
+{
+  "name": "dual-review",
+  "steps": [
+    {
+      "prompt": "读一下 greet.js，列出它的实际行为和边界情况（空串、纯空格、null、数字）。只描述，不要改。",
+      "skills": ["code-review"]
+    },
+    {
+      "parallel": [
+        {
+          "prompt": "从安全角度评审 greet.js：它的返回值会不会带来注入或意外字符串？给最多 2 条具体风险，每条写清触发条件与后果。不要改代码。",
+          "skills": ["code-review"]
+        },
+        {
+          "prompt": "从可用性角度评审 greet.js：空串、纯空格、null、数字各自输出什么？给最多 2 条具体改进，每条给出期望输出。不要改代码。",
+          "skills": ["code-review"]
+        }
+      ]
+    }
+  ]
+}

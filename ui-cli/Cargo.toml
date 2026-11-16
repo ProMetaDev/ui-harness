@@ -1,0 +1,12 @@
+[package]
+name = "ui-cli"
+version = "0.1.0"
+edition = "2021"
+description = "UI TUI/CLI: one binary, five commands, no plugins."
+
+[[bin]]
+name = "ui"
+path = "src/main.rs"
+
+[dependencies]
+ui-core = { path = "../ui-core" }

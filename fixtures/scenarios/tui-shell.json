@@ -1,0 +1,12 @@
+{
+  "model": "scripted-tui",
+  "steps": [
+    {
+      "content": "跑个命令看看环境。",
+      "toolCalls": [
+        { "name": "shell", "args": { "command": "echo hi from shell" } }
+      ]
+    },
+    { "content": "命令返回了 hi from shell，环境正常。" }
+  ]
+}

@@ -1,0 +1,14 @@
+# 密钥：永不入库
+secrets/
+*.key
+.env
+.env.*
+
+# 构建与运行产物
+target/
+.ui/
+demo/.ui/
+*.loom-tmp-*
+
+# 导出物（轨迹、截图、验收副本）
+out/

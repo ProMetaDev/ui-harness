@@ -1,0 +1,474 @@
+//! 跨命令的不变量：日志路径可控、损坏可检出、JSON 输出可解析。
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_ui")
+}
+
+fn temp_ws(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ui-cli-{}-{}", std::process::id(), name));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn scenario(dir: &std::path::Path) -> PathBuf {
+    let f = dir.join("scenario.json");
+    fs::write(&f, r#"{"model":"scripted","steps":[{"content":"好了"}]}"#).unwrap();
+    f
+}
+
+#[test]
+fn journal_flag_redirects_the_log() {
+    let ws = temp_ws("journal");
+    let sc = scenario(&ws);
+    let target = ws.join("custom").join("mine.jsonl");
+
+    let out = Command::new(bin())
+        .args([
+            "run",
+            "--task",
+            "x",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--journal",
+            target.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    assert!(target.is_file(), "--journal 指定的文件必须被写到");
+    assert!(
+        !ws.join(".ui").join("journal.jsonl").exists(),
+        "不该同时写默认位置"
+    );
+    let events = ui_core::journal::Journal::load(&target).unwrap();
+    assert!(events.iter().any(|e| e.str_at("kind") == Some("turn/start")));
+}
+
+#[test]
+fn verify_exits_2_on_a_tampered_journal() {
+    use ui_core::json::Json;
+
+    let ws = temp_ws("tamper");
+    let path = ws.join(".ui").join("journal.jsonl");
+    let mut j = ui_core::Journal::open(&path).unwrap();
+    j.append("note", Json::obj(vec![("text", Json::from("a"))]))
+        .unwrap();
+    j.append("note", Json::obj(vec![("text", Json::from("b"))]))
+        .unwrap();
+
+    // 改掉第一条：中间损坏（不是尾部撕裂），必须整体拒绝
+    let text = fs::read_to_string(&path).unwrap();
+    let tampered = text.replacen("\"a\"", "\"z\"", 1);
+    fs::write(&path, tampered).unwrap();
+
+    let out = Command::new(bin())
+        .args(["verify", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(out.status.code(), Some(2), "损坏必须返回 2");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL"));
+}
+
+#[test]
+fn verify_is_quiet_on_a_clean_journal() {
+    let ws = temp_ws("clean");
+    let sc = scenario(&ws);
+    Command::new(bin())
+        .args([
+            "run",
+            "--task",
+            "x",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+
+    let out = Command::new(bin())
+        .args(["verify", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("哈希链完整"));
+    assert!(stdout.contains("未完成 turn=false"));
+}
+
+#[test]
+fn non_done_reasons_exit_non_zero() {
+    let ws = temp_ws("excode");
+    let empty = ws.join("empty.json");
+    fs::write(&empty, r#"{"model":"scripted","steps":[{"content":""},{"content":""},{"content":""}]}"#).unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "run",
+            "--task",
+            "说点什么",
+            "--mock",
+            empty.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "empty_reply 这类非 done 的收尾必须返回非零，否则脚本会误判成功"
+    );
+
+    let ok = ws.join("ok.json");
+    fs::write(&ok, r#"{"model":"scripted","steps":[{"content":"好了"}]}"#).unwrap();
+    let out = Command::new(bin())
+        .args([
+            "run",
+            "--task",
+            "说点什么",
+            "--mock",
+            ok.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn audit_rejudges_a_quiet_run_under_strict_mode() {
+    // 模式只改严格度、不改日志格式：所以 quiet 跑完还能用 strict 重判。
+    let ws = temp_ws("modes");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"写个文件","toolCalls":[{"name":"fs_write","args":{"path":"a.txt","content":"x"}}]},
+            {"content":"好了"}]}"#,
+    )
+    .unwrap();
+
+    let run = Command::new(bin())
+        .args([
+            "run",
+            "--task",
+            "写个文件",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--mode",
+            "quiet",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+
+    // 日志必须记下当时的模式
+    let events = ui_core::journal::Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let turn = events
+        .iter()
+        .find(|e| e.str_at("kind") == Some("turn/start"))
+        .expect("应有 turn/start");
+    assert_eq!(turn.str_at("mode"), Some("quiet"));
+
+    // 用 strict 重判：那次写入会被要求确认
+    let audit = Command::new(bin())
+        .args([
+            "audit",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--as",
+            "strict",
+            "--json",
+        ])
+        .output()
+        .expect("audit");
+    assert!(audit.status.success(), "{}", String::from_utf8_lossy(&audit.stderr));
+    let parsed = ui_core::json::parse(String::from_utf8_lossy(&audit.stdout).trim()).unwrap();
+    assert_eq!(parsed.str_at("as"), Some("strict"));
+    assert!(
+        parsed.u64_at("escalated").unwrap_or(0) >= 1,
+        "严格模式下应至少有一个动作被收紧"
+    );
+    let rows = parsed.arr_at("rows").cloned().unwrap_or_default();
+    assert_eq!(rows[0].str_at("tool"), Some("fs_write"));
+    assert_eq!(rows[0].str_at("was"), Some("allow"));
+    assert_eq!(rows[0].str_at("now"), Some("ask"));
+}
+
+#[test]
+fn lab_bundle_records_lineage_and_verify_catches_tampering() {
+    let ws = temp_ws("lab");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"写结论","toolCalls":[{"name":"fs_write","args":{"path":"metrics.json","content":"{\"acc\":0.8}"}}]},
+            {"content":"好了"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run", "--task", "写结论", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success());
+
+    let bundle = ws.join("bundle");
+    let pack = Command::new(bin())
+        .args([
+            "lab", "pack", "--workspace", ws.to_str().unwrap(),
+            "--name", "t1", "--out", bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("pack");
+    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+
+    let manifest = fs::read_to_string(bundle.join("manifest.jsonl")).unwrap();
+    assert!(manifest.contains("metrics.json"), "产物必须在清单里");
+    let rec = ui_core::json::parse(manifest.lines().next().unwrap()).unwrap();
+    assert_eq!(rec.str_at("path"), Some("metrics.json"));
+    assert_eq!(rec.u64_at("bytes"), Some(11)); // {"acc":0.8} ? 11 ??
+    // 血缘：哪次调用写的
+    let origin = rec.get("producedBy").cloned().unwrap();
+    assert_eq!(origin.str_at("tool"), Some("fs_write"));
+    assert!(origin.u64_at("seq").unwrap_or(0) > 0);
+
+    let ok = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(ok.status.code(), Some(0));
+
+    // 篡改产物：必须被抓住
+    fs::write(bundle.join("artifacts").join("metrics.json"), "{\"acc\":0.99}").unwrap();
+    let bad = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(bad.status.code(), Some(3), "篡改后必须返回 3");
+    assert!(String::from_utf8_lossy(&bad.stdout).contains("哈希不符"));
+}
+
+#[test]
+fn lab_records_reads_and_verify_flags_data_drift() {
+    let ws = temp_ws("lineage");
+    fs::write(ws.join("data.csv"), "x,y\n1,0\n").unwrap();
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"读数据","toolCalls":[{"name":"fs_read","args":{"path":"data.csv"}}]},
+            {"content":"好了"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run", "--task", "读数据", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success());
+
+    let bundle = ws.join("b");
+    let pack = Command::new(bin())
+        .args([
+            "lab", "pack", "--workspace", ws.to_str().unwrap(),
+            "--name", "l1", "--out", bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("pack");
+    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+
+    let inputs = fs::read_to_string(bundle.join("inputs.jsonl")).unwrap();
+    let rec = ui_core::json::parse(inputs.lines().next().unwrap()).unwrap();
+    assert_eq!(rec.str_at("path"), Some("data.csv"));
+    assert!(rec.str_at("sha256").unwrap().len() == 64);
+
+    let ok = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap(), "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(ok.status.code(), Some(0), "数据没变时应通过");
+
+    // 数据换版本：结论就不成立了
+    fs::write(ws.join("data.csv"), "x,y\n1,0\n9,9\n").unwrap();
+    let drift = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap(), "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(drift.status.code(), Some(3), "数据漂移时必须返回 3");
+    assert!(String::from_utf8_lossy(&drift.stdout).contains("输入"));
+}
+
+#[test]
+fn lab_table_aggregates_seeds_and_refuses_mixed_data_versions() {
+    let root = temp_ws("table");
+    let mk = |name: &str, acc: f64, hash: &str| {
+        let d = root.join(name);
+        fs::create_dir_all(d.join("artifacts")).unwrap();
+        fs::write(
+            d.join("meta.json"),
+            r#"{"name":"","createdMs":1,"workspace":"/tmp/x","journalEvents":1,
+                "env":{"os":"Ubuntu","kernel":"k","cpus":8,"python":"3"}}"#
+                .replace("\"name\":\"\"", &format!("\"name\":\"{}\"", name)),
+        )
+        .unwrap();
+        fs::write(
+            d.join("inputs.jsonl"),
+            format!("{{\"path\":\"data.csv\",\"sha256\":\"{}\",\"bytes\":1}}\n", hash),
+        )
+        .unwrap();
+        fs::write(
+            d.join("artifacts").join("metrics.json"),
+            format!("{{\"seed\":1,\"accuracy\":{}}}\n", acc),
+        )
+        .unwrap();
+        d
+    };
+    let a = mk("a", 0.80, "hash-same");
+    let b = mk("b", 0.82, "hash-same");
+
+    let out = Command::new(bin())
+        .args(["lab", "table", a.to_str().unwrap(), b.to_str().unwrap(), "--json"])
+        .output()
+        .expect("table");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.u64_at("bundles"), Some(2));
+    assert_eq!(v.u64_at("inputDrift"), Some(0));
+    let metrics = v.arr_at("metrics").cloned().unwrap();
+    assert_eq!(metrics.len(), 1, "seed 不该被当成指标");
+    assert_eq!(metrics[0].str_at("metric"), Some("accuracy"));
+
+    // 数据版本不一致：拒绝求均值
+    let c = mk("c", 0.90, "hash-other");
+    let mixed = Command::new(bin())
+        .args(["lab", "table", a.to_str().unwrap(), c.to_str().unwrap()])
+        .output()
+        .expect("table");
+    assert_eq!(mixed.status.code(), Some(3), "数据版本不同必须返回 3");
+    assert!(String::from_utf8_lossy(&mixed.stdout).contains("不能求均值"));
+}
+
+#[test]
+fn lab_claims_must_be_backed_by_artifacts() {
+    let ws = temp_ws("claims");
+    fs::write(ws.join("run_exp.sh"), "printf '{\"accuracy\":0.72}\\n' > metrics.json\n").unwrap();
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"跑实验","toolCalls":[{"name":"shell","args":{"command":"sh run_exp.sh"}}]},
+            {"content":"准确率 0.72"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run", "--task", "跑实验", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+
+    let claim = Command::new(bin())
+        .args([
+            "lab", "claim", "--workspace", ws.to_str().unwrap(),
+            "--name", "accuracy", "--value", "0.72",
+        ])
+        .output()
+        .expect("claim");
+    assert!(claim.status.success());
+
+    let bundle = ws.join("b");
+    let pack = Command::new(bin())
+        .args([
+            "lab", "pack", "--workspace", ws.to_str().unwrap(),
+            "--name", "c1", "--out", bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("pack");
+    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+
+    let ok = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(ok.status.code(), Some(0), "{}", String::from_utf8_lossy(&ok.stdout));
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("结论 1/1 对得上"));
+
+    // 产物对不上结论：必须失败
+    fs::write(bundle.join("artifacts").join("metrics.json"), "{\"accuracy\":0.99}\n").unwrap();
+    let bad = Command::new(bin())
+        .args(["lab", "verify", bundle.to_str().unwrap()])
+        .output()
+        .expect("verify");
+    assert_eq!(bad.status.code(), Some(3));
+    let text = String::from_utf8_lossy(&bad.stdout);
+    assert!(text.contains("哈希不符"));
+    assert!(text.contains("找不到对应数值"));
+}
+
+#[test]
+fn mcp_tools_are_callable_and_policy_visible() {
+    let ws = temp_ws("mcp");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"调外部工具","toolCalls":[{"name":"mcp_call","args":{"server":"demo","tool":"echo","args":{"text":"hi"}}}]},
+            {"content":"好了"}]}"#,
+    )
+    .unwrap();
+    let cfg = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("fixtures/mcp/demo.json");
+    let out = Command::new(bin())
+        .args([
+            "run", "--task", "用外部工具", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+            "--mcp", cfg.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{}", text);
+    assert!(text.contains("echo: hi"), "工具结果没回来：{}", text);
+
+    // 策略看得见：proc.exec 目标是 mcp:demo:echo，默认要审批
+    let events = ui_core::journal::Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let req = events
+        .iter()
+        .find(|e| e.str_at("kind") == Some("tool/request"))
+        .expect("应有 tool/request");
+    assert_eq!(req.str_at("tool"), Some("mcp_call"));
+    let effects = req.arr_at("effects").cloned().unwrap();
+    assert_eq!(effects[0].str_at("kind"), Some("proc.exec"));
+    assert_eq!(effects[0].str_at("target"), Some("mcp:demo:echo"));
+    assert_eq!(req.str_at("decision"), Some("ask"));
+}

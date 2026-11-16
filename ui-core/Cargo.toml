@@ -1,0 +1,5 @@
+[package]
+name = "ui-core"
+version = "0.1.0"
+edition = "2021"
+description = "UI kernel: journal, budget, policy, tools, prompt snapshots, agent loop. Zero dependencies."

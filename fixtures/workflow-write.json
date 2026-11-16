@@ -1,0 +1,17 @@
+{
+  "name": "dual-doc",
+  "steps": [
+    {
+      "parallel": [
+        {
+          "prompt": "读 greet.js，从安全角度找出最多 2 条具体风险，写进 SECURITY.md（只写这一个文件，按 code-review 的格式：触发条件 → 实际输出 → 期望输出）。写完读回确认。",
+          "skills": ["code-review"]
+        },
+        {
+          "prompt": "读 greet.js，从可用性角度找出最多 2 条具体改进，写进 USABILITY.md（只写这一个文件，每条给出期望输出）。写完读回确认。",
+          "skills": ["code-review"]
+        }
+      ]
+    }
+  ]
+}

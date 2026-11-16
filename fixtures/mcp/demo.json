@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "demo",
+      "cmd": ["python3", "/mnt/x/dsh_ws/harness-v2/fixtures/mcp/server.py"]
+    }
+  ]
+}

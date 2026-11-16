@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+const p = process.argv[2];
+const fd = fs.openSync(p, 'r');
+const b = Buffer.alloc(64);
+fs.readSync(fd, b, 0, 64, 0);
+console.log('u32@0 =', b.readUInt32LE(0));
+console.log('u32@4 =', b.readUInt32LE(4));
+console.log('u32@8 =', b.readUInt32LE(8));
+console.log('u32@12=', b.readUInt32LE(12));
+console.log('bytes 0..32:', b.slice(0, 32).toString('latin1'));
+console.log('bytes 12..60:', JSON.stringify(b.slice(12, 60).toString('utf8')));
+fs.closeSync(fd);

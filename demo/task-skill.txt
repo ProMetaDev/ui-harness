@@ -1,0 +1,1 @@
+用 release-note skill 给刚修好的 greet（空名字现在返回 "hi there"）写一条发布说明。

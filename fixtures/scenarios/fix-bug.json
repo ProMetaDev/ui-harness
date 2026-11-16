@@ -1,0 +1,33 @@
+{
+  "model": "scripted-demo",
+  "steps": [
+    {
+      "content": "先读一下 greet.js 看现状。",
+      "toolCalls": [
+        { "name": "fs_read", "args": { "path": "greet.js" } }
+      ]
+    },
+    {
+      "content": "空字符串会拼出 hi ，改成兜底。",
+      "toolCalls": [
+        {
+          "name": "fs_edit",
+          "args": {
+            "path": "greet.js",
+            "old": "return `hi ${name}`;",
+            "new": "return `hi ${name || 'there'}`;"
+          }
+        }
+      ]
+    },
+    {
+      "content": "再读一遍确认改动落盘了。",
+      "toolCalls": [
+        { "name": "fs_read", "args": { "path": "greet.js" } }
+      ]
+    },
+    {
+      "content": "改完了：空名字现在返回 hi there。改动只碰了 greet 的返回语句。"
+    }
+  ]
+}
