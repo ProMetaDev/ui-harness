@@ -8,6 +8,13 @@ set -uo pipefail
 SRC="$UI_ROOT"
 DST="$UI_BUILD_DIR"
 
+# CI 上不需要"复制到 ext4 副本"：checkout 本身就在本地盘。
+# 源与目标是同一目录时必须直接返回——rsync 同源同目标会报错，CI 第一次就红。
+if [ "$(cd "$SRC" && pwd -P)" = "$(cd "$DST" 2>/dev/null && pwd -P)" ]; then
+  echo "sync 跳过：源与目标是同一目录（$SRC）"
+  exit 0
+fi
+
 mkdir -p "$DST"
 
 if command -v rsync >/dev/null 2>&1; then

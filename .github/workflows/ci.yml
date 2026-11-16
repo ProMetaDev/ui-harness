@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # checkout 就在本地盘，不需要 rsync 到 ext4 副本（sync.sh 会自己跳过）
+      UI_BUILD_DIR: ${{ github.workspace }}
+      UI_TARGET_DIR: ${{ github.workspace }}/target
+      UI_GIT_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --version 依赖 git log；浅克隆够用，但要有完整的 HEAD
+          fetch-depth: 0
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/target
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: 前置检查
+        run: bash tools/preflight.sh
+
+      - name: 版本与密钥
+        run: |
+          bash tools/verify_version.sh
+          bash tools/scan_secrets.sh
+
+      - name: 测试
+        run: bash tools/test.sh
+
+      - name: 门禁（38 项）
+        run: bash tools/debug.sh
+
+      - name: 发布包
+        run: bash tools/release.sh
+
+      - name: 上传发布包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
