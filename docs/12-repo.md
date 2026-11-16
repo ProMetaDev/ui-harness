@@ -1,4 +1,4 @@
-﻿
+
 # 仓库、备份与恢复
 
 ## 位置
@@ -9,7 +9,7 @@
 | 构建副本 | `~/ui`（`tools/dev.sh` 每次 rsync） |
 | 编译产物 | `~/ui-target` |
 | 备份（WSL ext4） | `~/backups/harness-v2-<时间>.tar.gz` |
-| 备份镜像（Windows C:） | `C:\Users\31440\backups\` |
+| 备份镜像（Windows 系统盘） | `<用户目录>\backups\` |
 
 三份在不同物理盘上：X:（源码盘）、WSL 的 `/dev/sdd`、C:（系统盘）。
 
