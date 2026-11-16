@@ -120,6 +120,7 @@ run "契约自检（T1-T7，本地实跑）" bash tools/bench_self.sh
 run "CRLF+BOM 文件打补丁（Windows 回归）" bash tools/verify_crlf_patch.sh
 run "会话（新建/列表/互不干扰）" bash tools/verify_sessions.sh
 run "会话 Web（列表/切换/历史不串）" bash tools/verify_web_sessions.sh
+run "验证包（7 个攻击场景）" bash tools/kit.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
