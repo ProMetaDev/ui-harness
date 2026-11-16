@@ -10,6 +10,7 @@
 mod frame;
 mod render;
 mod lab;
+mod providers;
 mod server;
 mod term;
 
@@ -133,6 +134,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("workflow") => cmd_workflow(&args),
         Some("team") => cmd_team(&args),
         Some("prompt") => cmd_prompt(&args),
+        Some("providers") => cmd_providers(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -237,16 +239,79 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+/// `--provider NAME` / `.ui/providers.json`：把「用哪个模型」变成可切换的配置。
+/// 适配器仍然是外部进程，内核只负责选谁、传什么模型名。
+fn provider_model(args: &Args) -> Option<Result<Box<dyn Model + Send>, String>> {
+    let ws = workspace(args);
+    let path = args
+        .get("providers")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| providers::default_path(&ws));
+    if !path.exists() && args.get("provider").is_none() {
+        return None;
+    }
+    Some((|| {
+        let reg = providers::Registry::load(&path)?;
+        let p = reg
+            .pick(args.get("provider"))
+            .ok_or_else(|| {
+                let names: Vec<&str> = reg.providers.iter().map(|p| p.name.as_str()).collect();
+                format!(
+                    "没有名为 `{}` 的 provider（可用：{}）",
+                    args.get("provider").unwrap_or("?"),
+                    names.join(", ")
+                )
+            })?;
+        // 适配器是 shell 命令：用环境变量前缀把模型名和附加配置传进去
+        let mut head = String::new();
+        for (k, v) in &p.env {
+            head.push_str(&format!("{}={} ", k, v));
+        }
+        if !p.model.is_empty() {
+            head.push_str(&format!("UI_MODEL={} ", p.model));
+        }
+        let cmd = format!("{}{}", head, p.cmd.join(" "));
+        Ok(Box::new(ExternalModel::new(&p.name, &cmd)) as Box<dyn Model + Send>)
+    })())
+}
+
+/// `ui providers`：列出配置里的 provider（不启动任何进程）。
+fn cmd_providers(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let path = args
+        .get("providers")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| providers::default_path(&ws));
+    if !path.exists() {
+        return Err(format!(
+            "没有 provider 配置：{}\n可以写一份，例如：\n{}",
+            path.display(),
+            r#"{"default":"deepseek","providers":{"deepseek":{"cmd":"node tools/deepseek.mjs","model":"deepseek-flash"}}}"#
+        ));
+    }
+    let reg = providers::Registry::load(&path)?;
+    println!("配置 {} · 默认 {}", path.display(), if reg.default.is_empty() { "（未设）" } else { &reg.default });
+    for p in &reg.providers {
+        let mark = if p.name == reg.default { "*" } else { " " };
+        println!("{} {:<12} model={:<18} cmd={}", mark, p.name, if p.model.is_empty() { "-" } else { &p.model }, p.cmd.join(" "));
+    }
+    Ok(0)
+}
+
 fn build_model(args: &Args) -> Result<Box<dyn Model + Send>, String> {
     if let Some(path) = args.get("mock") {
         let text = std::fs::read_to_string(path).map_err(|e| format!("读剧本失败: {}", e))?;
         let scenario = json::parse(&text).map_err(|e| format!("剧本不是合法 JSON: {}", e))?;
         return Ok(Box::new(ScriptedModel::from_json(&scenario)?));
     }
+    // provider 注册表优先于裸的 UI_MODEL_CMD（它至少会校验名字存在）
+    if let Some(found) = provider_model(args) {
+        return found;
+    }
     if let Ok(cmd) = std::env::var("UI_MODEL_CMD") {
         return Ok(Box::new(ExternalModel::new("external", &cmd)));
     }
-    Err("需要 --mock 剧本，或设置 UI_MODEL_CMD 指向一个模型进程".to_string())
+    Err("需要 --mock 剧本、--provider NAME（配 .ui/providers.json），或设置 UI_MODEL_CMD 指向一个模型进程".to_string())
 }
 
 /// The interactive surface: one session, many turns, the same journal.
