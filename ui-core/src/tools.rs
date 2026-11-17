@@ -534,7 +534,15 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             "off".to_string()
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    // Windows 走另一套机制：Job Object（见 winsandbox.rs）。
+    // 它不限制文件系统，但保证进程树回收与资源上限——这是长任务最怕的两件事。
+    #[cfg(windows)]
+    let mut sandbox_label = if ctx.sandbox.fs {
+        crate::winsandbox::describe(&crate::winsandbox::Limits::from_env())
+    } else {
+        "off".to_string()
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
     let sandbox_label = "n/a".to_string();
 
     // 密钥卫生：默认清掉「看起来是密钥」的环境变量再交给子进程。
@@ -567,6 +575,26 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
         Err(e) => return ToolResult::err(format!("启动失败: {}", e)),
     };
 
+    // Windows：把子进程放进 Job。放在 spawn 之后是权衡——
+    // 严格做法是 CREATE_SUSPENDED 再 Assign（见 docs/25），但这里窗口极短，
+    // 且 KILL_ON_JOB_CLOSE 仍然能保证之后的回收。
+    #[cfg(windows)]
+    let job = if ctx.sandbox.fs {
+        match crate::winsandbox::Job::assign(child.id(), &crate::winsandbox::Limits::from_env()) {
+            Ok(j) => {
+                sandbox_label = format!("job:{}", child.id());
+                Some(j)
+            }
+            Err(e) => {
+                // 失败说清楚：我们仍然有 taskkill 兜底，但保证弱一档
+                sandbox_label = format!("job-unavailable({})", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let out_handle = std::thread::spawn(move || {
@@ -584,6 +612,10 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     let mut timed_out = false;
     let status = loop {
         if ctx.cancel.is_cancelled() {
+            #[cfg(windows)]
+            if let Some(j) = &job {
+                j.terminate();
+            }
             kill_tree(child.id());
             let _ = child.wait();
             return ToolResult::err("cancelled：用户取消了这条命令");
@@ -593,6 +625,10 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             Ok(None) => {
                 if Instant::now() >= deadline {
                     timed_out = true;
+                    #[cfg(windows)]
+                    if let Some(j) = &job {
+                        j.terminate();
+                    }
                     kill_tree(child.id());
                     break child.wait().ok();
                 }
@@ -601,6 +637,13 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             Err(_) => break None,
         }
     };
+
+    // 命令正常结束时也要收尾：`start /b` 这类命令会留下后台子进程，
+    // 「关句柄才杀」不够硬——显式 TerminateJobObject，保证不留孤儿。
+    #[cfg(windows)]
+    if let Some(j) = &job {
+        j.terminate();
+    }
 
     let out = out_handle.join().unwrap_or_default();
     let err = err_handle.join().unwrap_or_default();

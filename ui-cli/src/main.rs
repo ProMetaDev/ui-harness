@@ -361,11 +361,11 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     let sb = ui_core::sandbox::describe(&ui_core::sandbox::Config::default());
     println!("  shell   ：{}", sb);
     println!("            执行前后还会对比工作区，把**实际改动**记入 effect/observed（UI_OBSERVE=0 可关）");
-    #[cfg(not(target_os = "linux"))]
-    println!("            注意：Windows 没有对等机制，shell 在那里仍是「可执行程序」级信任");
+    #[cfg(windows)]
+    println!("            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件写入限制");
     println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
     println!("  mcp_call：同上，外部 server 在进程内自主");
-    println!("  结论    ：shell 在 Linux 上有写入沙箱；plugin / MCP 没有，仍按「可执行程序」对待");
+    println!("  结论    ：Linux 上 shell 有写入沙箱；Windows 上只有资源与回收约束；plugin / MCP 两者都没有");
 
     println!("\n工具与效果");
     for tool in registry() {

@@ -31,6 +31,7 @@ pub mod sha256;
 pub mod skill;
 pub mod time;
 pub mod tools;
+pub mod winsandbox;
 pub mod workflow;
 
 pub use agent::{resume, Agent, AgentError, ApprovalRequest, Hooks, NullHooks, ResumeReport, TurnReport};

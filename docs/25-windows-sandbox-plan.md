@@ -10,7 +10,7 @@ Linux 用 Landlock 解决了写入限制；Windows 没有对应物，只能组�
 | Linux | ✅ Landlock | ✅ 进程组 `kill(-pgid)` | ❌ | 可选禁 TCP（ABI≥4） |
 | Windows | ❌ | ⚠️ `taskkill /T /F`（会被脱离/改名绕过） | ❌ | ❌ |
 
-## A 档：Job Object（半天，先做）
+## A 档：Job Object（✅ 已完成，v0.1.4）
 
 **目标**：进程树可靠回收 + 资源上限。不是文件沙箱。
 
@@ -35,6 +35,23 @@ extern "system" {
 - **注意**：`AssignProcessToJobObject` 要在子进程创建后、跑起来之前调用。我们目前用
   `Command::spawn`，拿到 pid 之后立刻 Assign——有极短窗口，但 Job 的 kill-on-close 仍然有效。
   更严格的做法是 `CREATE_SUSPENDED` + Assign + `ResumeThread`，需要改成手动 `CreateProcessW`。
+
+**实测（2026-11-17，Windows 真机）**：
+
+```
+=== A: timeout kills the tree ===
+ping during run=1 (before=0)
+ping after exit=0
+PASS child ran (1) and the whole tree was reclaimed
+
+=== B: normal exit must not orphan (start /b) ===
+ping before=0 after=0
+PASS no orphan (job terminated on completion)
+```
+
+过程中发现一个真问题：**只靠 `KILL_ON_JOB_CLOSE` 不够**——命令正常结束（`start /b`
+立刻返回）时，后台子进程会活下来。改成**正常结束时也显式 `TerminateJobObject`** 后，
+B 才通过。回归脚本：`tools/verify_job_windows.ps1`。
 
 **验收**：
 - `shell` 跑 `cmd /C "start /b ping -n 60 127.0.0.1"` 后取消，**整棵树消失**（用 `tasklist` 验证）；
