@@ -56,11 +56,20 @@ fi
 bash "$UI_ROOT/tools/sync.sh" >/dev/null
 cd "$UI_BUILD_DIR" || exit 1
 echo "== 构建 ui.exe =="
-cargo build --offline --release --target x86_64-pc-windows-gnu -p ui-cli 2>&1 | tail -6
-
 EXE="$UI_TARGET_DIR/x86_64-pc-windows-gnu/release/ui.exe"
+# 先删旧产物：否则构建失败时会拿上一次的 exe 当结果，脚本还会退出 0（真实踩过）
+rm -f "$EXE"
+
+set -o pipefail
+cargo build --offline --release --target x86_64-pc-windows-gnu -p ui-cli 2>&1 | tail -20
+STATUS=${PIPESTATUS[0]}
+if [ "$STATUS" -ne 0 ]; then
+  echo "FAIL 交叉编译失败（cargo 退出码 $STATUS）" >&2
+  exit "$STATUS"
+fi
+
 if [ ! -f "$EXE" ]; then
-  echo "没有产物：$EXE" >&2
+  echo "没有产物：$EXE（构建算是"成功"却没产出，说明状态不对）" >&2
   exit 1
 fi
 echo

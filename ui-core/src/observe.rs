@@ -279,6 +279,26 @@ mod tests {
 
 // ─────────────────────── inotify（Linux）───────────────────────
 
+
+/// 非 Linux 平台的占位：没有 inotify，构造永远返回 None，
+/// 调用方（agent）自然退回全量扫描。
+///
+/// 这个桩是必须的：`agent.rs` 无条件持有 `Option<Watcher>` 字段，
+/// 少了它 Windows 目标直接编译失败（真实踩过——CI 的 Windows job 因此是假绿）。
+#[cfg(not(target_os = "linux"))]
+pub struct Watcher;
+
+#[cfg(not(target_os = "linux"))]
+impl Watcher {
+    pub fn new(_root: &Path) -> Option<Watcher> {
+        None
+    }
+
+    pub fn drain(&mut self) -> Option<Changes> {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use watcher::Watcher;
 

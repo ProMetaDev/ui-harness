@@ -138,6 +138,7 @@ run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.s
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
 run "隔离副本 manifest（xxh 格式）" bash tools/verify_manifest.sh
 run "干净检出的 HEAD 可构建" bash tools/verify_head_clean.sh
+run "Windows 构建 fail-closed（失败必须非零）" bash tools/verify_build_failclosed.sh
 run "导出查看器并校验" check_viewer
 
 echo
