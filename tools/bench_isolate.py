@@ -63,13 +63,22 @@ def main() -> int:
     ensure_workspace()
     files = sum(len(fs) for _, _, fs in os.walk(ROOT) if ".ui" not in _)
     print(f"工作区: {files} 个文件")
-    current = os.environ.get("UI_BIN") or sys.argv[1] if False else os.environ.get("UI_BIN")
-    if not current:
-        print("需要 UI_BIN 环境变量指向当前二进制")
+
+    current = os.environ.get("UI_BIN") or os.path.join(
+        os.path.expanduser("~"), "ui-target", "release", "ui"
+    )
+    if not (current and os.path.exists(current)):
+        print(f"找不到当前二进制: {current!r}")
         return 1
+
     bench("当前版本", current)
-    if len(sys.argv) > 1:
-        bench("基准版本", sys.argv[1])
+
+    base = sys.argv[1] if len(sys.argv) > 1 else ""
+    if base:
+        if not os.path.exists(base):
+            print(f"找不到基准二进制: {base!r}")
+            return 1
+        bench("基准版本", base)
     return 0
 
 
