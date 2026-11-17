@@ -211,11 +211,8 @@ impl Agent {
         limits: Limits,
     ) -> Agent {
         let policy = Policy::new(Policy::defaults(&workspace), &workspace);
-        let turn = journal
-            .events
-            .iter()
-            .filter(|e| e.str_at("kind") == Some("turn/start"))
-            .count() as u64;
+        // 事件缓冲有上限，轮次必须来自独立计数
+        let turn = journal.turn_count();
         Agent {
             journal,
             model,
@@ -224,7 +221,7 @@ impl Agent {
             tools: registry(),
             workspace,
             goal: None,
-            max_steps: 24,
+            max_steps: limits.max_steps,
             max_repairs: 2,
             compact: CompactPolicy::default(),
             cancel: Cancel::new(),
@@ -1345,6 +1342,7 @@ mod tests {
             tool_calls: 2,
             wall_ms: 60_000,
             usd: 1.0,
+            max_steps: 24,
         };
         let mut agent = Agent::new(journal, model(&script), ws, limits);
         let mut hooks = NullHooks;

@@ -34,7 +34,19 @@ pub struct Journal {
     /// 本进程的 writer 标识：多进程共享日志时，靠它把交织的 turn 分开
     writer: String,
     pub events: Vec<Json>,
+    /// 因为内存上限被挤出的事件数（日志文件里仍然完整）
+    dropped: u64,
+    /// turn/start 的总数。事件被挤出后不能再靠数 events 得到
+    turns: u64,
 }
+
+/// 内存里最多保留多少条事件。
+///
+/// 为什么要上限：浸泡测试里 1200 步、10712 条事件把 RSS 从 6MB 顶到 32MB。
+/// 那不是泄漏，是**无上限增长**——跑几小时的 agent 会把内存吃光。
+/// 写日志只依赖 seq/prev（都是标量），历史事件只有 resume/回放需要，
+/// 而它们走的是 `Journal::load`（从磁盘读全量），不依赖这个缓冲。
+const MAX_KEPT_EVENTS: usize = 2000;
 
 fn writer_id() -> String {
     let pid = std::process::id();
@@ -179,6 +191,10 @@ impl Journal {
             ),
             None => (0, GENESIS.to_string()),
         };
+        let turns = events
+            .iter()
+            .filter(|e| e.str_at("kind") == Some("turn/start"))
+            .count() as u64;
         let mut journal = Journal {
             path,
             seq,
@@ -186,6 +202,8 @@ impl Journal {
             offset,
             writer: writer_id(),
             events,
+            dropped: 0,
+            turns,
         };
         if let Some(reason) = torn_note {
             journal.append(
@@ -201,6 +219,16 @@ impl Journal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 已经完成过多少轮（不受内存上限影响）。
+    pub fn turn_count(&self) -> u64 {
+        self.turns
+    }
+
+    /// 有多少条历史事件为了省内存被挤出缓冲（日志文件里仍然完整）。
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped
     }
 
     /// 把别的 writer 在我们上次读取之后追加的内容补进来，并接上 seq/prev。
@@ -294,7 +322,15 @@ impl Journal {
         self.seq += 1;
         self.prev = hash;
         self.offset += line.len() as u64;
+        if kind == "turn/start" {
+            self.turns += 1;
+        }
         self.events.push(event.clone());
+        if self.events.len() > MAX_KEPT_EVENTS {
+            let excess = self.events.len() - MAX_KEPT_EVENTS;
+            self.events.drain(0..excess);
+            self.dropped += excess as u64;
+        }
         Ok(event)
     }
 
@@ -660,6 +696,40 @@ fn open_offset_always_matches_the_records_it_parsed() {
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn memory_buffer_is_capped_but_disk_keeps_everything() {
+    // 浸泡测试发现的问题：Journal 把所有事件留在内存里，1200 步后 RSS 从 6MB 涨到 32MB。
+    // 上限之后：内存有顶、轮次计数仍然准确、磁盘上的日志一条不少。
+    let dir = std::env::temp_dir().join(format!("ui-journal-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("journal.jsonl");
+
+    let total = MAX_KEPT_EVENTS + 500;
+    let turns: u64 = 7;
+    let mut j = Journal::open(&path).unwrap();
+    for i in 0..total {
+        let kind = if (i as u64) < turns { "turn/start" } else { "note" };
+        j.append(kind, Json::obj(vec![("i", Json::from(i as u64))])).unwrap();
+    }
+
+    assert!(
+        j.events.len() <= MAX_KEPT_EVENTS,
+        "内存里最多保留 {} 条，实际 {}",
+        MAX_KEPT_EVENTS,
+        j.events.len()
+    );
+    assert_eq!(j.dropped_events(), (total - MAX_KEPT_EVENTS) as u64);
+    assert_eq!(j.turn_count(), turns, "轮次计数不能被挤出影响");
+
+    // 磁盘完整性不受缓冲上限影响
+    let (events, corrupt) = Journal::read(&path).unwrap();
+    assert!(corrupt.is_none(), "链必须完整: {:?}", corrupt);
+    assert_eq!(events.len(), total, "磁盘上一条都不能少");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

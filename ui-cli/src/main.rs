@@ -338,7 +338,7 @@ fn help() -> String {
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
-     通用参数: --workspace PATH  --task-file PATH  --max-tokens N  --max-calls N  --yes\n\
+     通用参数: --workspace PATH  --task-file PATH  --max-tokens N  --max-calls N  --max-steps N  --yes\n\
      模式:     --mode quiet | standard | strict\n\
      模型:     --mock 剧本.json   或   UI_MODEL_CMD=\"node adapters/deepseek.mjs\"\n\
      网页端:   --port N  --bundles 目录  --bench-cmd \"命令\"\n\
@@ -1173,6 +1173,10 @@ fn limits_from(args: &Args) -> Limits {
     }
     if let Some(v) = args.get("max-usd").and_then(|v| v.parse().ok()) {
         limits.usd = v;
+    }
+    // 长任务需要更多步：默认 24 步对"跑一小时"远远不够
+    if let Some(v) = args.get("max-steps").and_then(|v| v.parse().ok()) {
+        limits.max_steps = v;
     }
     limits
 }

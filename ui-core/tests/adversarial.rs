@@ -337,6 +337,7 @@ fn zero_limit_means_no_spending_not_unlimited() {
         tool_calls: 0,
         wall_ms: 0,
         usd: 0.0,
+        max_steps: 24,
     });
     assert!(
         b.charge(Dim::Tokens, 1.0).is_err(),
