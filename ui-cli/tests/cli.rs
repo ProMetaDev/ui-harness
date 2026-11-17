@@ -642,3 +642,65 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
     );
     assert!(text.contains("产物 1 个校验通过"), "校验没数到产物: {}", text);
 }
+
+#[test]
+fn export_streams_events_and_refuses_a_tampered_journal() {
+    // 导出曾经把全部事件读进内存再拼成一个字符串（7 万条要 112 MB）。
+    // 改成流式之后：事件数与日志一致，且损坏的日志必须拒绝导出。
+    let ws = temp_ws("export");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"a","toolCalls":[{"name":"fs_write","args":{"path":"a.txt","content":"1"}}]},
+            {"content":"b","toolCalls":[{"name":"fs_write","args":{"path":"b.txt","content":"2"}}]},
+            {"content":"c","toolCalls":[{"name":"fs_write","args":{"path":"c.txt","content":"3"}}]},
+            {"content":"done"}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .args([
+            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
+            "--workspace", ws.to_str().unwrap(), "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let html_path = ws.join("trace.html");
+    let out = Command::new(bin())
+        .args([
+            "export", "--workspace", ws.to_str().unwrap(), "--html", html_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("export");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // 内嵌 JSON 必须完整可解析，且事件数与日志行数一致
+    let html = fs::read_to_string(&html_path).unwrap();
+    let marker = "<script id=\"ui-data\" type=\"application/json\">";
+    let start = html.find(marker).expect("内嵌数据块") + marker.len();
+    let end = html[start..].find("</script>").expect("数据块结束") + start;
+    let data = ui_core::json::parse(&html[start..end]).expect("内嵌 JSON 必须可解析");
+    let embedded = data.arr_at("events").map(|a| a.len()).unwrap_or(0);
+    let lines = fs::read_to_string(ws.join(".ui").join("journal.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert_eq!(embedded, lines, "导出的事件数必须与日志一致");
+
+    // 篡改一个字节：必须拒绝，且不留下半成品文件
+    let jp = ws.join(".ui").join("journal.jsonl");
+    let text = fs::read_to_string(&jp).unwrap();
+    fs::write(&jp, text.replacen("\"a.txt\"", "\"evil.txt\"", 1)).unwrap();
+    let bad = ws.join("bad.html");
+    let out = Command::new(bin())
+        .args([
+            "export", "--workspace", ws.to_str().unwrap(), "--html", bad.to_str().unwrap(),
+        ])
+        .output()
+        .expect("export");
+    assert_eq!(out.status.code(), Some(2), "损坏日志的导出必须退出 2");
+    assert!(!bad.exists(), "损坏日志不该产出文件");
+}

@@ -2282,10 +2282,21 @@ fn cmd_verify(args: &Args) -> Result<i32, String> {
 fn cmd_export(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
-    let events = Journal::load(&jp).map_err(|e| e.to_string())?;
     let limits = limits_from(args);
 
-    let doc = Json::obj(vec![
+    // 先流式校验：**不导出损坏的日志**（尾部撕裂可以，正文被改不行）。
+    // 这一步很便宜（30 万条 ~0.5s），但能保证后面原样拷贝的行都是可信的。
+    let report = ui_core::stream_verify::verify_stream(&jp).map_err(|e| e.to_string())?;
+    if let Some(c) = &report.corrupt {
+        if !c.torn {
+            eprintln!("日志损坏（seq={:?}）：{}", c.seq, c.reason);
+            eprintln!("拒绝导出——导出的轨迹必须可信。先跑 `ui verify` 看看。");
+            return Ok(2);
+        }
+    }
+
+    // 头部（不含 events）：先构造一个小 JSON，再去掉末尾的 `}`，后面接 events 数组
+    let head = Json::obj(vec![
         ("workspace", Json::from(ws.to_string_lossy().as_ref())),
         ("journal", Json::from(jp.to_string_lossy().as_ref())),
         (
@@ -2295,18 +2306,65 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
                 ("maxToolCalls", Json::from(limits.tool_calls)),
             ]),
         ),
-        ("events", Json::Arr(events)),
-    ]);
-
-    // 内嵌 JSON 时转义 `</`，否则事件里出现 `</script>` 会把文档截断。
-    let data = doc.to_compact().replace("</", "<\\/");
-    let html = VIEWER.replace("__UI_DATA__", &data);
+        ("eventCount", Json::from(report.events as u64)),
+    ])
+    .to_compact();
+    let head = &head[..head.len().saturating_sub(1)]; // 去掉结尾的 }
 
     let out = args.get("html").unwrap_or("out/trace.html");
     if let Some(parent) = Path::new(out).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(out, html).map_err(|e| format!("写文件失败: {}", e))?;
+
+    // 流式写：模板切成前缀/后缀，中间边读日志边写，内存与日志大小无关。
+    let (prefix, suffix) = match VIEWER.find("__UI_DATA__") {
+        Some(i) => (&VIEWER[..i], &VIEWER[i + "__UI_DATA__".len()..]),
+        None => return Err("查看器模板里没有 __UI_DATA__ 占位符".to_string()),
+    };
+
+    let file = File::create(out).map_err(|e| format!("写文件失败: {}", e))?;
+    let mut w = std::io::BufWriter::new(file);
+
+    w.write_all(prefix.as_bytes())
+        .map_err(|e| format!("写文件失败: {}", e))?;
+    w.write_all(head.as_bytes())
+        .map_err(|e| format!("写文件失败: {}", e))?;
+    w.write_all(b",\"events\":[")
+        .map_err(|e| format!("写文件失败: {}", e))?;
+
+    let src = File::open(&jp).map_err(|e| format!("{}: {}", jp.display(), e))?;
+    let mut reader = BufReader::new(src);
+    let mut buf = String::new();
+    let mut first = true;
+    loop {
+        buf.clear();
+        let n = reader
+            .read_line(&mut buf)
+            .map_err(|e| format!("读日志失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        let line = buf.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if !first {
+            w.write_all(b",").map_err(|e| format!("写文件失败: {}", e))?;
+        }
+        first = false;
+        // 事件里出现 `</script>` 会截断文档，必须转义
+        let escaped = line.replace("</", "<\\/");
+        w.write_all(escaped.as_bytes())
+            .map_err(|e| format!("写文件失败: {}", e))?;
+    }
+
+    w.write_all(b"]}")
+        .map_err(|e| format!("写文件失败: {}", e))?;
+    w.write_all(suffix.as_bytes())
+        .map_err(|e| format!("写文件失败: {}", e))?;
+    w.flush().map_err(|e| format!("写文件失败: {}", e))?;
+    drop(w);
+
     let abs = std::fs::canonicalize(out).unwrap_or_else(|_| PathBuf::from(out));
     println!("已导出 {}", abs.display());
     if let Some(win) = windows_path(&abs) {
