@@ -84,7 +84,10 @@ bash tools/preflight.sh || true
 echo
 echo "== L1 内核（无终端、无模型）"
 LAYER=1
-run "build" cargo build --release --offline
+# 构建必须和 dev.sh/test.sh 一样在副本里做：
+# 同一个 target 目录混用两个源目录（X: 与 ~/ui）会让 cargo 的指纹错乱，
+# 拿到过期的 ui-core 元数据（真实踩过：报「cannot find Sha256」）。
+run "build" bash tools/dev.sh build --release
 run "unit + integration tests" cargo test --offline
 run "doctor" "$BIN" doctor --workspace demo
 run "verify（干净日志）" check_verify_clean

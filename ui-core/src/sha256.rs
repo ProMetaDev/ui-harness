@@ -12,20 +12,81 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-pub fn digest(data: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
+/// 增量哈希：复制文件时边读边算，避免为了算哈希再读一遍。
+pub struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    buf_len: usize,
+    total: u64,
+}
 
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
+impl Default for Sha256 {
+    fn default() -> Sha256 {
+        Sha256::new()
     }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
+}
 
-    for chunk in msg.chunks_exact(64) {
+impl Sha256 {
+    pub fn new() -> Sha256 {
+        Sha256 {
+            h: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buf: [0u8; 64],
+            buf_len: 0,
+            total: 0,
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        self.total += data.len() as u64;
+        let mut rest = data;
+        // 先填满缓冲区
+        if self.buf_len > 0 {
+            let need = 64 - self.buf_len;
+            let take = need.min(rest.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&rest[..take]);
+            self.buf_len += take;
+            rest = &rest[take..];
+            if self.buf_len == 64 {
+                let block = self.buf;
+                self.compress(&block);
+                self.buf_len = 0;
+            }
+        }
+        // 整块直接压缩
+        let mut chunks = rest.chunks_exact(64);
+        for chunk in &mut chunks {
+            self.compress(chunk);
+        }
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            self.buf[..tail.len()].copy_from_slice(tail);
+            self.buf_len = tail.len();
+        }
+    }
+
+    pub fn finish(mut self) -> [u8; 32] {
+        let bit_len = self.total.wrapping_mul(8);
+        let mut pad = [0u8; 72];
+        pad[0] = 0x80;
+        // 需要补多少字节：凑到 56 mod 64
+        let rem = (self.buf_len + 1) % 64;
+        let zeros = if rem <= 56 { 56 - rem } else { 120 - rem };
+        self.update(&pad[..1 + zeros]);
+        // 长度字段（注意 update 会改 total，用之前存的值）
+        let len_bytes = bit_len.to_be_bytes();
+        self.total = self.total.wrapping_sub((1 + zeros) as u64);
+        self.update(&len_bytes);
+        let mut out = [0u8; 32];
+        for (i, word) in self.h.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    fn compress(&mut self, chunk: &[u8]) {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -44,8 +105,8 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
                 .wrapping_add(s1);
         }
 
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        let (mut a, mut b, mut c, mut d) = (self.h[0], self.h[1], self.h[2], self.h[3]);
+        let (mut e, mut f, mut g, mut hh) = (self.h[4], self.h[5], self.h[6], self.h[7]);
 
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
@@ -69,21 +130,21 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
             a = temp1.wrapping_add(temp2);
         }
 
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+        self.h[0] = self.h[0].wrapping_add(a);
+        self.h[1] = self.h[1].wrapping_add(b);
+        self.h[2] = self.h[2].wrapping_add(c);
+        self.h[3] = self.h[3].wrapping_add(d);
+        self.h[4] = self.h[4].wrapping_add(e);
+        self.h[5] = self.h[5].wrapping_add(f);
+        self.h[6] = self.h[6].wrapping_add(g);
+        self.h[7] = self.h[7].wrapping_add(hh);
     }
+}
 
-    let mut out = [0u8; 32];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+pub fn digest(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finish()
 }
 
 pub fn hex(data: &[u8]) -> String {
@@ -113,5 +174,24 @@ mod tests {
             hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
+    }
+
+    #[test]
+    fn incremental_matches_one_shot() {
+        // 三条 FIPS 向量 + 分块喂入，必须与一次性算的结果一致
+        for input in [&b""[..], &b"abc"[..], &b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"[..]] {
+            let mut h = Sha256::new();
+            for chunk in input.chunks(7) {
+                h.update(chunk);
+            }
+            assert_eq!(h.finish(), digest(input), "分块喂入结果不一致");
+        }
+        // 大一点的输入：跨多个块边界
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let mut h = Sha256::new();
+        for chunk in data.chunks(63) {
+            h.update(chunk);
+        }
+        assert_eq!(h.finish(), digest(&data));
     }
 }

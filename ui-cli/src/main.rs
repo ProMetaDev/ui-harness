@@ -2985,29 +2985,76 @@ struct ChildResult {
 const ISOLATE_SKIP: &[&str] = &[".ui", "out", "target", "node_modules", ".git", "secrets"];
 const MAX_COMPARE_BYTES: u64 = 2 * 1024 * 1024;
 
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<u64> {
+/// 复制并**在同一次读取里**算出哈希。
+///
+/// 之前是 `copy_file` + `hash_file`：写完再整个读一遍，等于每份工作区读两遍。
+/// 隔离副本动辄上千个文件，这一遍就是主要开销。
+fn copy_and_hash(from: &Path, to: &Path) -> std::io::Result<(u64, Option<String>)> {
+    use std::io::{Read, Write};
+
     let size = from.metadata().map(|m| m.len()).unwrap_or(0);
-    // 大文件先试写时复制（btrfs/xfs 上是 O(1)；ext4 会自动退化成普通复制）
-    if size >= 1024 * 1024 {
-        #[cfg(not(windows))]
-        if let Ok(status) = std::process::Command::new("cp")
-            .arg("--reflink=auto")
-            .arg(from)
-            .arg(to)
-            .status()
-        {
-            if status.success() {
-                return Ok(size);
-            }
-        }
+
+    // 大文件先试写时复制：btrfs/xfs 上是 O(1)。失败（ext4 等）就退回普通复制。
+    // 不管走哪条路，哈希都必须把内容读一遍，所以这里只省了"写"。
+    #[cfg(not(windows))]
+    if size >= 1024 * 1024 && reflink(from, to).is_ok() {
+        let hash = hash_file(from);
+        return Ok((size, hash));
     }
-    std::fs::copy(from, to)?;
-    Ok(size)
+
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::File::create(to)?;
+    let mut hasher = ui_core::sha256::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        dst.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+    dst.flush()?;
+    let digest = hasher.finish();
+    Ok((total, Some(ui_core::sha256::hex(&digest))))
+}
+
+/// 写时复制（Linux FICLONE）。不支持的文件系统会返回错误，调用方退回普通复制。
+#[cfg(not(windows))]
+fn reflink(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::raw::{c_int, c_ulong};
+    use std::os::unix::io::AsRawFd;
+
+    const FICLONE: c_ulong = 0x4004_9409;
+    extern "C" {
+        fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    }
+
+    let src = std::fs::File::open(from)?;
+    let dst = std::fs::File::create(to)?;
+    let rc = unsafe { ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd() as c_ulong) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn hash_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(ui_core::sha256::hex(&bytes))
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut hasher = ui_core::sha256::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(ui_core::sha256::hex(&hasher.finish()))
 }
 
 /// 复制工作区，同时记下「复制那一刻每个文件的哈希」——回写时用它检测漂移。
@@ -3036,12 +3083,12 @@ fn copy_tree(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            bytes += copy_file(&from, &to)?;
+            // 一次读取：写副本 + 算哈希（manifest 用它检测回写时的漂移）
+            let (n, hash) = copy_and_hash(&from, &to)?;
+            bytes += n;
             files += 1;
-            if let Ok(rel) = from.strip_prefix(root) {
-                if let Some(h) = hash_file(&from) {
-                    manifest.push((rel.to_string_lossy().to_string(), h));
-                }
+            if let (Ok(rel), Some(h)) = (from.strip_prefix(root), hash) {
+                manifest.push((rel.to_string_lossy().to_string(), h));
             }
         }
     }
