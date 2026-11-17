@@ -651,6 +651,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .queue-item .qs{margin-top:2px;font-size:10px;color:var(--faint);line-height:1.5}
 .insp-foot{padding:9px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;
   font:9.5px var(--mono);color:var(--faint)}
+.insp-foot .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
 
 /* composer */
 .composer{max-width:720px;margin:0 auto;border:1px solid var(--border);border-radius:7px;background:var(--panel);
@@ -1344,7 +1345,8 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
     }
     decisionListEl.innerHTML = decisions.map((d) => {
       const v = String(d.decision || 'ask');
-      return '<div class="dec ' + v + '" data-call-id="' + escapeHtml(d.callId || '') + '">' +
+      return '<div class="dec ' + v + '" data-call-id="' + escapeHtml(d.callId || '') + '" data-key="' +
+        escapeHtml(d._key || '') + '">' +
         '<span class="dd"></span>' +
         '<div class="r1"><span class="t">' + escapeHtml(d.tool) + '</span>' +
         '<span class="chip ' + v + '">' + v + '</span></div>' +
@@ -1353,8 +1355,9 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
   }
 
   function addDecision(ev) {
-    // 同一个 callId 只留一条（审批后原地改结论）
-    decisions = decisions.filter((d) => d.callId !== ev.callId);
+    // 内核的 callId 在一轮里可能复用（call-1），所以用 seq 做去重键；
+    // 审批回执只改「最后一条同 callId 且仍是 ask」的记录。
+    ev._key = String(ev.callId || '') + ':' + String(ev.tool || '') + ':' + String(ev.seq || Date.now());
     decisions.push(ev);
     if (decisions.length > 24) decisions.shift();
     if (decCountEl) decCountEl.textContent = String(decisions.length);
@@ -1363,8 +1366,11 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 
   function resolveDecision(callId, verdict) {
     const v = verdict === 'auto' || verdict === 'allow' || verdict === 'always' ? 'allow' : 'deny';
-    for (const d of decisions) {
-      if (d.callId === callId) d.decision = v;
+    for (let i = decisions.length - 1; i >= 0; i--) {
+      if (decisions[i].callId === callId && decisions[i].decision === 'ask') {
+        decisions[i].decision = v;
+        break;
+      }
     }
     renderDecisions();
   }
