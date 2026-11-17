@@ -377,6 +377,128 @@ table.t td.r{text-align:right}
              font:10px var(--mono);cursor:pointer}
 .demo button.on{background:var(--accent-soft);color:var(--accent)}
 
+/* ── motion：只服务状态变化，不做装饰性乱飞 ─────────────────── */
+:root{
+  --ease-out:cubic-bezier(.22,1,.36,1);
+  --ease-soft:cubic-bezier(.4,0,.2,1);
+  --dur-fast:140ms; --dur:240ms; --dur-slow:520ms;
+}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes view-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes growX{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes pop{0%{opacity:0;transform:scale(.55)}70%{transform:scale(1.08)}100%{opacity:1;transform:scale(1)}}
+@keyframes reveal{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+@keyframes gate-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes stamp-in{
+  0%{opacity:0;transform:rotate(-18deg) scale(.72)}
+  70%{opacity:.7;transform:rotate(-6deg) scale(1.05)}
+  100%{opacity:.55;transform:rotate(-8deg) scale(1)}
+}
+@keyframes sweep{0%{transform:translateX(-110%)}55%,100%{transform:translateX(110%)}}
+@keyframes livePulse{
+  0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(227,162,75,.34)}
+  50%{opacity:.55;box-shadow:0 0 0 4px rgba(227,162,75,0)}
+}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+@keyframes grid-drift{to{background-position:48px 48px}}
+
+/* 面板颜色切换有过渡，但不动布局 */
+body,.rail,.topbar,.sidebar,.main,.inspector,.status,.composer-wrap,.card,details.tool,
+.gatebar,.intent,.sess,.btn,.mode,.chip{transition:background-color .22s var(--ease-soft),
+  border-color .22s var(--ease-soft),color .22s var(--ease-soft)}
+
+/* 进入一个视图：整体先淡入，再让子元素依次到位 */
+.view-chat,.view-empty,.view-lab{animation:view-in .42s var(--ease-out) both}
+.stage .entry{animation:rise .46s var(--ease-out) both}
+.stage .entry:nth-child(1){animation-delay:.02s}
+.stage .entry:nth-child(2){animation-delay:.05s}
+.stage .entry:nth-child(3){animation-delay:.08s}
+.stage .entry:nth-child(4){animation-delay:.11s}
+.stage .entry:nth-child(5){animation-delay:.14s}
+.stage .entry:nth-child(6){animation-delay:.17s}
+.stage .entry:nth-child(7){animation-delay:.20s}
+.stage .entry:nth-child(8){animation-delay:.23s}
+.stage .entry:nth-child(9){animation-delay:.26s}
+.stage .entry:nth-child(10){animation-delay:.29s}
+.stage .entry:nth-child(11){animation-delay:.32s}
+.stage .entry:nth-child(12){animation-delay:.35s}
+.stage .inspector .blk{animation:rise .44s var(--ease-out) both}
+.stage .inspector .blk:nth-of-type(1){animation-delay:.08s}
+.stage .inspector .blk:nth-of-type(2){animation-delay:.16s}
+.stage .inspector .blk:nth-of-type(3){animation-delay:.24s}
+.stage .inspector .blk:nth-of-type(4){animation-delay:.32s}
+.stage .gatebar{animation:gate-in .5s .55s var(--ease-out) both}
+.stage .preflight-grid > *{animation:rise .5s var(--ease-out) both}
+.stage .preflight-grid > *:nth-child(2){animation-delay:.1s}
+.stage .card{animation:rise .46s var(--ease-out) both}
+.stage .card:nth-of-type(2){animation-delay:.06s}
+.stage .card:nth-of-type(3){animation-delay:.12s}
+.stage .card:nth-of-type(4){animation-delay:.18s}
+.stage .card:nth-of-type(5){animation-delay:.24s}
+.stage .metric{animation:rise .4s var(--ease-out) both}
+.stage .metric:nth-child(3){animation-delay:.05s}
+.stage .metric:nth-child(4){animation-delay:.1s}
+.stage .metric:nth-child(5){animation-delay:.15s}
+.stage .check{animation:rise .36s var(--ease-out) both}
+.stage .check:nth-child(3){animation-delay:.06s}
+.stage .check:nth-child(4){animation-delay:.12s}
+.stage .check:nth-child(5){animation-delay:.18s}
+.stage table.t tbody tr{animation:fade .4s var(--ease-out) both}
+.stage table.t tbody tr:nth-child(2){animation-delay:.06s}
+.stage .dec{animation:rise .38s var(--ease-out) both}
+.stage .dec:nth-of-type(1){animation-delay:.1s}
+.stage .dec:nth-of-type(2){animation-delay:.18s}
+.stage .dec:nth-of-type(3){animation-delay:.26s}
+.stage .stamp{animation:stamp-in .72s .42s var(--ease-out) both}
+.stage .uu{animation:float 5s ease-in-out infinite}
+
+/* 数据在“长出来”，不是突然出现 */
+.segbar{position:relative;overflow:hidden}
+.segbar i{transform-origin:left;animation:growX .8s var(--ease-out) both}
+.segbar i:nth-child(1){animation-delay:.12s}
+.segbar i:nth-child(2){animation-delay:.18s}
+.segbar i:nth-child(3){animation-delay:.24s}
+.segbar i:nth-child(4){animation-delay:.30s}
+.segbar i:nth-child(5){animation-delay:.36s}
+.segbar::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);
+  transform:translateX(-110%);animation:sweep 4.8s 1.4s infinite}
+.budget .bar i{transform-origin:left;animation:growX .8s var(--ease-out) both}
+.dec .dd{animation:pop .38s var(--ease-out) both}
+.dec:nth-of-type(1) .dd{animation-delay:.16s}
+.dec:nth-of-type(2) .dd{animation-delay:.24s}
+.dec:nth-of-type(3) .dd{animation-delay:.32s}
+.dot.live{animation:livePulse 1.9s ease-in-out infinite}
+details.tool .toolbody{animation:reveal .22s var(--ease-out)}
+.gatebar{position:relative;overflow:hidden;animation:gate-in .5s .55s var(--ease-out) both}
+.gatebar::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(227,162,75,.10),transparent);
+  transform:translateX(-110%);animation:sweep 5.2s 1.8s infinite}
+.inspector{position:relative}
+.inspector::before{content:"";position:absolute;top:-50px;right:-40px;width:220px;height:180px;
+  background:radial-gradient(circle,var(--accent-soft),transparent 70%);pointer-events:none;opacity:.55}
+.inspector > *{position:relative;z-index:1}
+.main::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(var(--line-soft) 1px,transparent 1px),
+                   linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+  background-size:48px 48px;opacity:.16;mask-image:linear-gradient(180deg,#000,transparent 68%)}
+.main-scroll,.composer-wrap{position:relative;z-index:1}
+
+/* 按钮：按下有回应，主按钮轻微抬起 */
+.btn,.send,.iconbtn,.rbtn,.intent,.sess,.newline,.actrow{transition:background-color .16s var(--ease-soft),
+  border-color .16s var(--ease-soft),color .16s var(--ease-soft),transform .12s var(--ease-soft)}
+.btn:active,.send:active,.iconbtn:active,.rbtn:active{transform:translateY(1px)}
+.btn.primary:hover{transform:translateY(-1px);box-shadow:0 7px 20px rgba(0,0,0,.18)}
+.gatebar .btn.primary:hover{box-shadow:0 7px 20px rgba(227,162,75,.16)}
+
+html[data-motion="off"] *{animation:none !important;transition:none !important}
+html[data-motion="off"] .segbar i,html[data-motion="off"] .budget .bar i{transform:none !important}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;scroll-behavior:auto !important}
+}
+
 /* 空状态 / 实验室不需要「当前步」右栏：让主区真正占满 */
 html[data-view="empty"] .app,
 html[data-view="lab"] .app{grid-template-columns:64px 272px minmax(0,1fr) 0}
@@ -407,7 +529,7 @@ html[data-view="lab"] .status{grid-column:1/4}
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app stage">
 
   <!-- ── activity rail ─────────────────────────────────────── -->
   <nav class="rail" aria-label="主导航">
@@ -449,7 +571,7 @@ html[data-view="lab"] .status{grid-column:1/4}
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
       <span>命令、会话、文件</span><kbd>Ctrl K</kbd>
     </button>
-    <span class="stat"><span class="dot"></span><b id="topModel">deepseek-chat</b></span>
+    <span class="stat"><span class="dot" id="topDot"></span><b id="topModel">deepseek-chat</b></span>
     <div class="mode" role="group" aria-label="模式">
       <button>quiet</button><button class="on">standard</button><button>strict</button>
     </div>
@@ -784,7 +906,7 @@ tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
         <div class="bline"><div class="bar"><i style="width:1%"></i></div><span class="pct">0.9%</span></div>
         <div class="brow"><span>tool calls</span><b>3 / 60</b></div>
         <div class="bline"><div class="bar"><i style="width:5%"></i></div><span class="pct">5%</span></div>
-        <div class="brow"><span>wall</span><b>12s</b></div>
+        <div class="brow"><span>wall</span><b data-elapsed>12s</b></div>
         <div class="brow"><span>cost</span><b>$0.000</b></div>
       </div>
 
@@ -828,6 +950,8 @@ tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
   const root = document.documentElement;
   const params = new URLSearchParams(location.search);
   const views = document.querySelectorAll('.demo [data-view]');
+  const app = document.querySelector('.app');
+  let elapsed = 12;
 
   const copy = {
     approval: {
@@ -874,7 +998,17 @@ tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
     document.getElementById('sbCalls').innerHTML = c.calls;
     document.getElementById('sbCost').innerHTML = c.cost;
     document.getElementById('sbTime').textContent = c.time;
+    document.getElementById('topDot').className =
+      'dot ' + (view === 'approval' ? 'warn live' : view === 'lab' ? 'ok' : '');
+    if (view === 'approval') {
+      elapsed = 12;
+      document.querySelectorAll('[data-elapsed]').forEach(el => (el.textContent = '12s'));
+    }
     views.forEach(b => b.classList.toggle('on', b.dataset.view === view));
+    // 重播入场：切视图时子元素重新“长出来”，而不是硬切
+    app.classList.remove('stage');
+    void app.offsetWidth;
+    app.classList.add('stage');
   }
 
   views.forEach(b => b.addEventListener('click', () => applyView(b.dataset.view)));
@@ -882,7 +1016,8 @@ tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
     root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
   });
 
-  // 原型参数：?view=lab&theme=light&clean=1&scroll=bottom
+  // 原型参数：?view=lab&theme=light&clean=1&scroll=bottom&motion=off
+  if (params.get('motion') === 'off') root.dataset.motion = 'off';
   if (params.get('view')) applyView(params.get('view'));
   else applyView(root.dataset.view || 'approval');
   if (params.get('theme')) root.dataset.theme = params.get('theme');
@@ -893,6 +1028,21 @@ tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
       s.scrollTop = s.scrollHeight;
     });
   }
+
+  // 给录屏/评审用：重播一次入场，不触发视图切换
+  window.__uiReplay = () => {
+    app.classList.remove('stage');
+    void app.offsetWidth;
+    app.classList.add('stage');
+  };
+
+  // 运行中：秒表真的在走（只在审批态更新，空/实验室不假装在跑）
+  setInterval(() => {
+    if (root.dataset.view !== 'approval') return;
+    elapsed += 1;
+    document.querySelectorAll('[data-elapsed]').forEach(el => (el.textContent = elapsed + 's'));
+    document.getElementById('sbTime').textContent = elapsed + 's';
+  }, 1000);
 
   const ta = document.querySelector('.composer textarea');
   ta.addEventListener('input', () => {
