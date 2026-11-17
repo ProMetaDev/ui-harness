@@ -823,6 +823,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .insp-head .lbl{padding-top:3px}
 .insp-head .st{margin-top:3px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
 .insp-head .st b{font-weight:500;color:var(--muted)}
+.insp-head .insp-time{margin-top:3px;color:var(--faint);font:9.5px var(--mono);letter-spacing:.04em}
 .right-body{position:relative;z-index:1;flex:1;overflow:auto;padding:0 16px 14px 22px;min-height:0}
 /* 当前步是一棵小树：spine + 分支点；每个 block 是一个分支 */
 .right-body::before{content:"";position:absolute;left:7px;top:2px;bottom:10px;width:1px;background:var(--border)}
@@ -870,8 +871,11 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
   border:1px solid var(--bg)}
 .dec.is-new .dd{animation:v2pop .34s var(--ease-out) both}
 .dec.allow .dd{background:var(--ok)} .dec.ask .dd{background:var(--warn)} .dec.deny .dd{background:var(--bad)}
-.dec .r1{display:flex;align-items:center;gap:6px;font-size:11px}
+.dec .r1{display:flex;align-items:center;gap:6px;font-size:11px;padding-right:56px}
 .dec .r1 .t{font:500 11px var(--mono);color:var(--text)}
+.dec .dtime{position:absolute;right:0;top:0;color:var(--faint);font:9px var(--mono)}
+.dec .dwait{position:absolute;right:0;top:13px;color:var(--faint);font:9px var(--mono)}
+.dec.ask .dwait{color:var(--warn)}
 .dec .r2{margin-top:2px;color:var(--faint);font-size:10px;line-height:1.5;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .chip{display:inline-flex;align-items:center;height:18px;padding:0 5px;border-radius:3px;font:500 9.5px/1 var(--mono)}
@@ -1007,6 +1011,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   .insp-head .lbl .st{writing-mode:vertical-rl;text-orientation:mixed;gap:6px;
     font-size:10px;line-height:1.2;white-space:nowrap;color:var(--muted)}
   .right-body,.insp-foot{display:none}
+  .insp-head .insp-time{display:none}
   .shell .statusbar{grid-column:1/-1}
   .mh-path{display:none}
 }
@@ -1276,6 +1281,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       <div class="lbl">
         <div class="kicker">Current step</div>
         <div class="st"><span class="dot" id="stepDot"></span><b id="stepState">空闲</b></div>
+        <div class="insp-time" id="stepTime">—</div>
       </div>
     </div>
     <div class="right-body">
@@ -1639,12 +1645,16 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   const liveStop = document.getElementById('liveStop');
   let busySince = 0;
   let liveTimer = 0;
+  let lastElapsedSec = 0;
 
   function syncLive() {
     if (!busySince || !liveMeta) return;
     const sec = Math.floor((Date.now() - busySince) / 1000);
+    lastElapsedSec = sec;
     const tok = (tokEl && tokEl.textContent) || '0';
     liveMeta.textContent = sec + 's · ' + tok + ' tok';
+    const st = document.getElementById('stepTime');
+    if (st) st.textContent = sec + 's';
   }
 
   function setBusy(busy) {
@@ -1665,6 +1675,8 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       if (liveTimer) { clearInterval(liveTimer); liveTimer = 0; }
       if (liveStop) liveStop.disabled = false;
       if (sbRateEl) sbRateEl.textContent = '0.0';
+      const st = document.getElementById('stepTime');
+      if (st) st.textContent = lastElapsedSec ? lastElapsedSec + 's' : '—';
     }
     // UU 跟着状态走：跑的时候转圈，停下来就眨眼睛
     if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
@@ -1717,6 +1729,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       '<button class="danger" data-v="deny">拒绝 <kbd>N</kbd></button>' +
       '</div>';
     approvals.appendChild(box);
+    noteApproval(ev.callId, ev.ts);
     if (stateEl) stateEl.textContent = '等待批准';
     if (liveText) liveText.textContent = '等待批准';
     if (dot) dot.className = 'dot warn live';
@@ -1804,6 +1817,9 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     if (stepNoEl) stepNoEl.textContent = '—';
     if (decCountEl) decCountEl.textContent = '0';
     if (decisionListEl) decisionListEl.innerHTML = '<div class="empty-note">还没有工具调用</div>';
+    lastElapsedSec = 0;
+    const st = document.getElementById('stepTime');
+    if (st) st.textContent = '—';
     setStep('运行中', 'warn live');
   }
 
@@ -1845,6 +1861,16 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     setStep('运行中', 'warn live');
   }
 
+  function fmtClock(ts) {
+    if (!ts) return '--:--:--';
+    const d = new Date(Number(ts));
+    return [d.getHours(), d.getMinutes(), d.getSeconds()]
+      .map((x) => String(x).padStart(2, '0')).join(':');
+  }
+  function fmtDur(ms) {
+    if (!ms || ms < 0) return '';
+    return ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(1) + 's';
+  }
   function renderDecisions() {
     if (!decisionListEl) return;
     if (!decisions.length) {
@@ -1854,9 +1880,16 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     decisionListEl.innerHTML = decisions.map((d) => {
       const v = String(d.decision || 'ask');
       const fresh = !seenDecisions.has(d._key) ? ' is-new' : '';
+      const wait = d.approvedTs && d.approvalTs ? d.approvedTs - d.approvalTs : 0;
+      const total = d.toolTs && d.ts ? d.toolTs - d.ts : 0;
+      const meta = wait
+        ? '等 ' + fmtDur(wait)
+        : total ? '+' + fmtDur(total) : (v === 'ask' ? '等待' : '');
       return '<div class="dec ' + v + fresh + '" data-call-id="' + escapeHtml(d.callId || '') + '" data-key="' +
         escapeHtml(d._key || '') + '">' +
         '<span class="dd"></span>' +
+        '<span class="dtime">' + fmtClock(d.ts) + '</span>' +
+        (meta ? '<span class="dwait">' + meta + '</span>' : '') +
         '<div class="r1"><span class="t">' + escapeHtml(d.tool) + '</span>' +
         '<span class="chip ' + v + '">' + v + '</span></div>' +
         '<div class="r2">' + escapeHtml(d.reason || '') + '</div></div>';
@@ -1868,9 +1901,39 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     // 内核的 callId 在一轮里可能复用（call-1），所以用 seq 做去重键；
     // 审批回执只改「最后一条同 callId 且仍是 ask」的记录。
     ev._key = String(ev.callId || '') + ':' + String(ev.tool || '') + ':' + String(ev.seq || Date.now());
+    ev.ts = ev.ts || Date.now();
     decisions.push(ev);
     if (decisions.length > 24) decisions.shift();
     if (decCountEl) decCountEl.textContent = String(decisions.length);
+    renderDecisions();
+  }
+
+  function noteApproval(callId, ts) {
+    for (let i = decisions.length - 1; i >= 0; i--) {
+      if (decisions[i].callId === callId && decisions[i].decision === 'ask' && !decisions[i].approvalTs) {
+        decisions[i].approvalTs = ts || Date.now();
+        break;
+      }
+    }
+    renderDecisions();
+  }
+  function noteApproved(callId, ts) {
+    for (let i = decisions.length - 1; i >= 0; i--) {
+      if (decisions[i].callId === callId) {
+        decisions[i].approvedTs = ts || Date.now();
+        break;
+      }
+    }
+    renderDecisions();
+  }
+  function noteTool(name, ts, ok) {
+    for (let i = decisions.length - 1; i >= 0; i--) {
+      if (decisions[i].tool === name && !decisions[i].toolTs) {
+        decisions[i].toolTs = ts || Date.now();
+        decisions[i].ok = !!ok;
+        break;
+      }
+    }
     renderDecisions();
   }
 
@@ -1932,7 +1995,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       case 'user': hideEmpty(); beginTurn(); addUser(ev.text, ev.ts); setBusy(true); break;
       case 'delta': hideEmpty(); addDelta(ev.text); break;
       case 'assistant': hideEmpty(); setStep('运行中', 'warn live'); addAssistant(ev.text, ev.ts); break;
-      case 'tool': hideEmpty(); endStream(); addTool(ev.name, ev.ok, ev.detail, ev.id, ev.ts); break;
+      case 'tool': hideEmpty(); endStream(); noteTool(ev.name, ev.ts, ev.ok); addTool(ev.name, ev.ok, ev.detail, ev.id, ev.ts); break;
       case 'snapshot': renderSnapshot(ev); break;
       case 'decision': addDecision(ev); break;
       case 'budget':
@@ -1953,6 +2016,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
         break;
       case 'approved':
         setBusy(true);
+        noteApproved(ev.callId, ev.ts);
         addSystem('审批结果：' + ev.verdict, ev.ts);
         resolveDecision(ev.callId, ev.verdict);
         clearQueue();

@@ -60,7 +60,8 @@
 - 底部状态栏变成遥测：`SEQ` 事件序号、`T/S` 最近 token 速率、`CLK` 本地时钟，窄屏自动隐藏低频项；
 - 右栏预算下加 24 格 sparkline，显示最近预算更新增量；不额外画假曲线；
 - 运行条加五格波形，只有 busy 时动；背景加 18s 极淡扫描束 + 原有 48s 漂移/14s 光晕；
-- 数字统一 `tabular-nums`，避免跳动；所有动画仍走 `transform/opacity`，reduced-motion 全关。
+- 数字统一 `tabular-nums`，避免跳动；所有动画仍走 `transform/opacity`，reduced-motion 全关；
+- 右栏决策变成 **step trace**：每条决策右侧有本地时间与 `+41ms` / `等 1.2s` 时长；当前步头显示 `1s` 计时；决策→工具、审批→放行分别计，没数据就不编。
 
 ### 信息架构
 
