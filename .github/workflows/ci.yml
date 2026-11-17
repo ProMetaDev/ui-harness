@@ -68,9 +68,14 @@ jobs:
             echo '```'
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-          # 同时把最后几行写成注解：注解可以通过 API 读到，
+          # 同时把关键行写成注解：注解可以通过 API 读到，
           # 而 job 日志下载需要鉴权（本地排查时很有用）。
-          tail -12 .ci-step.log 2>/dev/null | while IFS= read -r line; do
+          {
+            echo "step-log 行数: $(wc -l < .ci-step.log 2>/dev/null)"
+            grep -nE 'FAIL|passed,|panic|Killed|error:' .ci-step.log 2>/dev/null | tail -20
+            echo '--- tail ---'
+            tail -20 .ci-step.log 2>/dev/null
+          } | while IFS= read -r line; do
             line="${line//'%'/'%25'}"
             line="${line//$'\r'/'%0D'}"
             echo "::error::${line}"

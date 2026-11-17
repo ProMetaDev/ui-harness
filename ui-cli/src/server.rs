@@ -220,7 +220,14 @@ impl Hooks for WebHooks {
         let started = std::time::Instant::now();
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok(decision) => return decision,
+                Ok(decision) => {
+                    self.hub.push(Json::obj(vec![
+                        ("type", Json::from("approved")),
+                        ("verdict", Json::from(decision.name())),
+                        ("callId", Json::from(req.call_id.as_str())),
+                    ]));
+                    return decision;
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Decision::Deny,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     let cancelled = self

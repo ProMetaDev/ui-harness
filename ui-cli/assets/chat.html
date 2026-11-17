@@ -495,7 +495,8 @@ body{font-size:13.5px;line-height:1.65;background:var(--bg);color:var(--text)}
 .side-title .dot.ok{background:var(--ok)}
 .insp-head .st .dot.warn{background:var(--warn)}
 .queue-item .dot.warn{background:var(--warn)}
-main{overflow:hidden}
+main{padding:0;overflow:hidden}
+#themeBtn{font:12px var(--mono)}
 @keyframes v2pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(227,162,75,.34)}50%{opacity:.55;box-shadow:0 0 0 4px rgba(227,162,75,0)}}
 @keyframes v2rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes v2fade{from{opacity:0}to{opacity:1}}
@@ -589,8 +590,14 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
   font:600 10px var(--mono);letter-spacing:.06em;color:var(--warn);text-transform:none}
 .approval .body{padding:8px 12px 0}
 .approval .eff{font:10.5px/1.6 var(--mono);color:var(--warn);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.approval .gateargs{margin-top:5px}
+.approval .gateargs summary{cursor:pointer;color:var(--faint);font:10px var(--mono);list-style:none}
+.approval .gateargs summary::-webkit-details-marker{display:none}
+.approval .gateargs summary::before{content:"› ";color:var(--faint)}
+.approval .gateargs[open] summary::before{content:"⌄ "}
 .approval pre{margin:6px 0 0;padding:7px 9px;background:var(--bg);border:1px solid var(--border);
   border-radius:4px;font:10.5px/1.55 var(--mono);color:var(--text);max-height:120px;overflow:auto}
+.approval .acts kbd{font:9.5px var(--mono);opacity:.7;margin-left:3px}
 .approval .acts{display:flex;align-items:center;gap:6px;padding:8px 12px}
 .approval .acts button{height:28px;font-size:11.5px;border-radius:5px}
 .approval .acts button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
@@ -603,7 +610,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .stepno{font:500 26px/1 var(--mono);letter-spacing:-.06em;color:var(--text)}
 .insp-head .lbl{padding-top:3px}
 .insp-head .st{margin-top:3px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
-.insp-head .st b{font-weight:500;color:var(--warn)}
+.insp-head .st b{font-weight:500;color:var(--muted)}
 .right-body{position:relative;z-index:1;flex:1;overflow:auto;padding:0 16px 14px;min-height:0}
 .blk .blk-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
 .blk .blk-head .v{margin-left:auto;font:9.5px var(--mono);color:var(--faint)}
@@ -700,6 +707,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .prep .psec .line{flex:1;height:1px;background:var(--border)}
 .prep-foot{margin-top:18px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:7px;
   color:var(--faint);font:9.5px var(--mono)}
+.prep-foot .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
 
 /* lab doc */
 .doc{max-width:820px;margin:0 auto;padding:4px 0 28px;color:var(--text)}
@@ -1077,6 +1085,16 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
     }
     const hint = document.getElementById('hint');
     if (hint) hint.textContent = '当前会话：' + name;
+    // 右栏也回到新会话的空态，不把上一个会话的 step / 决策带过来
+    const reset = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+    const stepNo = document.getElementById('stepNo');
+    if (stepNo) stepNo.textContent = '—';
+    const stepState = document.getElementById('stepState');
+    if (stepState) stepState.textContent = '空闲';
+    reset('ctxBar', '');
+    reset('ctxSections', '<div class="empty-note">发一条消息后出现</div>');
+    reset('decisionList', '<div class="empty-note">还没有工具调用</div>');
+    reset('queue', '<div class="empty-note">没有待审批的动作</div>');
   };
   loadSessions();
 
@@ -1223,14 +1241,17 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
       '<h3>需要批准 · ' + escapeHtml(ev.tool) + '</h3>' +
       '<div class="body">' +
       '<div class="eff">' + escapeHtml((ev.effects || []).join('；')) + '</div>' +
-      '<pre>' + escapeHtml(ev.args || '') + '</pre>' +
+      '<details class="gateargs"><summary>查看参数</summary><pre>' +
+      escapeHtml(ev.args || '') + '</pre></details>' +
       '</div>' +
       '<div class="acts">' +
-      '<button class="primary" data-v="allow">本次允许</button>' +
-      '<button data-v="always">总是允许</button>' +
-      '<button class="danger" data-v="deny">拒绝</button>' +
+      '<button class="primary" data-v="allow">本次允许 <kbd>Y</kbd></button>' +
+      '<button data-v="always">总是允许 <kbd>A</kbd></button>' +
+      '<button class="danger" data-v="deny">拒绝 <kbd>N</kbd></button>' +
       '</div>';
     approvals.appendChild(box);
+    if (stateEl) stateEl.textContent = '等待批准';
+    if (dot) dot.className = 'dot warn live';
     for (const btn of box.querySelectorAll('button')) {
       btn.onclick = async () => {
         const verdict = btn.dataset.v;
@@ -1439,6 +1460,8 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
         resolveDecision(ev.callId, ev.verdict);
         clearQueue();
         setStep('运行中', 'warn live');
+        if (stateEl) stateEl.textContent = '运行中';
+        if (dot) dot.className = 'dot busy';
         break;
       case 'cancel-requested': addSystem('已请求停止…', ev.ts); break;
       case 'session-switched':
@@ -1460,6 +1483,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
         setBusy(false);
         if (window.__uiMood) window.__uiMood('error', 3000);
         setStep('出错', 'bad');
+        if (stateEl) { stateEl.textContent = '出错'; dot.className = 'dot bad'; }
         addSystem('出错：' + ev.message, ev.ts);
         break;
     }
@@ -1660,6 +1684,9 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
   if (window.__UI_BOOT__) {
     for (const ev of window.__UI_BOOT__) handle(ev);
     setBusy(false);
+    const snapPending = !!document.querySelector('.approval');
+    if (stateEl) stateEl.textContent = snapPending ? '快照 · 待批准' : '快照';
+    if (dot) dot.className = 'dot ' + (snapPending ? 'warn live' : 'ok');
     document.getElementById('hint').textContent = '这是对话快照（只读）。';
     document.getElementById('send').disabled = true;
     document.getElementById('stop').style.display = 'none';
