@@ -2908,6 +2908,10 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
                             "changed",
                             Json::Arr(r.changed.iter().map(|c| Json::from(c.as_str())).collect()),
                         ),
+                        (
+                            "deleted",
+                            Json::Arr(r.deleted.iter().map(|c| Json::from(c.as_str())).collect()),
+                        ),
                     ]);
                     append_log(&mut agent, "delegate/end", rec.clone())?;
                     delegates.push(rec);
@@ -3047,6 +3051,8 @@ struct ChildResult {
     workdir: Option<PathBuf>,
     /// 相对工作区改动过的文件
     changed: Vec<String>,
+    /// 子代理在副本里**删掉**的文件（不自动合并，只报告——删除不可逆）
+    deleted: Vec<String>,
 }
 
 /// 隔离副本里不需要的东西：日志、产物、依赖、node_modules
@@ -3170,10 +3176,14 @@ fn copy_tree(
     Ok((files, bytes))
 }
 
-/// 找出副本里被改动过的文件（逻辑在 `ui_core::isolate`，那里有单元测试）。
-fn changed_files(_base: &Path, workdir: &Path) -> Vec<String> {
+/// 找出副本里被改动、以及被删除的文件（逻辑在 `ui_core::isolate`，那里有单元测试）。
+///
+/// 删除**不自动合并**——那是不可逆操作。但必须报告：否则父工作区会留下一个
+/// 本该消失的文件，而日志里毫无痕迹。
+fn changed_files(_base: &Path, workdir: &Path) -> (Vec<String>, Vec<String>) {
     let manifest = read_manifest(workdir);
-    ui_core::isolate::changed_files(workdir, &manifest)
+    let d = ui_core::isolate::diff(workdir, &manifest);
+    (d.changed, d.deleted)
 }
 
 /// 并行子代理：默认各跑一个进程 + 独立日志；`--isolate` 时再各给一份工作区副本。
@@ -3224,6 +3234,7 @@ fn run_parallel(
                                 journal: agent_root.join("journal.txt"),
                                 workdir: None,
                                 changed: Vec::new(),
+                                deleted: Vec::new(),
                             };
                         }
                         Some(copy)
@@ -3236,6 +3247,7 @@ fn run_parallel(
                             journal: agent_root.join("journal.jsonl"),
                             workdir: None,
                             changed: Vec::new(),
+                            deleted: Vec::new(),
                         }
                     }
                 }
@@ -3255,6 +3267,7 @@ fn run_parallel(
                     journal,
                     workdir,
                     changed: Vec::new(),
+                    deleted: Vec::new(),
                 };
             }
 
@@ -3310,10 +3323,13 @@ fn run_parallel(
                 Err(e) => (false, format!("启动失败: {}", e)),
             };
 
-            let changed = workdir
-                .as_ref()
-                .map(|w| changed_files(&ws, w))
-                .unwrap_or_default();
+            let (changed, deleted) = match workdir.as_ref() {
+                Some(w) => {
+                    let (c, d) = changed_files(&ws, w);
+                    (c, d)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
 
             ChildResult {
                 id,
@@ -3322,6 +3338,7 @@ fn run_parallel(
                 journal,
                 workdir,
                 changed,
+                deleted,
             }
         }));
     }
@@ -3390,6 +3407,8 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
 
     // rel -> [(子代理 id, 副本工作区)]
     let mut by_path: std::collections::BTreeMap<String, Vec<(String, PathBuf)>> = Default::default();
+    // 子代理删掉的文件：只报告，不自动删（删除不可逆）
+    let mut deletions: Vec<String> = Vec::new();
     for rec in &picked {
         let id = rec.str_at("id").unwrap_or("?").to_string();
         let workdir = match rec.str_at("workdir") {
@@ -3407,6 +3426,24 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
                     .collect()
             })
             .unwrap_or_default();
+        let deleted: Vec<String> = rec
+            .arr_at("deleted")
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 删除不自动合并（不可逆），但必须**说出来**——否则父工作区会留下
+        // 一个本该消失的文件，而日志假装无事发生。
+        for rel in &deleted {
+            note(format!(
+                "删除  {}：子代理在副本里删掉了它；父工作区保留（删除不可逆，需人工处理）",
+                rel
+            ));
+            deletions.push(rel.clone());
+        }
+
         if changed.is_empty() {
             note(format!("子代理 {} 没有改动任何文件", id));
             continue;
