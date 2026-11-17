@@ -55,14 +55,18 @@ jobs:
       - name: 失败诊断
         if: failure()
         run: |
-          echo "===================== 失败诊断开始 ====================="
-          echo "---- 失败步骤的最后 80 行 ----"
-          if [ -f .ci-step.log ]; then tail -80 .ci-step.log; else echo "（没有 .ci-step.log）"; fi
-          echo "---- 环境再确认 ----"
-          for c in fuser pkill pgrep script rsync python3; do
-            printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
-          done
-          echo "===================== 失败诊断结束 ====================="
+          {
+            echo "## 失败诊断"
+            echo '```'
+            tail -80 .ci-step.log 2>/dev/null || echo "（没有 .ci-step.log）"
+            echo '```'
+            echo "## 环境"
+            echo '```'
+            for c in fuser pkill pgrep script rsync python3; do
+              printf '%-8s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo MISSING)"
+            done
+            echo '```'
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
           mkdir -p ci-logs
           cp -f .ci-step.log ci-logs/ 2>/dev/null || true
 
