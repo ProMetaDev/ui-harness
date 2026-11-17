@@ -21,6 +21,7 @@ pub mod fasthash;
 pub mod isolate;
 pub mod json;
 pub mod journal;
+pub mod knowledge;
 pub mod mcp;
 pub mod mode;
 pub mod model;

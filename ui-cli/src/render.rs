@@ -135,6 +135,23 @@ pub fn event_row(e: &Json) -> String {
             e.u64_at("beforeTokens").unwrap_or(0),
             e.u64_at("afterTokens").unwrap_or(0)
         ),
+        // 可审计的知识（K2）：这一行就是「这次为什么拿到这段上下文」的证据。
+        "knowledge/use" => format!(
+            "卡片 {} · {} · {} tok{}",
+            e.str_at("card").unwrap_or("?"),
+            e.str_at("reason").unwrap_or(""),
+            e.u64_at("budget_tokens").unwrap_or(0),
+            e.num_at("score")
+                .map(|s| format!(" · score {:.2}", s))
+                .unwrap_or_default()
+        ),
+        "knowledge/emit" => format!(
+            "卡片 {} · sha {} · 生成于 seq {} · 确认位 {}",
+            e.str_at("card").unwrap_or("?"),
+            e.str_at("source_sha").unwrap_or("—"),
+            e.u64_at("generated_by_seq").unwrap_or(0),
+            e.str_at("confirmed_by").unwrap_or("none")
+        ),
         "approval/answered" => format!(
             "{} · {}",
             e.str_at("tool").unwrap_or("?"),
@@ -221,5 +238,21 @@ mod tests {
         ]);
         assert!(event_row(&write).contains("有副作用"));
         assert!(event_row(&read).contains("可重放"));
+    }
+
+    #[test]
+    fn event_row_names_the_used_card_and_why() {
+        let used = Json::obj(vec![
+            ("seq", Json::from(7u64)),
+            ("ts", Json::from(0u64)),
+            ("kind", Json::from("knowledge/use")),
+            ("card", Json::from("mod-payment")),
+            ("reason", Json::from("path-match:src/pay/x.rs")),
+            ("budget_tokens", Json::from(1200u64)),
+        ]);
+        let row = event_row(&used);
+        assert!(row.contains("mod-payment"), "{}", row);
+        assert!(row.contains("path-match:src/pay/x.rs"), "{}", row);
+        assert!(row.contains("1200 tok"), "{}", row);
     }
 }
