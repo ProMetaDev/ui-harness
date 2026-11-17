@@ -48,6 +48,22 @@ pub struct Journal {
 /// 而它们走的是 `Journal::load`（从磁盘读全量），不依赖这个缓冲。
 const MAX_KEPT_EVENTS: usize = 2000;
 
+/// 日志写不进去时的错误要能直接看懂：说清哪个文件、哪一步、以及为什么停下。
+///
+/// 这条不是装饰——"日志写不进去还继续跑"等于没有审计，所以这里必须 fail closed，
+/// 并且让人一眼知道是磁盘/权限问题而不是程序崩了。
+fn journal_ctx(e: std::io::Error, path: &std::path::Path, what: &str) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "{}（{}）：{}。日志是执行记录，写不进去就不该继续执行——             请检查磁盘空间与文件权限后重试。",
+            what,
+            path.display(),
+            e
+        ),
+    )
+}
+
 fn writer_id() -> String {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -134,12 +150,16 @@ impl Journal {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|e| journal_ctx(e, &path, "创建日志目录失败"))?;
         }
         // 原子创建：绝不能写成 `if !path.exists() { fs::write(path, b"") }`——
         // 两个进程同时打开时，「判断」和「写空串」之间会被另一个进程插进来，
         // 后者会把前者刚写好的日志截断（真实踩过：三进程并发丢了两条记录）。
-        OpenOptions::new().create(true).append(true).open(&path)?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| journal_ctx(e, &path, "打不开日志"))?;
 
         // 读和修复都必须在锁里：别的 writer 正在写时，读到的是半条记录，
         // 会被当成「尾部撕裂」截掉——那等于把别人刚写的记录毁了。
@@ -150,21 +170,29 @@ impl Journal {
         // 这不是理论问题——CI 上四线程并发时真的炸过。
         let (events, corrupt, offset) = {
             let lock_path = path.with_extension("lock");
-            let _lock = FileLock::acquire(&lock_path)?;
-            let (events, corrupt) = Journal::read(&path)?;
+            let _lock = FileLock::acquire(&lock_path)
+                .map_err(|e| journal_ctx(e, &path, "拿不到日志锁"))?;
+            let (events, corrupt) =
+                Journal::read(&path).map_err(|e| journal_ctx(e, &path, "读日志失败"))?;
             if let Some(c) = &corrupt {
                 if c.torn {
                     // A crash can leave one half-written record. Keep the verified
                     // prefix, drop the tear, and say so in the log itself.
-                    let file = fs::OpenOptions::new().write(true).open(&path)?;
-                    file.set_len(c.good_bytes as u64)?;
-                    file.sync_all()?;
+                    let file = fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .map_err(|e| journal_ctx(e, &path, "打开日志准备修复失败"))?;
+                    file.set_len(c.good_bytes as u64)
+                        .map_err(|e| journal_ctx(e, &path, "截断撕裂尾巴失败"))?;
+                    file.sync_all()
+                        .map_err(|e| journal_ctx(e, &path, "修复后落盘失败"))?;
                 }
             }
             // 崩溃可能落在 write_all(line) 与 write_all("\n") 之间：记录本身完整、
             // 可校验，但文件没有结尾换行。此时直接 append 会把两个 JSON 对象粘成
             // 一行，而**下一次** open 会把它们一起当成尾部撕裂截掉。先补上换行。
-            ensure_trailing_newline(&path)?;
+            ensure_trailing_newline(&path)
+                .map_err(|e| journal_ctx(e, &path, "补齐结尾换行失败"))?;
             let offset = fs::metadata(&path)?.len();
             (events, corrupt, offset)
         };
@@ -292,8 +320,8 @@ impl Journal {
     /// 拿着旧 seq，链会断。
     pub fn append(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
         let lock_path = self.path.with_extension("lock");
-        let _lock = FileLock::acquire(&lock_path)?;
-        self.catch_up()?;
+        let _lock = FileLock::acquire(&lock_path).map_err(|e| journal_ctx(e, &self.path, "拿不到日志锁"))?;
+        self.catch_up().map_err(|e| journal_ctx(e, &self.path, "补读日志失败"))?;
 
         let mut event = Json::obj(vec![
             ("seq", Json::from(self.seq + 1)),
@@ -315,9 +343,14 @@ impl Journal {
         // 的窗口，下一次 append 就会把两条记录粘成一行。
         let mut line = event.to_compact().into_bytes();
         line.push(b'\n');
-        let mut file = OpenOptions::new().append(true).open(&self.path)?;
-        file.write_all(&line)?;
-        file.sync_all()?;
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| journal_ctx(e, &self.path, "打不开日志"))?;
+        file.write_all(&line)
+            .map_err(|e| journal_ctx(e, &self.path, "写日志失败"))?;
+        file.sync_all()
+            .map_err(|e| journal_ctx(e, &self.path, "日志落盘失败"))?;
 
         self.seq += 1;
         self.prev = hash;
