@@ -37,6 +37,9 @@ check() {
 PAGE=$(curl -s "$BASE/")
 case "$PAGE" in *U:I*) check 1 'GET / 返回页面' ;; *) check 0 'GET / 返回页面' ;; esac
 
+BG=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$BASE/bg/dark.jpg")
+case "$BG" in "200 image/jpeg"*) check 1 'GET /bg/dark.jpg' ;; *) check 0 "GET /bg/dark.jpg ($BG)" ;; esac
+
 STATE=$(curl -s "$BASE/api/state")
 case "$STATE" in *busy*) check 1 'GET /api/state' ;; *) check 0 'GET /api/state' ;; esac
 

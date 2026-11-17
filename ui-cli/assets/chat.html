@@ -460,6 +460,10 @@ html[data-theme="light"],:root{
   --warn:#9a5d17; --warn-soft:rgba(154,93,23,.10);
   --bad:#a8402f; --bad-soft:rgba(168,64,47,.09);
   --glass:rgba(251,249,243,.94);
+  --bg-image:url('/bg/light.jpg');
+  --bg-overlay:linear-gradient(180deg,rgba(244,241,233,.60),rgba(244,241,233,.88));
+  --bg-veil:rgba(244,241,233,.74);
+  --bg-filter:none;
   color-scheme:light;
 }
 html[data-theme="dark"]{
@@ -471,6 +475,10 @@ html[data-theme="dark"]{
   --warn:#e3a24b; --warn-soft:rgba(227,162,75,.10);
   --bad:#de7a66; --bad-soft:rgba(222,122,102,.10);
   --glass:rgba(18,22,27,.94);
+  --bg-image:url('/bg/dark.jpg');
+  --bg-overlay:linear-gradient(180deg,rgba(11,13,16,.46),rgba(11,13,16,.80));
+  --bg-veil:rgba(11,13,16,.72);
+  --bg-filter:brightness(1.18) saturate(1.05);
   color-scheme:dark;
 }
 @media (prefers-color-scheme:dark){
@@ -483,6 +491,10 @@ html[data-theme="dark"]{
     --warn:#e3a24b; --warn-soft:rgba(227,162,75,.10);
     --bad:#de7a66; --bad-soft:rgba(222,122,102,.10);
     --glass:rgba(18,22,27,.94);
+    --bg-image:url('/bg/dark.jpg');
+    --bg-overlay:linear-gradient(180deg,rgba(11,13,16,.46),rgba(11,13,16,.80));
+    --bg-veil:rgba(11,13,16,.72);
+    --bg-filter:brightness(1.18) saturate(1.05);
     color-scheme:dark;
   }
 }
@@ -505,10 +517,21 @@ main{padding:0;overflow:hidden}
 @keyframes v2gate{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes v2sweep{0%{transform:translateX(-110%)}55%,100%{transform:translateX(110%)}}
 
-/* shell */
-.shell{grid-template-columns:60px 272px minmax(0,1fr) 340px;grid-template-rows:minmax(0,1fr) 26px}
+/* shell + GPT background plate */
+.app-bg{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:var(--bg-image);
+  background-size:cover;background-position:center;transform:scale(1.04);filter:var(--bg-filter);
+  animation:bgDrift 48s ease-in-out infinite alternate;will-change:transform}
+.app-bg::after{content:"";position:absolute;inset:0;background:var(--bg-overlay)}
+.app-bg::before{content:"";position:absolute;inset:-20%;pointer-events:none;
+  background:radial-gradient(circle at 72% 18%,rgba(227,162,75,.10),transparent 42%);
+  animation:bgGlow 14s ease-in-out infinite alternate}
+@keyframes bgDrift{from{transform:scale(1.04) translate3d(0,0,0)}
+  to{transform:scale(1.075) translate3d(-1.1%,-1.2%,0)}}
+@keyframes bgGlow{from{opacity:.55;transform:translate3d(0,0,0)}
+  to{opacity:1;transform:translate3d(-1.5%,1%,0)}}
+.shell{position:relative;z-index:1;grid-template-columns:60px 272px minmax(0,1fr) 340px;grid-template-rows:minmax(0,1fr) 26px}
 .shell.right-hidden{grid-template-columns:60px 272px minmax(0,1fr) 0}
-.activity{background:var(--subtle);border-right:1px solid var(--border);padding:12px 0 10px;gap:4px}
+.activity{background:var(--bg-veil);border-right:1px solid var(--border);padding:12px 0 10px;gap:4px}
 .rail-brand{width:34px;height:34px;display:grid;place-items:center;text-decoration:none;color:var(--accent);
   font:600 14px/1 var(--mono);letter-spacing:-.04em;margin-bottom:14px;border-radius:8px}
 .rail-brand:hover{background:var(--accent-soft)}
@@ -518,7 +541,7 @@ main{padding:0;overflow:hidden}
 .act svg{width:18px;height:18px}
 
 /* sidebar */
-.sidebar{background:var(--bg);border-right:1px solid var(--border)}
+.sidebar{background:var(--bg-veil);border-right:1px solid var(--border)}
 .side-head{padding:16px 16px 10px;align-items:center}
 .side-title{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;font-weight:600}
 .side-title .brand-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -536,12 +559,12 @@ main{padding:0;overflow:hidden}
 .mode-chip.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 
 /* main / masthead */
-main{background:var(--bg);position:relative;min-height:0}
+main{background:transparent;position:relative;min-height:0}
 main::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
   background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);
   background-size:48px 48px;opacity:.12;mask-image:linear-gradient(180deg,#000,transparent 68%)}
 .masthead{height:52px;padding:0 16px 0 20px;gap:12px;display:flex;align-items:center;
-  background:var(--bg);border-bottom:1px solid var(--border);position:relative;z-index:20}
+  background:var(--bg-veil);border-bottom:1px solid var(--border);position:relative;z-index:20}
 .mh-title{display:flex;align-items:center;gap:9px;min-width:0}
 .mh-title .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
 .mh-title h1{margin:0;font-size:15px;line-height:1.2;font-weight:600;letter-spacing:-.015em;
@@ -612,7 +635,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .tag.bad{background:var(--bad-soft);color:var(--bad)}
 
 /* approval：固定在输入框上方 */
-.composer-wrap{position:relative;z-index:1;background:var(--bg);border-top:1px solid var(--border);padding:12px 30px 14px}
+.composer-wrap{position:relative;z-index:1;background:var(--bg-veil);border-top:1px solid var(--border);padding:12px 30px 14px}
 #approvals{max-width:720px;margin:0 auto}
 #approvals:empty{display:none}
 .approval{max-width:720px;margin:0 auto 8px;border:1px solid var(--accent-2,#c9862f);border-radius:6px;
@@ -636,7 +659,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .approval .acts button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 
 /* right rail */
-.right{grid-row:1;grid-column:4;background:var(--bg);border-left:1px solid var(--border);position:relative;min-height:0}
+.right{grid-row:1;grid-column:4;background:var(--bg-veil);border-left:1px solid var(--border);position:relative;min-height:0}
 .right::before{content:"";position:absolute;top:-50px;right:-40px;width:220px;height:180px;pointer-events:none;
   background:radial-gradient(circle,var(--accent-soft),transparent 70%);opacity:.55}
 .insp-head{position:relative;z-index:1;padding:14px 16px 10px;display:flex;align-items:flex-start;gap:10px}
@@ -775,7 +798,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .doc pre{white-space:pre-wrap;word-break:break-word;font:11.5px/1.8 var(--mono);color:var(--muted);margin:0}
 
 /* status bar */
-.statusbar{background:var(--panel);color:var(--muted);border-top:1px solid var(--border);font:10.5px/1 var(--mono);gap:14px}
+.statusbar{background:var(--bg-veil);color:var(--muted);border-top:1px solid var(--border);font:10.5px/1 var(--mono);gap:14px}
 .statusbar .dot{transition:background-color .2s var(--ease-soft)}
 .statusbar .pill{background:var(--accent);color:var(--on-accent);border-radius:3px;padding:2px 6px}
 .statusbar .dot.busy{background:var(--warn);animation:v2pulse 1.9s ease-in-out infinite}
@@ -846,6 +869,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
 </style>
 </head>
 <body>
+<div class="app-bg" aria-hidden="true"></div>
 <div class="shell" id="shell">
   <nav class="activity">
     <a class="rail-brand" href="#" title="U:I · Unleash your imagination" onclick="return false">U:I</a>

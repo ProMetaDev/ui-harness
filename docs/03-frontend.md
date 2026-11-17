@@ -19,7 +19,18 @@
 - **顺滑**：流式 delta 按帧合并、滚动用 `requestAnimationFrame` 合并、右栏决策只让**新增项**入场、分段条只在首帧生长、工具展开做高度过渡、审批退场 160ms——避免“每来一个事件整块重绘”的卡顿。
 - **树结构**：右栏是一条 spine：`ctx / dec / bud / gate` 四个分支，context 的子段是叶子；主日志每条消息是时间轴上的节点；实验室保留表格/DAG 的血缘阅读。树只做结构提示，不替代正文。
 
-验收截图：`out/web-tree-final.png` / `web-tree-final-1280.png` / `web-final-empty.png` / `web-final-light.png`。
+验收截图：`out/web-bg-final-dark.png` / `web-bg-final-light.png` / `web-bg-final-1280.png` / `web-final-empty.png`。
+
+## 背景板：GPT 生成 + CSS 动效
+
+`ui serve` 的背景不再是一块纯黑：
+
+- 暗色 `ui-cli/assets/bg-dark.jpg`（1600×1066，约 80 KB）：炭黑底上极淡的 **树 / 等高线 / 工程网格**，右上角琥珀光晕；
+- 明色 `ui-cli/assets/bg-light.jpg`：暖纸 + 淡棕树线，像审计底稿；
+- 提示词在 `design/prompts/bg-{dark,light}.txt`，模型 `gpt-image-2`；出图后用 ffmpeg 压成 JPEG，**随二进制走**（`/bg/dark.jpg`、`/bg/light.jpg`），不依赖外部 CDN；
+- CSS：`.app-bg` 固定层，48s 缓慢漂移 + 14s 光晕呼吸；面板用 `--bg-veil` 半透明，让背景只从边缘和空白处透出来；
+- 对比度：暗色面板 0.72 veil、明色 0.74；正文/审批/表格仍是不透明 surface；
+- `prefers-reduced-motion` 时漂移/呼吸全部关闭。
 
 ### 信息架构
 

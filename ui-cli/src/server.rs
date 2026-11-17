@@ -17,6 +17,8 @@ use ui_core::tools::ToolResult;
 use ui_core::{Agent, Decision};
 
 const CHAT_HTML: &str = include_str!("../assets/chat.html");
+const BG_DARK: &[u8] = include_bytes!("../assets/bg-dark.jpg");
+const BG_LIGHT: &[u8] = include_bytes!("../assets/bg-light.jpg");
 
 #[derive(Default)]
 struct Hub {
@@ -442,6 +444,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/") => html(&mut stream, CHAT_HTML),
+        // 背景板：GPT 生成后压成 JPEG，80KB 左右；随二进制走，不依赖外部 CDN。
+        ("GET", "/bg/dark.jpg") => image(&mut stream, BG_DARK, "image/jpeg"),
+        ("GET", "/bg/light.jpg") => image(&mut stream, BG_LIGHT, "image/jpeg"),
         // 静态快照：事件内嵌，不开 SSE。可分享、可截图、可离线打开。
         ("GET", "/snapshot") => {
             let boot = hub
@@ -847,6 +852,17 @@ fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
+    stream.flush()
+}
+
+fn image(stream: &mut TcpStream, body: &[u8], mime: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=86400\r\nConnection: close\r\n\r\n",
+        mime,
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
     stream.flush()
 }
 
