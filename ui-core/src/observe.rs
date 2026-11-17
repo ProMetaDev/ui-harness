@@ -33,6 +33,7 @@ pub const SKIP_DIRS: &[&str] = &[
 pub const MAX_FILES: usize = 20_000;
 
 /// watcher 最多挂多少个目录。超过就退回全量扫描（不静默降级成"只监控一部分"）。
+#[cfg(target_os = "linux")]
 const MAX_WATCHES: usize = 4096;
 
 #[derive(Debug, Clone, Default)]

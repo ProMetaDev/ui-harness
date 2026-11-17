@@ -623,6 +623,9 @@ fn longer_literal_prefix_wins_over_order() {
     );
 }
 
+// 只在 unix 上跑：Windows 没有 std::os::unix，而且建符号链接要特权。
+// 不加 cfg 的话，`cargo check --tests --target x86_64-pc-windows-gnu` 直接编不过。
+#[cfg(unix)]
 #[test]
 fn a_symlink_cannot_smuggle_reads_out_of_the_workspace() {
     // 词法上 link.txt 在工作区里，真实位置在外面：策略只看字面路径，所以必须靠真实路径兜底。

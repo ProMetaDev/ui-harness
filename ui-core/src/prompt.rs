@@ -100,14 +100,20 @@ pub fn inspect_environment(workspace: &Path) -> Env {    let mut warnings = Vec:
     }
 
     let shell = if cfg!(windows) {
-        "PowerShell / cmd (Windows)"
+        "cmd /C (Windows)"
     } else {
         "sh -c (POSIX)"
     }
     .to_string();
 
     if cfg!(windows) {
-        notes.push("本机是 Windows：命令用 PowerShell 方言，环境变量用 $env:NAME。".to_string());
+        // 说实话：实际执行的是 `cmd /C`。曾经这里写的是 PowerShell 方言，
+        // 于是 `echo $env:USERNAME` 会**静默输出字面量**且 ok=true——比报错更坏。
+        notes.push(
+            "本机是 Windows：命令由 `cmd /C` 执行，环境变量用 %NAME%。\
+             PowerShell 语法（$env:NAME、Write-Output、$x=1）在这里不成立。"
+                .to_string(),
+        );
     }
     notes.push(
         "工具里的相对路径一律相对 workspace 解析；不要把 workspace 目录名再拼进路径。"
@@ -302,6 +308,7 @@ pub fn build_snapshot(
     env: Option<Env>,
     skills_catalog: &str,
     loaded_skills: &[(String, String)],
+    memory_text: &str,
 ) -> Snapshot {
     let env = env.unwrap_or_else(|| inspect_environment(workspace));
     let mut sections = vec![
@@ -377,6 +384,19 @@ pub fn build_snapshot(
             id: "goal",
             owner: "goal",
             text: goal.to_string(),
+            tokens: 0,
+            bytes: 0,
+            volatility: "turn",
+        });
+    }
+
+    // 记忆：每轮开始检索一次，命中才出现这一段。未命中时提示词逐字不变
+    // （没有空段落，也没有 `memory` 段），这是负样本测试钉住的行为。
+    if !memory_text.is_empty() {
+        sections.push(Section {
+            id: "memory",
+            owner: "memory",
+            text: memory_text.to_string(),
             tokens: 0,
             bytes: 0,
             volatility: "turn",
@@ -467,8 +487,8 @@ mod tests {
         let ws = std::env::temp_dir();
         let tools = registry();
         let history = vec![Message::user("你好")];
-        let a = build_snapshot(&ws, &tools, &history, None, None, "", &[]);
-        let b = build_snapshot(&ws, &tools, &history, None, None, "", &[]);
+        let a = build_snapshot(&ws, &tools, &history, None, None, "", &[], "");
+        let b = build_snapshot(&ws, &tools, &history, None, None, "", &[], "");
         let meta_a: Vec<_> = a.sections.iter().map(|s| (s.id, s.bytes)).collect();
         let meta_b: Vec<_> = b.sections.iter().map(|s| (s.id, s.bytes)).collect();
         assert_eq!(meta_a, meta_b, "section sizes must be stable between builds");
@@ -489,9 +509,55 @@ mod tests {
     fn diff_reports_added_and_changed() {
         let ws = std::env::temp_dir();
         let tools = registry();
-        let a = build_snapshot(&ws, &tools, &[Message::user("a")], None, None, "", &[]);
-        let b = build_snapshot(&ws, &tools, &[Message::user("a"), Message::note("b")], None, None, "", &[]);
+        let a = build_snapshot(&ws, &tools, &[Message::user("a")], None, None, "", &[], "");
+        let b = build_snapshot(&ws, &tools, &[Message::user("a"), Message::note("b")], None, None, "", &[], "");
         let d = diff_snapshots(Some(&a), &b);
         assert!(d.iter().any(|x| x.id == "history" && x.change == "changed"));
+    }
+
+    #[test]
+    fn memory_section_only_appears_when_there_is_text() {
+        let ws = std::env::temp_dir();
+        let tools = registry();
+        let without = build_snapshot(&ws, &tools, &[], None, None, "", &[], "");
+        assert!(
+            !without.sections.iter().any(|s| s.id == "memory"),
+            "未命中时不能有空 memory 段（提示词必须逐字不变）"
+        );
+        let with = build_snapshot(
+            &ws,
+            &tools,
+            &[],
+            None,
+            None,
+            "",
+            &[],
+            "记忆（测试）：\n- [m-000000000000] fact workspace conf=1.00 hits=0 :: hello",
+        );
+        let section = with
+            .sections
+            .iter()
+            .find(|s| s.id == "memory")
+            .expect("命中时必须有 memory 段");
+        assert!(section.tokens > 0);
+        assert!(section.bytes > 0);
+        assert!(with.text.contains("<memory>"));
+        assert!(with.text.contains("hello"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_note_matches_the_real_shell() {
+        // 回归：提示词曾声称 PowerShell 方言，但实际执行 cmd /C，
+        // 导致 `echo $env:NAME` 静默输出字面量。
+        let e = inspect_environment(&std::path::PathBuf::from("."));
+        assert!(e.shell.contains("cmd"), "shell 应写明 cmd：{}", e.shell);
+        let joined = e.notes.join("\n");
+        assert!(
+            !joined.contains("命令用 PowerShell 方言"),
+            "不能再声称 PowerShell 方言：{}",
+            joined
+        );
+        assert!(joined.contains("%NAME%"), "应给出 cmd 的环境变量写法");
     }
 }
