@@ -724,6 +724,8 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .statusbar .dot.busy{background:var(--warn);animation:v2pulse 1.9s ease-in-out infinite}
 
 /* motion */
+body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.composer-wrap,.side-item,.tab,.cmdbtn{
+  transition:background-color .22s var(--ease-soft),border-color .22s var(--ease-soft),color .22s var(--ease-soft)}
 .btn,.act,.side-item,.intent,.cmdbtn,.composer .primary{transition:background-color .16s var(--ease-soft),
   border-color .16s var(--ease-soft),color .16s var(--ease-soft),transform .12s var(--ease-soft)}
 .act:active,.cmdbtn:active,.composer .primary:active{transform:translateY(1px)}
