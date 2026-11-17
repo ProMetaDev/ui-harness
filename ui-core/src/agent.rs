@@ -114,8 +114,10 @@ pub struct Agent {
     pub env_scrub: bool,
     /// ????(??)
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
-    /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动写进日志
+    /// 观测式效果：shell/插件/MCP 执行前后取差量，把实际改动写进日志
     pub env_observe: bool,
+    /// inotify watcher（Linux）。有它就不扫描，直接 drain 事件。
+    pub watcher: Option<crate::observe::Watcher>,
     /// OS 沙箱配置（Linux Landlock）
     pub sandbox: crate::sandbox::Config,
     /// 外部 MCP server（未配置时为 None）。
@@ -213,6 +215,16 @@ impl Agent {
         let policy = Policy::new(Policy::defaults(&workspace), &workspace);
         // 事件缓冲有上限，轮次必须来自独立计数
         let turn = journal.turn_count();
+        // watcher 要在 workspace 被 move 之前建好
+        let observe_on = std::env::var("UI_OBSERVE").map(|v| v != "0").unwrap_or(true);
+        // UI_OBSERVE_SCAN=1 强制走全量扫描（对照 benchmark 用，也是逃生口：
+        // 某些网络/overlay 文件系统上 inotify 事件不可靠）
+        let force_scan = std::env::var("UI_OBSERVE_SCAN").map(|v| v == "1").unwrap_or(false);
+        let watcher = if observe_on && !force_scan {
+            crate::observe::Watcher::new(&workspace)
+        } else {
+            None
+        };
         Agent {
             journal,
             model,
@@ -234,6 +246,9 @@ impl Agent {
             env_observe: std::env::var("UI_OBSERVE")
                 .map(|v| v != "0")
                 .unwrap_or(true),
+            // 优先用 inotify：每次调用只 drain，不再全量扫描。
+            // 建不起来（平台不支持 / watch 超限）就退回扫描。
+            watcher,
             sandbox: crate::sandbox::Config {
                 fs: std::env::var("UI_SANDBOX").map(|v| v != "0").unwrap_or(true),
                 net: std::env::var("UI_SANDBOX_NET").map(|v| v == "1").unwrap_or(false),
@@ -826,10 +841,20 @@ impl Agent {
         record_reads(&mut self.journal, &self.workspace, &name, &call.id, &effects)?;
 
         // 观测式效果：这三个通道是"信任边界"——它们声明的是「要不要执行」，
-        // 内部到底读了什么、写了什么，声明里没有。执行前后各扫一次工作区，
+        // 内部到底读了什么、写了什么，声明里没有。执行前后取差量，
         // 把**实际改动**记进日志，审计才回答得了"到底改了什么"。
+        //
+        // 两条路径：有 inotify watcher 就 drain 事件（O(1)，不扫描）；
+        // 否则退回全量扫描比差（O(文件数)）。
         let trust_boundary = matches!(name.as_str(), "shell" | "plugin_call" | "mcp_call");
-        let before = if self.env_observe && trust_boundary {
+        let watching = self.env_observe && trust_boundary && self.watcher.is_some();
+        if watching {
+            // 先清掉历史事件，剩下的就都是这次工具调用产生的
+            if let Some(w) = self.watcher.as_mut() {
+                let _ = w.drain();
+            }
+        }
+        let before = if self.env_observe && trust_boundary && !watching {
             Some(crate::observe::scan(&self.workspace))
         } else {
             None
@@ -854,20 +879,38 @@ impl Agent {
             ]),
         )?;
 
-        if let Some(before) = before {
-            let after = crate::observe::scan(&self.workspace);
-            let ch = crate::observe::diff(&before, &after);
-            // 没变就不记：日志里塞满「什么都没发生」会淹没真正的改动
-            if !ch.is_empty() || ch.truncated {
-                self.journal.append(
-                    "effect/observed",
-                    Json::obj(vec![
-                        ("callId", Json::from(call.id.as_str())),
-                        ("tool", Json::from(name.as_str())),
-                        ("summary", Json::from(ch.summary())),
-                        ("changes", ch.to_json()),
-                    ]),
-                )?;
+        if self.env_observe && trust_boundary {
+            // 有 watcher：事件驱动；溢出/不可信时如实标注，不假装完整
+            let observed = if watching {
+                match self.watcher.as_mut().and_then(|w| w.drain()) {
+                    Some(ch) => Some((ch, false)),
+                    None => Some((crate::observe::Changes::default(), true)),
+                }
+            } else {
+                before.map(|b| {
+                    let after = crate::observe::scan(&self.workspace);
+                    (crate::observe::diff(&b, &after), false)
+                })
+            };
+
+            if let Some((ch, overflowed)) = observed {
+                // 没变就不记：日志里塞满「什么都没发生」会淹没真正的改动
+                if !ch.is_empty() || ch.truncated || overflowed {
+                    self.journal.append(
+                        "effect/observed",
+                        Json::obj(vec![
+                            ("callId", Json::from(call.id.as_str())),
+                            ("tool", Json::from(name.as_str())),
+                            ("summary", Json::from(ch.summary())),
+                            ("changes", ch.to_json()),
+                            ("overflowed", Json::Bool(overflowed)),
+                            (
+                                "source",
+                                Json::from(if watching { "inotify" } else { "scan" }),
+                            ),
+                        ]),
+                    )?;
+                }
             }
         }
         Ok((result, name))
