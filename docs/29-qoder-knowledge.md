@@ -260,7 +260,7 @@ Qoder 的知识引擎不是"更强的 RAG"，而是把**知识生产**（RepoWik
 
 | # | Qoder 的做法 | 我们已有 | 我们缺 | 具体动作 | 成本 |
 |---|---|---|---|---|---|
-| K1 | 卡片带仓库/分支版本，随 commit 增量更新，切换分支时在"复用/增量/重建"间决策 | `manifest` 的 sha256、`producedBy{seq,tool}` 血缘 | **知识产物与代码版本的绑定** | 卡片 front-matter 强制 `source_sha` + `generated_at` + `generated_by_seq`；`verify` 增加"卡源是否仍一致" | 1d |
+| K1 | 卡片带仓库/分支版本，随 commit 增量更新，切换分支时在"复用/增量/重建"间决策 | `manifest` 的 sha256、`producedBy{seq,tool}` 血缘 | **知识产物与代码版本的绑定** | 卡片 front-matter 强制 `source_sha` + `generated_at` + `generated_by_seq`；**独立的 `ui knowledge check`** 校验卡源是否仍一致（STALE 退 2），不塞进 `ui verify`——verify 要保持"只读日志、流式 O(1)" | 1d |
 | K2 | 知识在任务前预取、任务中补查，且**用执行轨迹回放证明知识改变了结果** | 七类事件、`decision` 事件 | **"这次注入了哪张卡、为什么"** | 不新增契约大类：在 journal 里加 `knowledge/emit`、`knowledge/use` 两个子类型（带 card_id、命中原因、budget_tokens） | 1d |
 | K3 | 人读（Wiki）与机读（Card）**两种表示同源** | compaction 摘要（人读）、`docs/` | **机读项目卡**：模块/入口/命令/约束/禁忌 | `docs/knowledge/*.md` + YAML front-matter；纯文件，零依赖，`sha256` 即索引 | 2d |
 | K4 | 遗忘/去重/冲突检测是记忆系统的一等公民（打分驱逐，而非只追加） | 全量日志（磁盘保留）、内存 buffer 有上限 | **知识条目的退役与墓碑** | `knowledge/retire`（reason）+ 保留 tombstone；删除也留痕（比 Qoder 的"覆盖本地"强） | 0.5d |
@@ -374,3 +374,22 @@ Qoder 能生成知识、能检索知识，但它的公开材料里**没有任何
 | 6 | 中/英 | "越用越聪明" / 40% 11% 数据来源 / independent test | 核营销话术与复现 |
 
 **未能完成的验证**：没有安装 Qoder、没有跑它的 40 案例、没有抓包看索引上传内容。凡涉及"实际效果"的结论，本文一律停在"厂商自述"。
+
+---
+
+## 九、落地情况（v0.1.15）
+
+K1 + K2 已实现，但**按我们自己的标准打了几个折**，这里如实记：
+
+| 项 | 计划 | 实际 | 说明 |
+|---|---|---|---|
+| K1 卡源校验 | `verify` 里增加 | **独立 `ui knowledge check`**（STALE 退 2） | `verify` 保持只读日志、流式 O(1) 内存；把文件哈希塞进去会破坏它的语义 |
+| K1 空 `source_sha` | 应视为不一致 | **UNBOUND，默认退 0**，`--strict` 才红 | 否则仓库自带的示例卡会让 `check` 一直红；代价是"清空 sha"能绕过默认审计 |
+| K2 知识注入点 | "任务前预取 + 任务中补查" | **只做任务前预取，且只在 `ui run`** | `chat` / `workflow` / `team` 的子任务不预取；"任务中补查"未做 |
+| K2 命中排序 | 应该有相关性排序 | **不打分**（`score` 恒 `null`），超 3 张按 id 取 | 确定性优先：可复现胜过不可解释的相似度 |
+| K3 卡片体积 | 未规定 | **无上限** | 超大卡会直接吃 token 预算；`budget_tokens = 正文/4` 语义保持干净 |
+
+**没有做的事**（对应第八节的"不该抄"）：不自动生成卡片（N2）、不做 LLM 润色、不做云端。
+
+**证据**：`ui knowledge check` / `knowledge/emit` / `knowledge/use` 各有集成测试；
+`ui replay` 能看到 `knowledge/use` 行；`docs/knowledge/example-module.md` 是可跑通的示例卡。

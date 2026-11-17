@@ -50,19 +50,51 @@ pub fn hash_file(path: &Path) -> Option<String> {
     Some(format!("xxh:{:016x}", hasher.finish()))
 }
 
-/// 遍历副本，返回相对路径列表：内容与 manifest 不一致、或 manifest 里没有的。
+/// 副本与 manifest 的差异。
+///
+/// `deleted` 不能省：子代理删掉一个文件，如果只报"改动"，调用方就永远不知道
+/// 需要处理删除——父工作区会留下一个本该消失的文件，而日志里毫无痕迹。
+pub struct Diff {
+    /// 内容变了，或 manifest 里没有的新文件
+    pub changed: Vec<String>,
+    /// manifest 里有、副本里没有的（被删掉了）
+    pub deleted: Vec<String>,
+}
+
+/// 遍历副本，算出改动与删除。
 ///
 /// `manifest` 的值必须是 `hash_file` 的输出格式。旧格式（纯 SHA-256）会被当成
 /// "不一致"——宁可多问一句，也不漏掉一次改动。
-pub fn changed_files(root: &Path, manifest: &HashMap<String, String>) -> Vec<String> {
-    let mut out = Vec::new();
-    walk(root, root, manifest, &mut out);
-    out.sort();
-    out.dedup();
-    out
+pub fn diff(root: &Path, manifest: &HashMap<String, String>) -> Diff {
+    let mut changed = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 只遍历一遍树：同时收集"改了的"和"存在的所有键"
+    walk(root, root, manifest, &mut changed, &mut seen);
+    changed.sort();
+    changed.dedup();
+
+    let mut deleted: Vec<String> = manifest
+        .keys()
+        .filter(|k| !seen.contains(*k))
+        .cloned()
+        .collect();
+    deleted.sort();
+
+    Diff { changed, deleted }
 }
 
-fn walk(root: &Path, dir: &Path, manifest: &HashMap<String, String>, out: &mut Vec<String>) {
+/// 只取改动列表（大多数调用方只关心这个）。
+pub fn changed_files(root: &Path, manifest: &HashMap<String, String>) -> Vec<String> {
+    diff(root, manifest).changed
+}
+
+fn walk(
+    root: &Path,
+    dir: &Path,
+    manifest: &HashMap<String, String>,
+    changed: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -74,7 +106,7 @@ fn walk(root: &Path, dir: &Path, manifest: &HashMap<String, String>, out: &mut V
         }
         let path = entry.path();
         if path.is_dir() {
-            walk(root, &path, manifest, out);
+            walk(root, &path, manifest, changed, seen);
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
@@ -83,8 +115,9 @@ fn walk(root: &Path, dir: &Path, manifest: &HashMap<String, String>, out: &mut V
             (Some(expected), Some(now)) => expected == &now,
             _ => false,
         };
+        seen.insert(key.clone());
         if !unchanged {
-            out.push(key);
+            changed.push(key);
         }
     }
 }
@@ -216,6 +249,35 @@ mod tests {
         // 否则这个文件永远 manifest miss（只有 Windows 才需要归一化）。
         #[cfg(not(windows))]
         assert_eq!(rel_key(r"a\b"), r"a\b");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn deleted_files_are_reported_as_deleted_not_changed() {
+        // 删除如果被忽略，父工作区会永远留下一个本该消失的文件，而日志毫无痕迹。
+        let d = tmp("deleted");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("b.txt"), "b").unwrap();
+        let mut m = HashMap::new();
+        m.insert("a.txt".to_string(), hash_file(&d.join("a.txt")).unwrap());
+        m.insert("b.txt".to_string(), hash_file(&d.join("b.txt")).unwrap());
+
+        fs::remove_file(d.join("b.txt")).unwrap();
+
+        let diff = diff(&d, &m);
+        assert_eq!(diff.changed, Vec::<String>::new(), "删除不该算作改动");
+        assert_eq!(diff.deleted, vec!["b.txt".to_string()], "删除必须被列出来");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn unchanged_files_are_in_neither_bucket() {
+        let d = tmp("neither");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let m = manifest_of(&d, "a.txt");
+        let diff = diff(&d, &m);
+        assert!(diff.changed.is_empty());
+        assert!(diff.deleted.is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 }
