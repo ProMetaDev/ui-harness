@@ -94,3 +94,105 @@
 
 - artifacts were nested twice and counted as inputs (found by a real model run)
 
+## v0.1.3 · 2026-11-16
+
+**新功能**
+
+- OS sandbox on Linux via Landlock (fail-closed; zero deps, no root)
+
+**文档**
+
+- hands-on audit walkthrough (demo-audit.sh + quickstart)
+- use a real conversation as hero; fix screenshot labels
+- rewrite README around the problem it solves; add screenshots
+- generated CHANGELOG (tools/changelog.sh)
+
+## v0.1.4 · 2026-11-17
+
+**文档**
+
+- windows sandbox plan (3 tiers, risks, acceptance)
+
+**其他**
+
+- Job Object limits + guaranteed tree reclamation (no orphans on normal exit)
+
+## v0.1.5 · 2026-11-17
+
+**修复**
+
+- cap journal memory buffer (soak found 5x RSS growth); add --max-steps; soak tool + report
+
+## v0.1.6 · 2026-11-17
+
+**修复**
+
+- journal write failures are fail-closed with actionable errors (41 gate items)
+
+## v0.1.7 · 2026-11-17
+
+**其他**
+
+- streaming verify/replay (memory O(1)); bench harness; perf report
+
+## v0.1.8 · 2026-11-17
+
+**工程**
+
+- annotate the FAIL lines and the gate summary
+- emit failure tail as annotations so it can be read via API
+- put failure diagnostics into the run summary
+
+**其他**
+
+- a missing journal is an empty one, not an error (CI caught it)
+- 飞行记录仪界面落地（日志/当前步右栏/固定审批/动效）
+- unify cargo, build windows in the copy, tolerate env-less landlock signal deaths
+- journal open scans only the tail; catch_up reads from offset (O(1) memory on 300k-event logs)
+- 克制的动效系统（入场/数据生长/审批条/盖章）+ 动效录屏
+- gpt-image-2 方向板 + 纸面实验室编号/验证章 + UU 设定
+
+## v0.1.9 · 2026-11-17
+
+**工程**
+
+- drop scratch scripts
+
+**其他**
+
+- observation via inotify (85ms -> 5ms per call on 20k files), scan fallback
+
+## v0.1.10 · 2026-11-17
+
+**其他**
+
+- verify reads only seq/prev/kind/callId (549ms vs 664ms on 300k events)
+- 视觉精修（masthead/字阶/日志式工具行/1280 仪表条）
+
+## v0.1.11 · 2026-11-17
+
+**工程**
+
+- lockfile 0.1.10
+
+**其他**
+
+- streaming export (112MB -> 3.5MB on 70k events); refuse to export a tampered journal
+- 流式与右栏动效按帧合并，消除整块重绘的卡顿感
+
+## v0.1.12 · 2026-11-17
+
+**其他**
+
+- copy and hash in one pass (incremental sha256); fix mixed build roots
+- 树结构视觉层（右栏 spine/节点码、时间轴节点）
+- tag by explicit SHA (parallel work makes HEAD unsafe)
+- 信息架构收口（4 个真入口、会话单职责、低频操作进更多菜单）
+
+## v0.1.13 · 2026-11-17
+
+**其他**
+
+- xxHash64 manifest + content-based changed detection (-20%); fixes the >2MB blind spot
+- GPT 数据树背景板 + 缓慢漂移/光晕，背景随二进制走
+
