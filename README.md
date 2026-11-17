@@ -34,13 +34,13 @@ bash tools/demo-audit.sh   # 跑一轮 → 回放 → 校验 → 篡改 → 发�
 
 ```bash
 bash tools/bootstrap.sh   # 先看还缺什么（需要 Rust；其余逐项说明）
-bash tools/test.sh        # 137 个测试
-bash tools/debug.sh       # 39 项门禁：构建 + 端到端 + 攻击场景
+bash tools/test.sh        # 195 个测试
+bash tools/debug.sh       # 46 项门禁：构建 + 端到端 + 攻击场景 + 跨平台
 ```
 
 ```
 $ ui --version
-ui 0.1.2 (commit 9b4f84d, built 2026-11-16)
+ui 1.0.0 (commit 0000000, built 2026-11-17)
 ```
 
 真实模型接上就能用（任何 OpenAI 兼容端点）：
@@ -137,7 +137,7 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 
 ## 状态与许可
 
-- v0.1.2 · **137 个测试** · **39 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
+- **v1.0.0** · **195 个测试** · **46 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验），
   但**没有 OS 沙箱**，也没有经过第三方评审。
 - 版本演进见 [CHANGELOG.md](CHANGELOG.md)；设计笔记在 [docs/](docs/)。

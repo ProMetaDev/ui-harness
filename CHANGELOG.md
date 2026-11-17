@@ -196,3 +196,19 @@
 - xxHash64 manifest + content-based changed detection (-20%); fixes the >2MB blind spot
 - GPT 数据树背景板 + 缓慢漂移/光晕，背景随二进制走
 
+## v0.1.15 · 2026-11-17
+
+**文档**
+
+- Qoder knowledge engine teardown (mechanism vs marketing); fix bench path guard
+- regenerate changelog through v0.1.13
+
+**其他**
+
+- build a clean checkout of HEAD (catches half-committed files); 0.1.15
+- auditable cards + knowledge/emit & /use events (K1+K2)
+- 文件卡/运行态与 900 布局收口；实验室血缘原型
+- unify skip lists, normalize manifest keys, fail loudly; docs: qoder teardown + memory design
+- 工作区/能力/实验室主画布 + 文件预览 + 运行态条
+- assert the isolate manifest really uses xxh format (42 items)
+

@@ -48,16 +48,18 @@
 | U4 | 命中不打分（score 恒 null） | 多于 3 张卡时按 id 取，不是按相关性 | 确定性优先：宁可可复现，不要不可解释的相似度 |
 | U5 | Windows 无文件系统隔离（只有 Job Object 资源限制） | 子进程能写工作区外的文件 | 已在 `docs/25` 写明，v1 不做低完整性令牌 |
 | U6 | shell 间接读密钥仍是 GAP | `cat secrets/x` 拦不住 | 见 `docs/22` 攻击表，v1 不假装能拦 |
+| U7 | `memory/used` **双写**（主日志 + 记忆链） | 两处各自可校验，但不是唯一事实源 | 主日志给 replay/verify，记忆链给 hits 派生；P2 再决定是否收敛成单链 |
+| U8 | 记忆只有 P1（人工写入） | 模型不能自己写记忆、没有候选/确认机制 | 这是**有意**的：自动写记忆最容易污染审计，P2 才做且必须人工确认 |
 
 ## 五、待办（v1 之前要做的）
 
 | # | 事项 | 负责人 | 状态 |
 |---|---|---|---|
-| D1 | `apply` 把"子代理删除的文件"列进报告（不自动删） | 内核 | 核心已做（`isolate::diff` 返回 `deleted` + 2 个测试），CLI 报告待接线 |
-| D2 | 记忆 P1（存储/检索/注入/审计 + 6 个测试） | 并行 agent | 进行中 |
-| D3 | Windows 原生冒烟（exe 实跑 + 中文路径 + Job Object） | 并行 agent | 进行中 |
-| D4 | README / docs/23 的数字与版本统一（178→实际、43 项） | 文档 | 待做 |
-| D5 | `docs/29` K1 措辞修正（卡源校验是 `ui knowledge check`，不是 `verify`） | 文档 | 待做 |
+| D1 | `apply` 把"子代理删除的文件"列进报告（不自动删） | 内核 | ✅ `isolate::diff` + `delegate/end.deleted` + apply 报告 + 集成测试 |
+| D2 | 记忆 P1（存储/检索/注入/审计 + 6 个测试） | 并行 agent | ✅ 194→195 个测试全绿 |
+| D3 | Windows 原生冒烟（exe 实跑 + 中文路径 + Job Object） | 并行 agent | ✅ 三项全过；顺带修掉"Windows 编不过 + 构建脚本假绿" |
+| D4 | README / docs/23 的数字与版本统一（195 个测试、46 项门禁） | 文档 | ✅ |
+| D5 | `docs/29` K1 措辞修正（卡源校验是 `ui knowledge check`，不是 `verify`） | 文档 | ✅ |
 | D6 | 发布：`Cargo.toml` → 1.0.0、CHANGELOG、tag `v1.0.0`、release 产物 | 发布 | 待做 |
 
 ## 六、发布动作（D1–D5 全绿之后）
