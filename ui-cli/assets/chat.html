@@ -660,16 +660,35 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .ff-note{margin-top:12px;padding-top:9px;border-top:1px solid var(--border);color:var(--faint);
   font-size:10.5px;line-height:1.65}
 @media (max-width:1100px){.ws-layout{grid-template-columns:1fr}.file-facts{position:static}}
-.cap-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:24px;align-items:start}
-.cap-card{border:1px solid var(--border);border-radius:6px;background:var(--panel);overflow:hidden}
-.cap-card .cap-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
-.cap-card .cap-head .v{margin-left:auto;color:var(--faint);font:10px var(--mono)}
-.cap-row{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border-soft)}
+.cap-toolbar{max-width:900px;margin:0 auto 10px;display:flex;align-items:center;gap:12px}
+.cap-toolbar input{flex:1;height:30px;padding:0 10px;border:1px solid var(--border);border-radius:5px;
+  background:var(--panel);color:var(--text);font:11px var(--mono);outline:none}
+.cap-toolbar input:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-soft)}
+.cap-toolbar span{color:var(--faint);font:10.5px var(--mono);white-space:nowrap}
+.cap-group{border:1px solid var(--border);border-radius:6px;background:var(--panel);overflow:hidden;margin-bottom:10px}
+.cap-group[hidden]{display:none}
+.cap-group-head{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-bottom:1px solid var(--border);
+  background:var(--subtle)}
+.cap-group-head .kicker{color:var(--accent)}
+.cap-group-head h3{margin:0;font-size:11.5px;font-weight:600;color:var(--text)}
+.cap-group-head .v{margin-left:auto;color:var(--faint);font:10px var(--mono)}
+.cap-row{display:grid;grid-template-columns:112px minmax(0,1fr) 58px 64px;align-items:center;gap:10px;
+  padding:8px 12px;border-bottom:1px solid var(--border-soft);cursor:default}
 .cap-row:last-child{border-bottom:0}
+.cap-row[hidden]{display:none}
 .cap-row:hover{background:var(--subtle)}
-.cap-row .cname{font:11.5px var(--mono);color:var(--text);min-width:92px}
-.cap-row .csum{color:var(--muted);font-size:11.5px;line-height:1.5}
-.cap-row .cmeta{margin-left:auto;color:var(--faint);font:10px var(--mono);white-space:nowrap}
+.cap-row .cname{font:11.5px var(--mono);color:var(--text)}
+.cap-row .csum{color:var(--muted);font-size:11.5px;line-height:1.45;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cap-row .ceffect{justify-self:start;padding:1px 5px;border:1px solid var(--border);border-radius:3px;
+  color:var(--faint);font:9.5px var(--mono)}
+.cap-row .ceffect.read{color:var(--ok);border-color:rgba(120,160,110,.3)}
+.cap-row .ceffect.write{color:var(--accent);border-color:rgba(227,162,75,.35)}
+.cap-row .ceffect.exec{color:var(--bad);border-color:rgba(222,122,102,.3)}
+.cap-row .ceffect.external{color:var(--muted);border-style:dashed}
+.cap-row .ceffect.state,.cap-row .ceffect.meta{color:var(--faint)}
+.cap-row .cgate{justify-self:end;color:var(--faint);font:9.5px var(--mono);white-space:nowrap}
+.cap-none{padding:20px 12px;color:var(--faint);font:11px var(--mono)}
 @media (max-width:1100px){.cap-grid{grid-template-columns:1fr}}
 .lab-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
 .lab-card{border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:13px 14px;cursor:pointer;
@@ -1090,6 +1109,10 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
           <h2>能力</h2>
         </div>
         <div class="mv-meta" id="capsMeta">正在加载…</div>
+      </div>
+      <div class="cap-toolbar">
+        <input type="search" id="capFilter" placeholder="过滤工具 / 技能 / 风险" aria-label="过滤能力">
+        <span id="capCount">—</span>
       </div>
       <div class="mv-body" id="capsBody"></div>
     </section>
@@ -2187,9 +2210,37 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     if (view === 'lab') loadLab();
   }
   let capsCache = null;
+  const TOOL_META = {
+    fs_read: ['filesystem', '读', '自动'],
+    fs_write: ['filesystem', '写', '按模式'],
+    fs_edit: ['filesystem', '写', '按模式'],
+    patch: ['filesystem', '写', '按模式'],
+    fs_mv: ['filesystem', '写', '按模式'],
+    fs_search: ['filesystem', '读', '自动'],
+    grep: ['filesystem', '读', '自动'],
+    tree: ['filesystem', '读', '自动'],
+    shell: ['execution', '执行', '需审批'],
+    plugin_call: ['external', '外部', '外部'],
+    mcp_call: ['external', '外部', '外部'],
+    todo: ['state', '状态', '自动'],
+    skill: ['meta', '元', '自动'],
+  };
+  const CAP_GROUPS = [
+    ['filesystem', '文件系统', 'fs'],
+    ['execution', '执行', 'exec'],
+    ['external', '外部调用', 'ext'],
+    ['state', '状态', 'state'],
+    ['meta', '元能力', 'meta'],
+  ];
+  function capEffectClass(label) {
+    return label === '读' ? 'read' : label === '写' ? 'write' : label === '执行' ? 'exec'
+      : label === '外部' ? 'external' : label === '状态' ? 'state' : 'meta';
+  }
   async function renderCaps() {
     const body = document.getElementById('capsBody');
     const metaEl = document.getElementById('capsMeta');
+    const filterEl = document.getElementById('capFilter');
+    const countEl = document.getElementById('capCount');
     if (!body) return;
     if (!capsCache) {
       body.innerHTML = '<div class="empty-note">读取能力清单…</div>';
@@ -2206,22 +2257,53 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       metaEl.textContent =
         tools.length + ' 工具 · ' + skills.length + ' 技能 · ' + (capsCache.model || '—');
     }
-    body.innerHTML =
-      '<div class="cap-grid">' +
-      '<div class="cap-card"><div class="cap-head"><span class="kicker">tools</span>' +
-      '<span class="v">' + tools.length + '</span></div>' +
-      (tools.length
-        ? tools.map((t) => '<div class="cap-row"><span class="cname">' + esc(t.name) + '</span>' +
-            '<span class="csum">' + esc(t.summary) + '</span></div>').join('')
-        : '<div class="empty-note">没有工具</div>') +
-      '</div>' +
-      '<div class="cap-card"><div class="cap-head"><span class="kicker">skills</span>' +
-      '<span class="v">' + skills.length + '</span></div>' +
-      (skills.length
-        ? skills.map((s) => '<div class="cap-row"><span class="cname">' + esc(s.name) + '</span>' +
-            '<span class="csum">' + esc(s.description) + '</span></div>').join('')
-        : '<div class="empty-note">这个工作区还没有 skill</div>') +
-      '</div></div>';
+    const byGroup = {};
+    for (const t of tools) {
+      const m = TOOL_META[t.name] || ['meta', '元', '自动'];
+      (byGroup[m[0]] = byGroup[m[0]] || []).push({ name: t.name, summary: t.summary, effect: m[1], gate: m[2] });
+    }
+    let html = '';
+    for (const [id, label, code] of CAP_GROUPS) {
+      const rows = byGroup[id] || [];
+      if (!rows.length) continue;
+      html += '<section class="cap-group" data-group="' + id + '">' +
+        '<div class="cap-group-head"><span class="kicker">' + code + '</span><h3>' + label + '</h3>' +
+        '<span class="v">' + rows.length + '</span></div>' +
+        rows.map((r) => '<div class="cap-row" data-search="' +
+          esc((r.name + ' ' + r.summary + ' ' + r.effect + ' ' + r.gate + ' ' + label).toLowerCase()) + '">' +
+          '<span class="cname">' + esc(r.name) + '</span>' +
+          '<span class="csum" title="' + esc(r.summary) + '">' + esc(r.summary) + '</span>' +
+          '<span class="ceffect ' + capEffectClass(r.effect) + '">' + r.effect + '</span>' +
+          '<span class="cgate">' + r.gate + '</span></div>').join('') +
+        '</section>';
+    }
+    if (skills.length) {
+      html += '<section class="cap-group" data-group="skills">' +
+        '<div class="cap-group-head"><span class="kicker">skill</span><h3>技能</h3>' +
+        '<span class="v">' + skills.length + '</span></div>' +
+        skills.map((s) => '<div class="cap-row" data-search="' +
+          esc((s.name + ' ' + s.description + ' 技能 skill').toLowerCase()) + '">' +
+          '<span class="cname">' + esc(s.name) + '</span>' +
+          '<span class="csum" title="' + esc(s.description) + '">' + esc(s.description) + '</span>' +
+          '<span class="ceffect meta">技能</span><span class="cgate">自动</span></div>').join('') +
+        '</section>';
+    }
+    body.innerHTML = html || '<div class="cap-none">没有能力清单</div>';
+    const apply = () => {
+      const q = (filterEl ? filterEl.value : '').trim().toLowerCase();
+      let shown = 0;
+      body.querySelectorAll('.cap-row').forEach((row) => {
+        const hit = !q || (row.dataset.search || '').includes(q);
+        row.hidden = !hit;
+        if (hit) shown++;
+      });
+      body.querySelectorAll('.cap-group').forEach((g) => {
+        g.hidden = !g.querySelector('.cap-row:not([hidden])');
+      });
+      if (countEl) countEl.textContent = q ? shown + ' 项匹配' : (tools.length + skills.length) + ' 项';
+    };
+    if (filterEl) filterEl.oninput = apply;
+    apply();
   }
 
   document.querySelectorAll('.act[data-view]').forEach((b) => {
