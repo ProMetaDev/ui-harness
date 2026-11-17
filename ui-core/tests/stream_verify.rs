@@ -123,3 +123,18 @@ fn stream_handles_an_empty_journal() {
     let _ = GENESIS;
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_missing_journal_is_an_empty_one_not_an_error() {
+    // 回归（CI 抓到的）：流式校验一开始对「文件不存在」直接报错，
+    // 于是干净机器上门禁的「verify（干净日志）」失败。
+    // 没有日志 = 还没有任何记录，不是损坏。
+    let dir = tmp("missing");
+    let path = dir.join("nope.jsonl");
+    let r = verify_stream(&path).expect("缺失日志不该是错误");
+    assert_eq!(r.events, 0);
+    assert!(r.corrupt.is_none());
+    assert!(r.open_tools.is_empty());
+    assert_eq!(r.good_bytes, 0);
+    let _ = fs::remove_dir_all(&dir);
+}

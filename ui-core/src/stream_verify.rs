@@ -33,7 +33,28 @@ pub struct StreamReport {
 }
 
 pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
-    let file = File::open(path)?;
+    // 日志不存在 = 还没有任何记录，不是损坏。
+    // 旧实现（Journal::read）就是这么处理的；流式版一开始漏了这条，
+    // 结果干净机器上门禁的「verify（干净日志）」直接失败（CI 抓到的回归）。
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StreamReport {
+                events: 0,
+                turns: 0,
+                tool_starts: 0,
+                first_seq: 0,
+                last_seq: 0,
+                corrupt: None,
+                open_turn: None,
+                open_tools: Vec::new(),
+                open_tool_events: Vec::new(),
+                open_turn_event: None,
+                good_bytes: 0,
+            })
+        }
+        Err(e) => return Err(e),
+    };
     let mut reader = BufReader::with_capacity(64 * 1024, file);
 
     let mut prev = GENESIS.to_string();
