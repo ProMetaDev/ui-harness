@@ -5,7 +5,27 @@
 
 先看[改造前后对比](compare.png)。打开 [`ui-concept.html`](ui-concept.html) 即可点（单文件、无外链、离线可跑）。
 截图：[暗色](shot-dark.png) · [明色](shot-light.png) · [空状态](shot-empty.png) · [实验室](shot-lab.png) ·
-[1280 宽（右栏收起）](shot-1280.png)。
+[实验室明色](shot-lab-light.png) · [1280 宽（右栏收起）](shot-1280.png)。
+
+---
+
+## 生图模型参与的部分
+
+用 [`tools/gen_image.mjs`](../tools/gen_image.mjs) + `gpt-image-2` 出了三张方向板和一张 UU 设定图。
+提示词留在 [`prompts/`](prompts/)，图片留在本目录。**它只做方向与资产，HTML 仍是最终稿。**
+
+| 图 | 它提供了什么 | 采纳情况 |
+|---|---|---|
+| [A · 飞行记录仪](concept-a-flight.png) | 验证「左栏 + 日志 + 右仪表」的骨架；密度和留白关系 | 主界面继续沿这条线，但不照抄它的块状占位 |
+| [B · 纸面审计](concept-b-paper.png) | 编号、细线表格、盖章、像审计底稿的排版 | **已采纳**：实验室卡片编号 + 右上角 `VERIFIED` 章 |
+| [C · 蓝图/信号流](concept-c-blueprint.png) | 把「快照 → 模型 → 工具 → 策略」画成一条信号流 | 暂不用于主界面；留给未来的 trace / replay 视图 |
+| [UU 设定图](uu-sheet.png) | 四个状态、竖条眼睛、更方的身体比例 | **已采纳**：原型里的 UU 改成竖条眼 |
+
+生图的用途边界：
+
+- **适合**：选气质、出 moodboard、出角色/插画/纹理、给版式找参考；
+- **不适合**：直接画最终界面。图里的文字、数字、对齐都不可信，而且改一个字段就要重出图；
+- 所以流程是：**生图定方向 → HTML 落版 → 截图校验**。
 
 ---
 

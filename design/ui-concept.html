@@ -302,7 +302,7 @@ html[data-view="lab"] .composer-wrap{display:none}
   background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px;
   opacity:.5;mask-image:radial-gradient(circle at 30% 20%,#000,transparent 68%)}
 .pre-flag{display:flex;align-items:center;gap:10px}
-.uu{width:26px;height:23px;flex:none;margin-left:1px}
+.uu{width:30px;height:27px;flex:none;margin-left:1px}
 .uu .ub{fill:var(--accent);opacity:.92}
 .uu .ue{fill:var(--bg)}
 .uu .uidle{transform-box:fill-box;transform-origin:center;animation:blink 4s steps(1) infinite}
@@ -343,8 +343,11 @@ html[data-view="lab"] .composer-wrap{display:none}
 .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:4px;
        background:var(--ok-soft);color:var(--ok);font:500 10.5px var(--mono)}
 .doc-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px}
-.card{border:1px solid var(--line);border-radius:6px;background:var(--panel);padding:14px}
+.card{border:1px solid var(--line);border-radius:6px;background:var(--panel);padding:14px;position:relative}
 .card .ch{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.card .cno{font:9.5px var(--mono);color:var(--faint);letter-spacing:.08em;margin-right:1px}
+.stamp{position:absolute;right:8px;bottom:4px;width:64px;height:64px;opacity:.55;transform:rotate(-8deg);
+       pointer-events:none;color:var(--accent)}
 .card .ch .v{margin-left:auto;color:var(--faint);font:9.5px var(--mono)}
 .metric{display:flex;align-items:baseline;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--line-soft)}
 .metric:last-child{border-bottom:0}
@@ -610,7 +613,7 @@ html[data-view="lab"] .status{grid-column:1/4}
                   <rect class="ub" x="2" y="1" width="36" height="29" rx="10"/>
                   <rect class="ub" x="10" y="30" width="7" height="4" rx="2"/>
                   <rect class="ub" x="23" y="30" width="7" height="4" rx="2"/>
-                  <g class="uidle"><circle class="ue" cx="14" cy="15" r="2.6"/><circle class="ue" cx="25" cy="15" r="2.6"/></g>
+                  <g class="uidle"><rect class="ue" x="11" y="12" width="4" height="7" rx="1.6"/><rect class="ue" x="25" y="12" width="4" height="7" rx="1.6"/></g>
                 </svg>
               </div>
               <h1>把一件事交给它，<br>然后<em>看清每一步</em>。</h1>
@@ -659,23 +662,32 @@ html[data-view="lab"] .status{grid-column:1/4}
 
           <div class="doc-grid">
             <div class="card">
-              <div class="ch"><span class="kicker">指标</span><span class="v">metrics.json</span></div>
+              <div class="ch"><span class="cno">01</span><span class="kicker">指标</span><span class="v">metrics.json</span></div>
               <div class="metric"><span class="n">accuracy</span><span class="v">0.7200</span></div>
               <div class="metric"><span class="n">loss</span><span class="v">0.3142</span></div>
               <div class="metric"><span class="n">epochs</span><span class="v">3</span></div>
               <div class="metric"><span class="n">lr</span><span class="v">0.030<small>fixed</small></span></div>
             </div>
             <div class="card">
-              <div class="ch"><span class="kicker">校验</span><span class="v">ui lab verify</span></div>
+              <div class="ch"><span class="cno">02</span><span class="kicker">校验</span><span class="v">ui lab verify</span></div>
               <div class="check"><span class="ck">✓</span>1 个产物哈希一致</div>
               <div class="check"><span class="ck">✓</span>1 个输入仍一致</div>
               <div class="check"><span class="ck">✓</span>结论 1/1 对得上</div>
               <div class="check"><span class="ck">✓</span>journal 哈希链完整</div>
+              <svg class="stamp" viewBox="0 0 80 80" aria-hidden="true">
+                <g fill="none" stroke="currentColor">
+                  <circle cx="40" cy="40" r="35" stroke-width="1.2" stroke-dasharray="2 2.5"/>
+                  <circle cx="40" cy="40" r="27.5" stroke-width="1"/>
+                  <path d="M27 41l8 8 18-21" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </g>
+                <text x="40" y="63" text-anchor="middle" font-size="6.2" letter-spacing="1.2"
+                      fill="currentColor" font-family="monospace">VERIFIED</text>
+              </svg>
             </div>
           </div>
 
           <div class="card" style="margin-top:18px">
-            <div class="ch"><span class="kicker">产物</span><span class="v">producedBy 来自日志，不是自述</span></div>
+            <div class="ch"><span class="cno">03</span><span class="kicker">产物</span><span class="v">producedBy 来自日志，不是自述</span></div>
             <table class="t">
               <thead><tr><th>文件</th><th>sha256</th><th class="r">字节</th><th class="r">来源</th></tr></thead>
               <tbody>
@@ -690,7 +702,7 @@ html[data-view="lab"] .status{grid-column:1/4}
 
           <div class="doc-grid">
             <div class="card">
-              <div class="ch"><span class="kicker">读过的输入</span><span class="v">血缘</span></div>
+              <div class="ch"><span class="cno">04</span><span class="kicker">读过的输入</span><span class="v">血缘</span></div>
               <table class="t">
                 <thead><tr><th>文件</th><th class="r">字节</th><th>sha256</th></tr></thead>
                 <tbody><tr><td>data.csv</td><td class="r">12</td><td>f102…9ff</td></tr></tbody>
@@ -699,7 +711,7 @@ html[data-view="lab"] .status{grid-column:1/4}
               <div class="claim"><b>loss = 0.3142</b> 在 metrics.json 中找到对应值</div>
             </div>
             <div class="card">
-              <div class="ch"><span class="kicker">复现</span><span class="v">meta.json</span></div>
+              <div class="ch"><span class="cno">05</span><span class="kicker">复现</span><span class="v">meta.json</span></div>
               <div class="check"><span class="ck">✓</span>OS · kernel · 架构已记录</div>
               <div class="check"><span class="ck">✓</span>python 3.11.9 · 8 cores</div>
               <div class="check"><span class="ck">✓</span>命令：python train.py --lr 0.03 --seed 2</div>
