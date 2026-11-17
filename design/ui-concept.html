@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-view="approval">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UI · 设计原型</title>
+<style>
+/* ──────────────────────────────────────────────────────────────
+   UI / Flight recorder — design prototype
+   不是生产文件。生产壳在 ui-cli/assets/chat.html。
+   两层 token：静态色板 → 语义别名；明暗只换映射。
+   ────────────────────────────────────────────────────────────── */
+:root{
+  --s-ink-1000:#0b0d10; --s-ink-950:#0e1115; --s-ink-900:#12161b;
+  --s-ink-850:#161b21; --s-ink-800:#1b2128; --s-ink-700:#252c35;
+  --s-ink-600:#343c47; --s-ink-500:#59616d; --s-ink-400:#7d8590;
+  --s-ink-300:#a8adaf; --s-ink-200:#c9c7bd; --s-ink-100:#e7e3d8;
+  --s-ink-50:#f3f0e7;
+  --s-amber-500:#e3a24b; --s-amber-600:#c9862f; --s-amber-700:#a8631f;
+  --s-green-500:#8bc49a; --s-red-500:#de7a66;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono",monospace;
+}
+html[data-theme="dark"]{
+  --bg:var(--s-ink-1000); --bg-2:var(--s-ink-950);
+  --panel:var(--s-ink-900); --panel-2:var(--s-ink-850);
+  --line:#232a33; --line-soft:#1a2027;
+  --text:#ece9e0; --text-2:#bcb9ae; --muted:#8f8d83; --faint:#66665f;
+  --accent:var(--s-amber-500); --accent-2:var(--s-amber-600);
+  --accent-soft:rgba(227,162,75,.12); --accent-ink:#1a1206;
+  --ok:var(--s-green-500); --ok-soft:rgba(139,196,154,.10);
+  --warn:var(--s-amber-500); --warn-soft:rgba(227,162,75,.10);
+  --bad:var(--s-red-500); --bad-soft:rgba(222,122,102,.10);
+  --shadow:0 18px 48px rgba(0,0,0,.34);
+  color-scheme:dark;
+}
+html[data-theme="light"]{
+  --bg:#f4f1e9; --bg-2:#efebe1;
+  --panel:#fbf9f3; --panel-2:#f0ece2;
+  --line:#d7d1c3; --line-soft:#e5dfd3;
+  --text:#1e1c18; --text-2:#4d4a42; --muted:#6d695f; --faint:#969185;
+  --accent:var(--s-amber-700); --accent-2:#8a4f16;
+  --accent-soft:rgba(168,99,31,.09); --accent-ink:#fffdf8;
+  --ok:#3f7a4e; --ok-soft:rgba(63,122,78,.10);
+  --warn:#9a5d17; --warn-soft:rgba(154,93,23,.10);
+  --bad:#a8402f; --bad-soft:rgba(168,64,47,.09);
+  --shadow:0 18px 48px rgba(40,32,20,.14);
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.6 var(--sans);
+     overflow:hidden;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+::selection{background:var(--accent-soft);color:var(--text)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.kicker{font:600 9.5px/1.4 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:3px;
+      font:500 10.5px/1 var(--mono);letter-spacing:.02em;white-space:nowrap}
+.chip.allow{background:var(--ok-soft);color:var(--ok)}
+.chip.ask{background:var(--warn-soft);color:var(--warn)}
+.chip.deny{background:var(--bad-soft);color:var(--bad)}
+.chip.neutral{background:var(--panel-2);color:var(--muted)}
+.chip.effect{background:transparent;color:var(--faint);border:1px solid var(--line)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.dot.live{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+
+/* ── shell ─────────────────────────────────────────────────── */
+.app{display:grid;height:100vh;
+     grid-template-columns:64px 272px minmax(0,1fr) 344px;
+     grid-template-rows:52px minmax(0,1fr) 26px}
+.rail{grid-column:1;grid-row:1/4;background:var(--bg-2);border-right:1px solid var(--line);
+      display:flex;flex-direction:column;align-items:center;padding:12px 0 10px;gap:4px}
+.brand{width:34px;height:34px;display:grid;place-items:center;text-decoration:none;color:var(--accent);
+       font:600 14px/1 var(--mono);letter-spacing:-.04em;margin-bottom:14px;border-radius:8px}
+.brand:hover{background:var(--accent-soft)}
+.rail .rbtn{width:38px;height:38px;display:grid;place-items:center;border:0;border-radius:8px;
+            background:transparent;color:var(--muted);cursor:pointer;position:relative}
+.rail .rbtn:hover{background:var(--panel);color:var(--text)}
+.rail .rbtn.on{color:var(--accent);background:var(--accent-soft)}
+.rail .rbtn.on::before{content:"";position:absolute;left:-13px;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--accent)}
+.rail .rbtn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.rail .grow{flex:1}
+
+.topbar{grid-column:2/5;grid-row:1;display:flex;align-items:center;gap:18px;padding:0 18px 0 20px;
+        background:var(--bg);border-bottom:1px solid var(--line);min-width:0}
+.topbar .title{display:flex;align-items:center;gap:10px;min-width:0}
+.topbar h1{display:none;margin:0;font-size:13.5px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;
+           overflow:hidden;text-overflow:ellipsis}
+html[data-view="approval"] .topbar h1.view-chat,
+html[data-view="running"] .topbar h1.view-chat,
+html[data-view="empty"] .topbar h1.view-empty,
+html[data-view="lab"] .topbar h1.view-lab{display:block}
+.topbar .path{display:none;color:var(--faint);font:10.5px/1 var(--mono);white-space:nowrap;overflow:hidden;
+              text-overflow:ellipsis;max-width:320px;border-left:1px solid var(--line);padding-left:10px;
+              margin-left:2px}
+html[data-view="approval"] .topbar .path.view-chat,
+html[data-view="running"] .topbar .path.view-chat,
+html[data-view="empty"] .topbar .path.view-empty,
+html[data-view="lab"] .topbar .path.view-lab{display:block}
+html[data-view="empty"] .topbar .dot.ok{background:var(--faint)}
+.topbar .path b{color:var(--muted);font-weight:500}
+.topbar .spacer{flex:1}
+.cmdbtn{display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:6px;
+        border:1px solid var(--line);background:var(--panel);color:var(--faint);font-size:11.5px;
+        cursor:pointer;min-width:190px}
+.cmdbtn:hover{border-color:var(--muted);color:var(--muted)}
+.cmdbtn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round}
+.cmdbtn kbd{margin-left:auto;font:10.5px var(--mono);color:var(--faint)}
+.topbar .stat{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);white-space:nowrap}
+.topbar .stat b{font:600 11.5px var(--mono);color:var(--text)}
+.mode{display:inline-flex;height:26px;padding:2px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.mode button{height:20px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--faint);
+             font:11px var(--mono);cursor:pointer}
+.mode button.on{background:var(--accent-soft);color:var(--accent)}
+html[data-view="lab"] .topbar .mode{display:none}
+.labonly{display:none;gap:6px;align-items:center}
+html[data-view="lab"] .labonly{display:flex}
+.iconbtn{width:28px;height:28px;display:grid;place-items:center;border:1px solid transparent;border-radius:6px;
+         background:transparent;color:var(--faint);cursor:pointer}
+.iconbtn:hover{background:var(--panel);color:var(--text);border-color:var(--line)}
+.iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round}
+
+/* ── sidebar ───────────────────────────────────────────────── */
+.sidebar{grid-column:2;grid-row:2;background:var(--bg-2);border-right:1px solid var(--line);
+         display:flex;flex-direction:column;min-height:0}
+.side-head{padding:16px 16px 12px}
+.side-head .sess-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.side-head .sess-meta{margin-top:5px;color:var(--faint);font:10.5px/1.5 var(--mono)}
+.side-scroll{flex:1;overflow:auto;padding:0 10px 14px;min-height:0}
+.sec{margin:16px 6px 7px;display:flex;align-items:center;gap:8px}
+.sec .line{flex:1;height:1px;background:var(--line-soft)}
+.sess{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:5px;color:var(--muted);
+      font-size:12.5px;cursor:pointer;white-space:nowrap;overflow:hidden;position:relative}
+.sess:hover{background:var(--panel);color:var(--text)}
+.sess.on{background:var(--panel);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+.sess .name{overflow:hidden;text-overflow:ellipsis}
+.sess .n{margin-left:auto;color:var(--faint);font:10.5px var(--mono)}
+.sess .r{width:5px;height:5px;border-radius:50%;background:var(--faint);flex:none}
+.sess.on .r{background:var(--accent)}
+.newline{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px dashed var(--line);
+         border-radius:5px;color:var(--faint);font-size:12px;cursor:pointer;margin-top:4px}
+.newline:hover{color:var(--accent);border-color:var(--accent)}
+.side .kv{display:flex;justify-content:space-between;gap:10px;padding:5px 8px;font-size:12px;color:var(--muted)}
+.side .kv b{font:500 11.5px var(--mono);color:var(--text)}
+.side .kv b.dim{color:var(--muted)}
+.actlist{display:flex;flex-direction:column;gap:1px}
+.actrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;color:var(--muted);
+        font-size:12px;cursor:pointer}
+.actrow:hover{background:var(--panel);color:var(--text)}
+.actrow .meta{margin-left:auto;color:var(--faint);font:10.5px var(--mono)}
+.side-foot{margin-top:auto;padding:12px 16px;border-top:1px solid var(--line-soft);color:var(--faint);
+           font:10px/1.7 var(--mono)}
+.side-foot .ok{color:var(--ok)}
+
+/* ── main / transcript ─────────────────────────────────────── */
+.main{grid-column:3;grid-row:2;display:flex;flex-direction:column;min-height:0;background:var(--bg);position:relative}
+.main-scroll{flex:1;overflow:auto;min-height:0;padding:26px 30px 16px;scroll-behavior:smooth}
+.log{max-width:720px;margin:0 auto;position:relative}
+.log::before{content:"";position:absolute;left:66px;top:6px;bottom:6px;width:1px;background:var(--line-soft)}
+.entry{display:grid;grid-template-columns:54px minmax(0,1fr);gap:20px;position:relative;padding:0 0 22px}
+.entry .meta{text-align:right;padding-top:2px}
+.entry .meta time{display:block;color:var(--faint);font:9.5px/1.5 var(--mono)}
+.entry .meta .role{display:block;margin-top:3px;font:600 9px/1.4 var(--mono);letter-spacing:.12em;color:var(--faint)}
+.entry .meta .role.you{color:var(--accent)}
+.entry .meta .role.tool{color:var(--muted)}
+.entry .content{min-width:0}
+.entry .content p{margin:0;font-size:14px;line-height:1.78}
+.entry.user .content p{background:var(--panel);border-left:2px solid var(--accent);
+                       padding:10px 14px;border-radius:0 6px 6px 0}
+.entry.agent .content p{color:var(--text)}
+.entry.sys{grid-template-columns:54px minmax(0,1fr);padding-bottom:18px}
+.entry.sys .content{color:var(--faint);font-size:11.5px;display:flex;align-items:center;gap:10px}
+.entry.sys .content::after{content:"";flex:1;height:1px;background:var(--line-soft)}
+.log .entry:last-child{padding-bottom:8px}
+.stream{display:inline-block;width:6px;height:13px;background:var(--accent);vertical-align:-2px;
+        margin-left:2px;animation:caret 1s steps(1) infinite}
+@keyframes caret{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+/* tool row */
+details.tool{border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow:hidden}
+details.tool summary{list-style:none;cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;
+                     gap:5px 9px;min-height:34px;padding:7px 10px;font-size:12px;user-select:none}
+details.tool summary::-webkit-details-marker{display:none}
+details.tool summary:hover{background:var(--panel-2)}
+details.tool .toolname{font:600 12px var(--mono);color:var(--text);letter-spacing:-.01em}
+details.tool .sum{order:10;flex-basis:100%;margin-left:15px;color:var(--faint);font:10.5px var(--mono);
+                  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+details.tool .tmeta{margin-left:auto;color:var(--faint);font:10px var(--mono);white-space:nowrap}
+details.tool .chev{color:var(--faint);font:12px var(--mono);transition:transform .15s}
+details.tool[open] .chev{transform:rotate(90deg)}
+.toolbody{padding:0 10px 10px;border-top:1px solid var(--line-soft)}
+.toolbody pre{margin:8px 0 0;padding:10px 12px;background:var(--bg-2);border-radius:4px;
+              font:11.5px/1.6 var(--mono);color:var(--text-2);white-space:pre-wrap;overflow:auto;max-height:220px}
+.toolbody .effects{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+
+.btn{height:30px;padding:0 11px;border-radius:5px;border:1px solid var(--line);background:var(--panel);
+     color:var(--text-2);font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--muted);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn kbd{font:10px var(--mono);opacity:.75}
+
+/* approval bar：审批不藏在滚动里 */
+.gatebar{max-width:720px;margin:0 auto 8px;border:1px solid var(--accent-2);border-radius:6px;
+         background:var(--panel);overflow:hidden;display:flex;align-items:stretch;
+         box-shadow:0 0 0 1px var(--accent-soft)}
+.gatebar .lead{flex:1;min-width:0;padding:8px 12px;display:flex;flex-direction:column;gap:3px}
+.gatebar .lead .kicker{color:var(--warn);text-transform:none;letter-spacing:.06em;font-size:10px}
+.gatebar .lead .cmd{font:11px var(--mono);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gatebar .acts{display:flex;align-items:center;gap:6px;padding:8px;border-left:1px solid var(--line-soft)}
+.gatebar .acts .btn{height:28px;font-size:11.5px}
+
+/* composer */
+.composer-wrap{border-top:1px solid var(--line);background:var(--bg);padding:12px 30px 14px;flex:none}
+.composer{max-width:720px;margin:0 auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);
+          display:flex;align-items:flex-end;gap:10px;padding:8px 8px 8px 12px;transition:border-color .15s}
+.composer:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.composer textarea{flex:1;border:0;outline:none;resize:none;background:transparent;color:var(--text);
+                   font:13.5px/1.6 var(--sans);min-height:22px;max-height:140px;padding:4px 0}
+.composer textarea::placeholder{color:var(--faint)}
+.composer .send{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:5px;
+                background:var(--accent);color:var(--accent-ink);cursor:pointer}
+.composer .send svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.chint{max-width:720px;margin:7px auto 0;display:flex;gap:12px;color:var(--faint);font:10px var(--mono)}
+.chint b{color:var(--muted);font-weight:500}
+
+/* ── inspector / current step ──────────────────────────────── */
+.inspector{grid-column:4;grid-row:2;background:var(--bg-2);border-left:1px solid var(--line);
+           display:flex;flex-direction:column;min-height:0}
+.insp-head{padding:14px 16px 10px;display:flex;align-items:flex-start;gap:10px}
+.insp-head .stepno{font:500 26px/1 var(--mono);letter-spacing:-.06em;color:var(--text)}
+.insp-head .lbl{padding-top:3px}
+.insp-head .lbl .kicker{color:var(--faint)}
+.insp-head .lbl .st{margin-top:3px;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted)}
+.insp-head .st b{color:var(--warn);font-weight:500}
+.insp-body{flex:1;overflow:auto;padding:0 16px 14px;min-height:0}
+.insp-body .hr{height:1px;background:var(--line);margin:13px 0}
+.blk .blk-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.blk .blk-head .v{margin-left:auto;color:var(--faint);font:10px var(--mono)}
+.segbar{display:flex;height:8px;border-radius:3px;overflow:hidden;background:var(--line);gap:1px}
+.segbar i{display:block;height:100%}
+.segbar i:nth-child(1){background:var(--accent);width:30%}
+.segbar i:nth-child(2){background:var(--accent-2);width:5%;opacity:.75}
+.segbar i:nth-child(3){background:var(--s-amber-600);width:15%;opacity:.55}
+.segbar i:nth-child(4){background:var(--s-ink-500);width:45%}
+.segbar i:nth-child(5){background:var(--s-ink-600);width:5%}
+.secrow{display:grid;grid-template-columns:8px 1fr 54px 46px;gap:7px;align-items:center;padding:4px 0;
+        font-size:11.5px;color:var(--muted)}
+.secrow .sw{width:6px;height:6px;border-radius:1px;background:var(--line)}
+.secrow .sw.a{background:var(--accent)} .secrow .sw.b{background:var(--accent-2)}
+.secrow .sw.c{background:var(--s-amber-600)} .secrow .sw.d{background:var(--s-ink-500)}
+.secrow .id{font:11px var(--mono);color:var(--text-2);overflow:hidden;text-overflow:ellipsis}
+.secrow .own{font:10px var(--mono);color:var(--faint);text-align:right;overflow:hidden;text-overflow:ellipsis}
+.secrow .tk{font:10.5px var(--mono);color:var(--muted);text-align:right}
+.dec{position:relative;padding-left:14px;margin-left:2px;padding-bottom:9px}
+.dec::before{content:"";position:absolute;left:0;top:5px;bottom:-4px;width:1px;background:var(--line)}
+.dec:last-child::before{display:none}
+.dec .dd{position:absolute;left:-2px;top:4px;width:5px;height:5px;border-radius:50%;background:var(--line);border:1px solid var(--bg-2)}
+.dec.allow .dd{background:var(--ok)} .dec.ask .dd{background:var(--warn)} .dec.deny .dd{background:var(--bad)}
+.dec .r1{display:flex;align-items:center;gap:6px;font-size:11.5px}
+.dec .r1 .t{font:500 11.5px var(--mono);color:var(--text)}
+.dec .r2{margin-top:2px;color:var(--faint);font-size:10.5px;line-height:1.5}
+.budget .brow{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted);padding:2px 0}
+.budget .brow b{font:500 10.5px var(--mono);color:var(--text-2)}
+.budget .bline{display:flex;align-items:center;gap:8px;margin:3px 0 6px}
+.budget .bline .bar{flex:1;height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+.budget .bline .bar i{display:block;height:100%;background:var(--accent)}
+.budget .bline .pct{width:30px;text-align:right;font:9.5px var(--mono);color:var(--faint)}
+.queue{border:1px solid var(--line);border-radius:5px;background:var(--panel);padding:9px 10px}
+.queue .qt{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-2)}
+.queue .qs{margin-top:4px;color:var(--faint);font-size:10.5px}
+.insp-foot{padding:9px 16px;border-top:1px solid var(--line);color:var(--faint);font:9.5px/1.5 var(--mono);
+           display:flex;align-items:center;gap:8px}
+
+/* ── status bar ────────────────────────────────────────────── */
+.status{grid-column:1/5;grid-row:3;display:flex;align-items:center;gap:14px;padding:0 12px;
+        background:var(--bg-2);border-top:1px solid var(--line);color:var(--faint);font:10.5px/1 var(--mono)}
+.status .p{display:inline-flex;align-items:center;gap:5px}
+.status b{color:var(--muted);font-weight:500}
+.status .pill{background:var(--accent);color:var(--accent-ink);border-radius:3px;padding:2px 6px;font-weight:600}
+.status .sp{flex:1}
+
+/* ── empty / preflight ─────────────────────────────────────── */
+.view{display:none}
+html[data-view="empty"] .view-empty,
+html[data-view="lab"] .view-lab,
+html[data-view="approval"] .view-chat,
+html[data-view="running"] .view-chat{display:block}
+html[data-view="lab"] .side-chat{display:none}
+html[data-view="lab"] .side-lab{display:block}
+html[data-view="lab"] .composer-wrap{display:none}
+.side-lab{display:none}
+.wrap-empty{max-width:980px;margin:7vh auto 0;padding:0 30px}
+.preflight-grid{display:grid;grid-template-columns:minmax(0,1fr) 292px;gap:48px;align-items:start}
+.preflight{position:relative;padding-top:8px}
+.preflight::before{content:"";position:absolute;inset:-40px -60px 0 -60px;z-index:-1;
+  background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px;
+  opacity:.5;mask-image:radial-gradient(circle at 30% 20%,#000,transparent 68%)}
+.pre-flag{display:flex;align-items:center;gap:10px}
+.uu{width:26px;height:23px;flex:none;margin-left:1px}
+.uu .ub{fill:var(--accent);opacity:.92}
+.uu .ue{fill:var(--bg)}
+.uu .uidle{transform-box:fill-box;transform-origin:center;animation:blink 4s steps(1) infinite}
+@keyframes blink{0%,92%{transform:scaleY(1)}94%,96%{transform:scaleY(.12)}98%,100%{transform:scaleY(1)}}
+.pre-flag .line{width:42px;height:1px;background:var(--accent)}
+.preflight h1{margin:18px 0 12px;font-size:30px;line-height:1.35;letter-spacing:-.03em;font-weight:600}
+.preflight h1 em{font-style:normal;color:var(--accent)}
+.preflight .lede{margin:0;color:var(--muted);font-size:13.5px;line-height:1.8;max-width:560px}
+.intents{margin-top:30px;display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.intent{display:grid;grid-template-columns:34px 92px 1fr 24px;gap:12px;align-items:center;
+        padding:13px 2px;border-bottom:1px solid var(--line);cursor:pointer;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left}
+.intent:hover{background:var(--panel)}
+.intent .no{font:10px var(--mono);color:var(--faint)}
+.intent .k{font-size:12.5px;color:var(--text);font-weight:500}
+.intent .d{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.intent .arw{color:var(--faint);font:14px var(--mono);text-align:right}
+.intent:hover .arw{color:var(--accent)}
+.prefoot{margin-top:18px;color:var(--faint);font:10.5px var(--mono);display:flex;gap:14px;flex-wrap:wrap}
+.prep{border-left:1px solid var(--line);padding:4px 0 0 24px;min-height:320px}
+.prep .pr{display:flex;justify-content:space-between;gap:10px;padding:5px 0;font-size:11.5px;color:var(--muted)}
+.prep .pr b{font:500 10.5px var(--mono);color:var(--text-2)}
+.prep .psec{margin:18px 0 6px;display:flex;align-items:center;gap:8px}
+.prep .psec .line{flex:1;height:1px;background:var(--line-soft)}
+.recent{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:11.5px;color:var(--muted);cursor:pointer}
+.recent:hover{color:var(--text)}
+.recent time{font:9.5px var(--mono);color:var(--faint);width:34px}
+.recent .n{margin-left:auto;font:9.5px var(--mono);color:var(--faint)}
+.prep-foot{margin-top:18px;padding-top:10px;border-top:1px solid var(--line-soft);
+           color:var(--faint);font:9.5px/1.7 var(--mono)}
+@media (max-width:1100px){.preflight-grid{grid-template-columns:1fr}.prep{border-left:0;border-top:1px solid var(--line);padding:18px 0 0;min-height:0}}
+
+/* lab */
+.wrap-lab{max-width:780px;margin:0 auto;padding:28px 30px 40px}
+.doc-head{display:flex;align-items:flex-start;gap:14px;border-bottom:1px solid var(--line);padding-bottom:18px}
+.doc-head h1{margin:4px 0 6px;font-size:22px;line-height:1.35;letter-spacing:-.02em}
+.doc-head .sub{color:var(--muted);font-size:12px}
+.doc-head .badge{margin-left:auto}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:4px;
+       background:var(--ok-soft);color:var(--ok);font:500 10.5px var(--mono)}
+.doc-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px}
+.card{border:1px solid var(--line);border-radius:6px;background:var(--panel);padding:14px}
+.card .ch{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.card .ch .v{margin-left:auto;color:var(--faint);font:9.5px var(--mono)}
+.metric{display:flex;align-items:baseline;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--line-soft)}
+.metric:last-child{border-bottom:0}
+.metric .n{color:var(--muted);font-size:12px}
+.metric .v{font:600 16px var(--mono);color:var(--text)}
+.metric .v small{font:10px var(--mono);color:var(--faint);margin-left:4px}
+table.t{width:100%;border-collapse:collapse;font-size:11px}
+table.t th{text-align:left;color:var(--faint);font:500 9.5px var(--mono);letter-spacing:.08em;
+           text-transform:uppercase;padding:0 0 6px;border-bottom:1px solid var(--line)}
+table.t td{padding:6px 0;border-bottom:1px solid var(--line-soft);font:10.5px var(--mono);color:var(--muted)}
+table.t td:first-child{color:var(--text-2)}
+table.t td.r{text-align:right}
+.check{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;color:var(--muted)}
+.check .ck{width:14px;height:14px;border-radius:50%;display:grid;place-items:center;background:var(--ok-soft);color:var(--ok);font:9px var(--mono)}
+.claim{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:11.5px;color:var(--muted);border-bottom:1px dashed var(--line-soft)}
+.claim b{font-family:var(--mono);color:var(--text);font-weight:500}
+.code{margin-top:12px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--line);
+      border-radius:4px;font:10.5px/1.7 var(--mono);color:var(--muted);white-space:pre-wrap}
+.code b{color:var(--accent);font-weight:500}
+
+/* demo switcher (prototype-only) */
+.demo{position:fixed;right:14px;bottom:38px;z-index:20;display:flex;align-items:center;gap:4px;
+      padding:4px;background:var(--panel);border:1px solid var(--line);border-radius:7px;box-shadow:var(--shadow)}
+.demo[hidden]{display:none !important}
+.demo .lbl{padding:0 6px;color:var(--faint);font:9px var(--mono);letter-spacing:.1em}
+.demo button{height:22px;padding:0 7px;border:0;border-radius:4px;background:transparent;color:var(--faint);
+             font:10px var(--mono);cursor:pointer}
+.demo button.on{background:var(--accent-soft);color:var(--accent)}
+
+/* 空状态 / 实验室不需要「当前步」右栏：让主区真正占满 */
+html[data-view="empty"] .app,
+html[data-view="lab"] .app{grid-template-columns:64px 272px minmax(0,1fr) 0}
+html[data-view="empty"] .inspector,
+html[data-view="lab"] .inspector{display:none}
+html[data-view="empty"] .gatebar{display:none}
+html[data-view="empty"] .topbar,
+html[data-view="lab"] .topbar{grid-column:2/4}
+html[data-view="empty"] .status,
+html[data-view="lab"] .status{grid-column:1/4}
+
+@media (max-width:1300px){
+  .app{grid-template-columns:60px 244px minmax(0,1fr)}
+  .inspector{display:none}
+  .topbar{grid-column:2/4}
+  .status{grid-column:1/4}
+}
+@media (max-width:900px){
+  .app{grid-template-columns:54px minmax(0,1fr)}
+  .sidebar{display:none}
+  .topbar{grid-column:2/3}
+  .status{grid-column:1/3}
+  .cmdbtn{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── activity rail ─────────────────────────────────────── -->
+  <nav class="rail" aria-label="主导航">
+    <a class="brand" href="#" title="U:I">U:I</a>
+    <button class="rbtn on" title="对话 · Ctrl+1" aria-label="对话">
+      <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    </button>
+    <button class="rbtn" title="工作区 · Ctrl+2" aria-label="工作区">
+      <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    </button>
+    <button class="rbtn" title="能力 · Ctrl+3" aria-label="能力">
+      <svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg>
+    </button>
+    <button class="rbtn" title="自动化 · Ctrl+4" aria-label="自动化">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8l6 4-6 4z"/></svg>
+    </button>
+    <button class="rbtn" title="实验室 · Ctrl+5" aria-label="实验室">
+      <svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v5L5 19a1.5 1.5 0 0 0 1.4 2h11.2A1.5 1.5 0 0 0 19 19l-5-11V3"/></svg>
+    </button>
+    <div class="grow"></div>
+    <button class="rbtn" id="theme" title="切换明暗" aria-label="切换明暗">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+    </button>
+  </nav>
+
+  <!-- ── top bar ───────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="title">
+      <span class="dot ok"></span>
+      <h1 class="view-chat">greet 空名字修复</h1>
+      <h1 class="view-empty">新会话</h1>
+      <h1 class="view-lab">lr-s2 · Learning rate sweep</h1>
+      <span class="path view-chat"><b>demo</b> / .ui / journal.jsonl</span>
+      <span class="path view-empty"><b>demo</b> / 新会话</span>
+      <span class="path view-lab"><b>bundles</b> / lr-s2 / report.md</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="cmdbtn">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <span>命令、会话、文件</span><kbd>Ctrl K</kbd>
+    </button>
+    <span class="stat"><span class="dot"></span><b id="topModel">deepseek-chat</b></span>
+    <div class="mode" role="group" aria-label="模式">
+      <button>quiet</button><button class="on">standard</button><button>strict</button>
+    </div>
+    <div class="labonly">
+      <button class="btn">校验</button>
+      <button class="btn primary">导出</button>
+    </div>
+    <button class="iconbtn" title="导出快照" aria-label="导出快照">
+      <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>
+    </button>
+  </header>
+
+  <!-- ── sidebar ───────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="sess-title"><span class="dot ok" id="sessDot"></span><span id="sessName">greet 空名字修复</span></div>
+      <div class="sess-meta" id="sessMeta">3 轮 · 1,719 tok · 12s</div>
+    </div>
+    <div class="side-scroll side">
+      <div class="side-chat">
+        <div class="sec"><span class="kicker">会话</span><span class="line"></span></div>
+        <div class="sess on"><span class="r"></span><span class="name">greet 空名字修复</span><span class="n">3</span></div>
+        <div class="sess"><span class="r"></span><span class="name">run 一次基准</span><span class="n">8</span></div>
+        <div class="sess"><span class="r"></span><span class="name">读一下仓库结构</span><span class="n">2</span></div>
+        <div class="sess"><span class="r"></span><span class="name">实验包 lr-s2</span><span class="n">1</span></div>
+        <div class="newline"><span>＋</span>新建会话</div>
+
+        <div class="sec"><span class="kicker">上下文</span><span class="line"></span></div>
+        <div class="kv"><span>历史</span><b id="sideHist">12 条</b></div>
+        <div class="kv"><span>折叠阈值</span><b>12k</b></div>
+        <div class="kv"><span>技能</span><b>2</b></div>
+
+        <div class="sec"><span class="kicker">操作</span><span class="line"></span></div>
+        <div class="actlist">
+          <div class="actrow">导出对话快照<span class="meta">↗</span></div>
+          <div class="actrow">停止当前轮次<span class="meta">Esc</span></div>
+          <div class="actrow">显示 UU<span class="meta">开</span></div>
+          <div class="actrow">查看 journal<span class="meta">↗</span></div>
+        </div>
+      </div>
+
+      <div class="side-lab">
+        <div class="sec"><span class="kicker">实验包</span><span class="line"></span></div>
+        <div class="sess"><span class="r" style="background:var(--ok)"></span><span class="name">lr-s3</span><span class="n">1 产物</span></div>
+        <div class="sess on"><span class="r" style="background:var(--ok)"></span><span class="name">lr-s2</span><span class="n">1 产物</span></div>
+        <div class="sess"><span class="r" style="background:var(--bad)"></span><span class="name">lr-s1</span><span class="n">0 产物</span></div>
+        <div class="sec"><span class="kicker">操作</span><span class="line"></span></div>
+        <div class="actrow">跑一次基准<span class="meta">▶</span></div>
+        <div class="actrow">重新扫描<span class="meta">↻</span></div>
+        <div class="sec"><span class="kicker">对照</span><span class="line"></span></div>
+        <div class="kv"><span>数据版本</span><b class="dim">1 致</b></div>
+        <div class="kv"><span>指标</span><b class="dim">3 seed</b></div>
+      </div>
+    </div>
+    <div class="side-foot">
+      <div><span class="ok">●</span> journal chain verified</div>
+      <div>6f2a…c91 · 42 events</div>
+    </div>
+  </aside>
+
+  <!-- ── main ──────────────────────────────────────────────── -->
+  <main class="main">
+    <div class="main-scroll">
+
+      <!-- chat / approval -->
+      <section class="view view-chat">
+        <div class="log">
+          <div class="entry sys">
+            <div class="meta"><time>14:32:06</time><span class="role">SYS</span></div>
+            <div class="content">会话开始 · standard · 预算 200k tok</div>
+          </div>
+
+          <article class="entry user">
+            <div class="meta"><time>14:32:08</time><span class="role you">YOU</span></div>
+            <div class="content"><p>让 greet 处理空名字：空字符串时不该拼出 "hi "。</p></div>
+          </article>
+
+          <article class="entry agent">
+            <div class="meta"><time>14:32:10</time><span class="role">AGENT</span></div>
+            <div class="content"><p>先读一下 greet.js 看现状，再决定改哪里。</p></div>
+          </article>
+
+          <article class="entry tool">
+            <div class="meta"><time>14:32:11</time><span class="role tool">TOOL</span></div>
+            <div class="content">
+              <details class="tool">
+                <summary>
+                  <span class="dot ok"></span>
+                  <span class="toolname">fs_read</span>
+                  <span class="chip effect">fs.read demo/greet.js</span>
+                  <span class="chip allow">allow</span>
+                  <span class="sum">→ 1  export function greet(name) {</span>
+                  <span class="tmeta">12 ms · 1.2 KB</span>
+                  <span class="chev">›</span>
+                </summary>
+                <div class="toolbody">
+                  <pre>1  export function greet(name) {
+2    return `hi ${name}`;
+3  }
+4
+5  console.log(greet("loom"));
+6  console.log(greet(""));</pre>
+                  <div class="effects"><span class="chip neutral">policy: fs.read **</span><span class="chip neutral">no write</span></div>
+                </div>
+              </details>
+            </div>
+          </article>
+
+          <article class="entry agent">
+            <div class="meta"><time>14:32:13</time><span class="role">AGENT</span></div>
+            <div class="content"><p>空字符串会拼出 <span class="mono">hi </span>，改成兜底。只动返回语句。</p></div>
+          </article>
+
+          <article class="entry tool">
+            <div class="meta"><time>14:32:14</time><span class="role tool">TOOL</span></div>
+            <div class="content">
+              <details class="tool">
+                <summary>
+                  <span class="dot ok"></span>
+                  <span class="toolname">fs_edit</span>
+                  <span class="chip effect">fs.write demo/greet.js</span>
+                  <span class="chip allow">allow</span>
+                  <span class="sum">→ 已编辑 demo/greet.js（1 处）</span>
+                  <span class="tmeta">9 ms · +12 −12</span>
+                  <span class="chev">›</span>
+                </summary>
+                <div class="toolbody">
+                  <pre>− return `hi ${name}`;
++ return `hi ${name || 'there'}`;</pre>
+                  <div class="effects"><span class="chip neutral">policy: fs.write demo/**</span><span class="chip neutral">atomic write</span></div>
+                </div>
+              </details>
+            </div>
+          </article>
+
+          <article class="entry agent">
+            <div class="meta"><time>14:32:16</time><span class="role">AGENT</span></div>
+            <div class="content"><p>改完了：空名字现在返回 <span class="mono">hi there</span>。要不要顺手跑一下测试？</p></div>
+          </article>
+
+          <article class="entry user">
+            <div class="meta"><time>14:32:18</time><span class="role you">YOU</span></div>
+            <div class="content"><p>跑吧。</p></div>
+          </article>
+
+          <article class="entry agent">
+            <div class="meta"><time>14:32:19</time><span class="role">AGENT</span></div>
+            <div class="content"><p>需要执行命令，先要你批准。</p></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- empty / preflight -->
+      <section class="view view-empty">
+        <div class="wrap-empty">
+          <div class="preflight-grid">
+            <div class="preflight">
+              <div class="pre-flag">
+                <span class="line"></span><span class="kicker">Pre-flight</span>
+                <svg class="uu" viewBox="0 0 40 36" aria-hidden="true">
+                  <rect class="ub" x="2" y="1" width="36" height="29" rx="10"/>
+                  <rect class="ub" x="10" y="30" width="7" height="4" rx="2"/>
+                  <rect class="ub" x="23" y="30" width="7" height="4" rx="2"/>
+                  <g class="uidle"><circle class="ue" cx="14" cy="15" r="2.6"/><circle class="ue" cx="25" cy="15" r="2.6"/></g>
+                </svg>
+              </div>
+              <h1>把一件事交给它，<br>然后<em>看清每一步</em>。</h1>
+              <p class="lede">模型只输出受约束的 JSON；工具调用先算效果、再过策略、再进日志。你可以在这里批准、拦截、回放，也可以把这一轮导出成可验证的实验包。</p>
+              <div class="intents">
+                <button class="intent"><span class="no">01</span><span class="k">办公</span><span class="d">把这份文档压成三页大纲，保留数字和结论</span><span class="arw">→</span></button>
+                <button class="intent"><span class="no">02</span><span class="k">代码</span><span class="d">先读仓库结构，再告诉我测试该怎么跑</span><span class="arw">→</span></button>
+                <button class="intent"><span class="no">03</span><span class="k">创作</span><span class="d">把这个想法展开成一个有画面感的故事</span><span class="arw">→</span></button>
+              </div>
+              <div class="prefoot">
+                <span>Ctrl K 命令面板</span><span>Ctrl 1–5 视图</span><span>Enter 发送 · Shift Enter 换行</span>
+              </div>
+            </div>
+            <aside class="prep">
+              <div class="pre-flag"><span class="kicker">Workspace</span><span class="line" style="flex:1;height:1px;background:var(--line-soft)"></span></div>
+              <div class="pr"><span>模型</span><b>deepseek-chat</b></div>
+              <div class="pr"><span>工作区</span><b>demo</b></div>
+              <div class="pr"><span>journal</span><b>42 · verified</b></div>
+              <div class="pr"><span>skills</span><b>2</b></div>
+              <div class="pr"><span>tools</span><b>13</b></div>
+              <div class="pr"><span>预算</span><b>200k tok</b></div>
+              <div class="psec"><span class="kicker">最近</span><span class="line"></span></div>
+              <div class="recent"><time>14:32</time><span>greet 空名字修复</span><span class="n">3</span></div>
+              <div class="recent"><time>13:08</time><span>run 一次基准</span><span class="n">8</span></div>
+              <div class="recent"><time>11:41</time><span>读一下仓库结构</span><span class="n">2</span></div>
+              <div class="psec"><span class="kicker">就绪</span><span class="line"></span></div>
+              <div class="check"><span class="ck">✓</span>工具调用会先经过策略</div>
+              <div class="check"><span class="ck">✓</span>日志链完整，可回放</div>
+              <div class="prep-foot"><span class="dot ok" style="display:inline-block;margin-right:6px"></span>chain ok · 6f2a…c91</div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- lab -->
+      <section class="view view-lab">
+        <div class="wrap-lab">
+          <div class="doc-head">
+            <div>
+              <div class="kicker">Experiment · lr-s2</div>
+              <h1>Learning rate sweep</h1>
+              <div class="sub">seed 2 · 3 epochs · data.csv · 2026-11-16 16:04</div>
+            </div>
+            <div class="badge"><span class="dot ok"></span>自洽</div>
+          </div>
+
+          <div class="doc-grid">
+            <div class="card">
+              <div class="ch"><span class="kicker">指标</span><span class="v">metrics.json</span></div>
+              <div class="metric"><span class="n">accuracy</span><span class="v">0.7200</span></div>
+              <div class="metric"><span class="n">loss</span><span class="v">0.3142</span></div>
+              <div class="metric"><span class="n">epochs</span><span class="v">3</span></div>
+              <div class="metric"><span class="n">lr</span><span class="v">0.030<small>fixed</small></span></div>
+            </div>
+            <div class="card">
+              <div class="ch"><span class="kicker">校验</span><span class="v">ui lab verify</span></div>
+              <div class="check"><span class="ck">✓</span>1 个产物哈希一致</div>
+              <div class="check"><span class="ck">✓</span>1 个输入仍一致</div>
+              <div class="check"><span class="ck">✓</span>结论 1/1 对得上</div>
+              <div class="check"><span class="ck">✓</span>journal 哈希链完整</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:18px">
+            <div class="ch"><span class="kicker">产物</span><span class="v">producedBy 来自日志，不是自述</span></div>
+            <table class="t">
+              <thead><tr><th>文件</th><th>sha256</th><th class="r">字节</th><th class="r">来源</th></tr></thead>
+              <tbody>
+                <tr><td>artifacts/metrics.json</td><td>d15a…6ad</td><td class="r">86</td><td class="r">seq 12 · fs_write</td></tr>
+                <tr><td>artifacts/model.txt</td><td>4b21…9c0</td><td class="r">1.2 KB</td><td class="r">seq 14 · fs_write</td></tr>
+              </tbody>
+            </table>
+            <div class="code"><b>$</b> ui lab verify bundles/lr-s2 --workspace ./exp
+产物 2 个校验通过 · 输入 1 个仍一致 · 结论 1/1 对得上 · 日志链 完整
+退出码 0</div>
+          </div>
+
+          <div class="doc-grid">
+            <div class="card">
+              <div class="ch"><span class="kicker">读过的输入</span><span class="v">血缘</span></div>
+              <table class="t">
+                <thead><tr><th>文件</th><th class="r">字节</th><th>sha256</th></tr></thead>
+                <tbody><tr><td>data.csv</td><td class="r">12</td><td>f102…9ff</td></tr></tbody>
+              </table>
+              <div class="claim"><b>accuracy = 0.72</b> 在 metrics.json 中找到对应值</div>
+              <div class="claim"><b>loss = 0.3142</b> 在 metrics.json 中找到对应值</div>
+            </div>
+            <div class="card">
+              <div class="ch"><span class="kicker">复现</span><span class="v">meta.json</span></div>
+              <div class="check"><span class="ck">✓</span>OS · kernel · 架构已记录</div>
+              <div class="check"><span class="ck">✓</span>python 3.11.9 · 8 cores</div>
+              <div class="check"><span class="ck">✓</span>命令：python train.py --lr 0.03 --seed 2</div>
+              <div class="code"><b>#</b> 在任何机器上复跑
+tar xzf lr-s2.tar.gz &amp;&amp; bash run.sh</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="composer-wrap">
+      <div class="gatebar" role="alert">
+        <div class="lead">
+          <span class="kicker">需要批准 · <span class="mono">shell</span> · <span class="chip ask">proc.exec</span></span>
+          <span class="cmd">cargo test --offline <span style="color:var(--faint)">· cwd demo · timeout 120s · 300s 后按拒绝处理</span></span>
+        </div>
+        <div class="acts">
+          <button class="btn primary">允许一次 <kbd>Y</kbd></button>
+          <button class="btn">总是允许 <kbd>A</kbd></button>
+          <button class="btn ghost">拒绝 <kbd>N</kbd></button>
+        </div>
+      </div>
+      <div class="composer">
+        <textarea rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="send" aria-label="发送">
+          <svg viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <div class="chint"><span><b>Enter</b> 发送</span><span><b>Shift Enter</b> 换行</span><span>所有工具调用先经过策略与审批</span></div>
+    </div>
+  </main>
+
+  <!-- ── inspector ─────────────────────────────────────────── -->
+  <aside class="inspector">
+    <div class="insp-head">
+      <div class="stepno" id="stepno">06</div>
+      <div class="lbl">
+        <div class="kicker">Current step</div>
+        <div class="st"><span class="dot warn live"></span><b id="stepstate">等待批准</b></div>
+      </div>
+    </div>
+    <div class="insp-body">
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Context</span><span class="v">1,719 tok · 6.8 KB</span></div>
+        <div class="segbar" aria-label="快照分段"><i></i><i></i><i></i><i></i><i></i></div>
+        <div style="margin-top:8px">
+          <div class="secrow"><span class="sw a"></span><span class="id">core</span><span class="own">kernel</span><span class="tk">520</span></div>
+          <div class="secrow"><span class="sw b"></span><span class="id">env</span><span class="own">kernel</span><span class="tk">96</span></div>
+          <div class="secrow"><span class="sw c"></span><span class="id">tools</span><span class="own">tools</span><span class="tk">246</span></div>
+          <div class="secrow"><span class="sw d"></span><span class="id">history</span><span class="own">session</span><span class="tk">782</span></div>
+          <div class="secrow"><span class="sw d"></span><span class="id">skills</span><span class="own">skill</span><span class="tk">75</span></div>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Decisions</span><span class="v">3</span></div>
+        <div class="dec allow"><span class="dd"></span><div class="r1"><span class="t">fs_read</span><span class="chip allow">allow</span></div><div class="r2">匹配规则 fs.read ** · 12 ms</div></div>
+        <div class="dec allow"><span class="dd"></span><div class="r1"><span class="t">fs_edit</span><span class="chip allow">allow</span></div><div class="r2">匹配规则 fs.write demo/** · 9 ms</div></div>
+        <div class="dec ask"><span class="dd"></span><div class="r1"><span class="t">shell</span><span class="chip ask">ask</span></div><div class="r2">proc.exec cargo test · 等待你选择</div></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk budget">
+        <div class="blk-head"><span class="kicker">Budget</span><span class="v">session</span></div>
+        <div class="brow"><span>tokens</span><b>1,719 / 200k</b></div>
+        <div class="bline"><div class="bar"><i style="width:1%"></i></div><span class="pct">0.9%</span></div>
+        <div class="brow"><span>tool calls</span><b>3 / 60</b></div>
+        <div class="bline"><div class="bar"><i style="width:5%"></i></div><span class="pct">5%</span></div>
+        <div class="brow"><span>wall</span><b>12s</b></div>
+        <div class="brow"><span>cost</span><b>$0.000</b></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Approval queue</span><span class="v">1</span></div>
+        <div class="queue">
+          <div class="qt"><span class="dot warn"></span>shell · proc.exec</div>
+          <div class="qs">cargo test --offline · 等待中</div>
+        </div>
+      </div>
+    </div>
+    <div class="insp-foot"><span class="dot ok"></span>chain ok · 42 events · w:main</div>
+  </aside>
+
+  <!-- ── status bar ────────────────────────────────────────── -->
+  <footer class="status">
+    <span class="pill" id="sbPill">standard</span>
+    <span class="p"><b id="sbModel">deepseek-chat</b></span>
+    <span class="p" id="sbWs">demo</span>
+    <span class="p" id="sbJournal"><span class="dot ok"></span>journal verified</span>
+    <span class="sp"></span>
+    <span class="p" id="sbTok">tok <b>1,719</b> / 200k</span>
+    <span class="p" id="sbCalls">calls <b>3</b> / 60</span>
+    <span class="p" id="sbCost">$<b>0.000</b></span>
+    <span class="p" id="sbTime">12s</span>
+  </footer>
+</div>
+
+<!-- prototype-only state switcher -->
+<div class="demo" aria-label="原型状态">
+  <span class="lbl">DEMO</span>
+  <button data-view="approval" class="on">审批</button>
+  <button data-view="empty">空状态</button>
+  <button data-view="lab">实验室</button>
+</div>
+
+<script>
+(function(){
+  const root = document.documentElement;
+  const params = new URLSearchParams(location.search);
+  const views = document.querySelectorAll('.demo [data-view]');
+
+  const copy = {
+    approval: {
+      no: '06', st: '等待批准', name: 'greet 空名字修复', meta: '3 轮 · 1,719 tok · 12s',
+      hist: '12 条',
+      pill: 'standard', model: 'deepseek-chat', ws: 'demo',
+      journal: '<span class="dot ok"></span>journal verified',
+      tok: 'tok <b>1,719</b> / 200k', calls: 'calls <b>3</b> / 60', cost: '$<b>0.000</b>', time: '12s',
+    },
+    empty: {
+      no: '00', st: '准备就绪', name: '新会话', meta: '还没有消息',
+      hist: '0 条',
+      pill: 'standard', model: 'deepseek-chat', ws: 'demo',
+      journal: '<span class="dot ok"></span>journal verified',
+      tok: 'tok <b>0</b> / 200k', calls: 'calls <b>0</b> / 60', cost: '$<b>0.000</b>', time: '0s',
+    },
+    lab: {
+      no: '—', st: '校验通过', name: 'lr-s2 · sweep', meta: '1 产物 · 自洽 · 3 seed',
+      hist: '—',
+      pill: 'lab', model: 'python 3.11', ws: 'lr-s2',
+      journal: '<span class="dot ok"></span>bundle verified',
+      tok: 'artifacts <b>2</b>', calls: 'claims <b>2/2</b>', cost: 'exit <b>0</b>', time: '16:04',
+    },
+  };
+
+  function applyView(view){
+    root.dataset.view = view;
+    const c = copy[view] || copy.approval;
+    document.getElementById('stepno').textContent = c.no;
+    document.getElementById('stepstate').textContent = c.st;
+    document.getElementById('sessName').textContent = c.name;
+    document.getElementById('sessMeta').textContent = c.meta;
+    document.getElementById('sessDot').className = 'dot' + (view === 'empty' ? '' : ' ok');
+    document.querySelectorAll('.side-chat .sess').forEach((el, i) => {
+      el.classList.toggle('on', view !== 'empty' && i === 0);
+    });
+    document.getElementById('sideHist').textContent = c.hist;
+    document.getElementById('sbPill').textContent = c.pill;
+    document.getElementById('sbModel').textContent = c.model;
+    document.getElementById('topModel').textContent = c.model;
+    document.getElementById('sbWs').textContent = c.ws;
+    document.getElementById('sbJournal').innerHTML = c.journal;
+    document.getElementById('sbTok').innerHTML = c.tok;
+    document.getElementById('sbCalls').innerHTML = c.calls;
+    document.getElementById('sbCost').innerHTML = c.cost;
+    document.getElementById('sbTime').textContent = c.time;
+    views.forEach(b => b.classList.toggle('on', b.dataset.view === view));
+  }
+
+  views.forEach(b => b.addEventListener('click', () => applyView(b.dataset.view)));
+  document.getElementById('theme').addEventListener('click', () => {
+    root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  });
+
+  // 原型参数：?view=lab&theme=light&clean=1&scroll=bottom
+  if (params.get('view')) applyView(params.get('view'));
+  else applyView(root.dataset.view || 'approval');
+  if (params.get('theme')) root.dataset.theme = params.get('theme');
+  if (params.get('clean') === '1') document.querySelector('.demo').hidden = true;
+  if (params.get('scroll') === 'bottom') {
+    requestAnimationFrame(() => {
+      const s = document.querySelector('.main-scroll');
+      s.scrollTop = s.scrollHeight;
+    });
+  }
+
+  const ta = document.querySelector('.composer textarea');
+  ta.addEventListener('input', () => {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
+  });
+})();
+</script>
+</body>
+</html>

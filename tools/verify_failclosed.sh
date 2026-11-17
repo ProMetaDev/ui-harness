@@ -62,6 +62,27 @@ else
 fi
 
 echo
+echo "== 场景 4：文件大小上限（模拟写满，EFBIG）=="
+WS3=/tmp/ui-verify-failclosed3
+rm -rf "$WS3"; mkdir -p "$WS3"
+cp "$WS/sc.json" "$WS3/sc.json"
+# ulimit -f 只对当前 shell 及其子进程生效，所以放进子 shell；必须忽略 SIGXFSZ，
+# 否则进程会被信号杀掉（看不到错误信息）。
+out=$( ( trap '' XFSZ; ulimit -f 1; "$UI_BIN" run --task t --mock "$WS3/sc.json" --workspace "$WS3" --yes 2>&1 ) )
+code=$?
+if [ -f "$WS3/must-not-exist.txt" ]; then
+  report "工具是否被执行" "FAIL（执行了）"; fail=$((fail+1))
+else
+  report "工具是否被执行" "PASS（没有执行）"
+fi
+if [ "$code" -ne 0 ]; then report "退出码" "PASS（$code）"; else report "退出码" "FAIL（0）"; fail=$((fail+1)); fi
+if printf '%s' "$out" | grep -q '日志'; then
+  report "错误是否说清是日志问题" "PASS"
+else
+  report "错误是否说清是日志问题" "FAIL：$out"; fail=$((fail+1))
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "PASS 日志不可写时 fail closed（3 个场景）"
   exit 0

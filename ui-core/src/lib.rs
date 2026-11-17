@@ -30,6 +30,7 @@ pub mod sandbox;
 pub mod sha256;
 pub mod skill;
 pub mod time;
+pub mod stream_verify;
 pub mod tools;
 pub mod winsandbox;
 pub mod workflow;

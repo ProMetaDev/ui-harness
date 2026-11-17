@@ -56,7 +56,7 @@ fn journal_ctx(e: std::io::Error, path: &std::path::Path, what: &str) -> std::io
     std::io::Error::new(
         e.kind(),
         format!(
-            "{}（{}）：{}。日志是执行记录，写不进去就不该继续执行——             请检查磁盘空间与文件权限后重试。",
+            "{}（{}）：{}。日志是执行记录，写不进去就不该继续执行；请检查磁盘空间与文件权限后重试。",
             what,
             path.display(),
             e

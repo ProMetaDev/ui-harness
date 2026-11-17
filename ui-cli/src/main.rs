@@ -24,7 +24,8 @@ use ui_core::policy::{Decision, Effect, Policy};
 use ui_core::prompt::{inspect_environment, Message, Snapshot};
 use ui_core::tools::{registry, ToolResult};
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// Windows 控制台默认是 GBK，直接输出 UTF-8 会变成乱码（实机看到「UI 宸插惎鍔?」）。
@@ -2244,9 +2245,13 @@ fn cmd_resume(args: &Args) -> Result<i32, String> {
 fn cmd_verify(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
-    let (events, corrupt) = Journal::read(&jp).map_err(|e| e.to_string())?;
 
-    match &corrupt {
+    // 流式校验：内存 O(1)，不随日志大小增长。
+    // 之前走 `Journal::read`（把每条事件都变成 Json 留在内存里），
+    // 实测 7 万条要 80 MB —— 审计大日志时会先被自己撑死。
+    let r = ui_core::stream_verify::verify_stream(&jp).map_err(|e| e.to_string())?;
+
+    match &r.corrupt {
         Some(c) if !c.torn => {
             println!("FAIL  日志损坏 seq={:?}: {}", c.seq, c.reason);
             println!("      文件 {}", jp.display());
@@ -2256,31 +2261,18 @@ fn cmd_verify(args: &Args) -> Result<i32, String> {
         None => println!("ok    哈希链完整"),
     }
 
-    let inc = analyze_incomplete(&events);
     println!("日志  {}", jp.display());
-    println!("事件  {}", events.len());
-    if let (Some(first), Some(last)) = (events.first(), events.last()) {
-        println!(
-            "序号  {}..{}",
-            first.u64_at("seq").unwrap_or(0),
-            last.u64_at("seq").unwrap_or(0)
-        );
+    println!("事件  {}", r.events);
+    if r.events > 0 {
+        println!("序号  {}..{}", r.first_seq, r.last_seq);
     }
-    let turns = events
-        .iter()
-        .filter(|e| e.str_at("kind") == Some("turn/start"))
-        .count();
-    let calls = events
-        .iter()
-        .filter(|e| e.str_at("kind") == Some("tool/start"))
-        .count();
-    println!("轮次 {}  工具调用 {}", turns, calls);
+    println!("轮次 {}  工具调用 {}", r.turns, r.tool_starts);
     println!(
         "未完成 turn={} tools={}",
-        inc.open_turn.is_some(),
-        inc.open_tools.len()
+        r.open_turn.is_some(),
+        r.open_tools.len()
     );
-    if !inc.open_tools.is_empty() {
+    if !r.open_tools.is_empty() {
         println!("提示  有未完成副作用，跑 `ui resume` 对账");
     }
     Ok(0)
@@ -3390,29 +3382,79 @@ const VIEWER: &str = include_str!("../assets/viewer.html");
 fn cmd_replay(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
-    let events = Journal::load(&jp).map_err(|e| e.to_string())?;
+
+    // 流式回放：逐行解析、用完就丢。
+    // 之前 `Journal::load` 会把 7 万条事件（80 MB）全留在内存里，
+    // 而回放本质上是"读一行、打一行"。
+    let count = count_lines(&jp)?;
+
     if args.flag("json") {
-        for e in &events {
-            println!("{}", e.to_compact());
-        }
-        return Ok(0);
-    }
-    println!("{} 条事件 · {}", events.len(), jp.display());
-    let mut prev_snapshot: Option<Snapshot> = None;
-    for e in &events {
-        let row = render::event_row(e);
-        if !row.trim().is_empty() {
-            println!("{}", row);
-        }
-        if e.str_at("kind") == Some("prompt/snapshot") {
-            for line in render::section_rows(e) {
+        // --json 直接吐原始行，不解析——最快，也保证和磁盘上完全一致
+        let file = File::open(&jp).map_err(|e| format!("{}: {}", jp.display(), e))?;
+        let mut reader = BufReader::new(file);
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let n = reader.read_line(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            let line = buf.trim_end();
+            if !line.is_empty() {
                 println!("{}", line);
             }
         }
-        let _ = &prev_snapshot;
-        let _ = &mut prev_snapshot;
+        return Ok(0);
+    }
+
+    println!("{} 条事件 · {}", count, jp.display());
+    let file = File::open(&jp).map_err(|e| format!("{}: {}", jp.display(), e))?;
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let line = buf.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let event = match json::parse(line) {
+            Ok(v) => v,
+            Err(_) => continue, // 半条记录：verify 会明确指出，这里跳过
+        };
+        let row = render::event_row(&event);
+        if !row.trim().is_empty() {
+            println!("{}", row);
+        }
+        if event.str_at("kind") == Some("prompt/snapshot") {
+            for line in render::section_rows(&event) {
+                println!("{}", line);
+            }
+        }
     }
     Ok(0)
+}
+
+/// 数行数（不解析内容），用于回放前的那句"N 条事件"。
+fn count_lines(path: &std::path::Path) -> Result<usize, String> {
+    let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut reader = BufReader::new(file);
+    let mut n = 0usize;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let got = reader.read_until(b'\n', &mut buf).map_err(|e| e.to_string())?;
+        if got == 0 {
+            break;
+        }
+        if buf.iter().any(|b| !b.is_ascii_whitespace()) {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 fn cmd_policy(args: &Args) -> Result<i32, String> {
