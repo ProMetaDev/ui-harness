@@ -194,4 +194,23 @@ mod tests {
         }
         assert_eq!(h.finish(), digest(&data));
     }
+
+    #[test]
+    #[ignore]
+    fn throughput_probe() {
+        // 手动跑：cargo test --release -p ui-core --lib throughput_probe -- --ignored --nocapture
+        let data = vec![7u8; 64 * 1024 * 1024];
+        let t0 = std::time::Instant::now();
+        let mut h = Sha256::new();
+        for chunk in data.chunks(64 * 1024) {
+            h.update(chunk);
+        }
+        let _ = h.finish();
+        let secs = t0.elapsed().as_secs_f64();
+        println!(
+            "sha256: 64 MiB in {:.3}s = {:.0} MiB/s",
+            secs,
+            64.0 / secs
+        );
+    }
 }

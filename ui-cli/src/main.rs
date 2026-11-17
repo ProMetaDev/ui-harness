@@ -2998,13 +2998,13 @@ fn copy_and_hash(from: &Path, to: &Path) -> std::io::Result<(u64, Option<String>
     // 不管走哪条路，哈希都必须把内容读一遍，所以这里只省了"写"。
     #[cfg(not(windows))]
     if size >= 1024 * 1024 && reflink(from, to).is_ok() {
-        let hash = hash_file(from);
+        let hash = ui_core::isolate::hash_file(from);
         return Ok((size, hash));
     }
 
     let mut src = std::fs::File::open(from)?;
     let mut dst = std::fs::File::create(to)?;
-    let mut hasher = ui_core::sha256::Sha256::new();
+    let mut hasher = ui_core::fasthash::Xxh64::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = 0u64;
     loop {
@@ -3017,8 +3017,7 @@ fn copy_and_hash(from: &Path, to: &Path) -> std::io::Result<(u64, Option<String>
         total += n as u64;
     }
     dst.flush()?;
-    let digest = hasher.finish();
-    Ok((total, Some(ui_core::sha256::hex(&digest))))
+    Ok((total, Some(format!("xxh:{:016x}", hasher.finish()))))
 }
 
 /// 写时复制（Linux FICLONE）。不支持的文件系统会返回错误，调用方退回普通复制。
@@ -3083,7 +3082,9 @@ fn copy_tree(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // 一次读取：写副本 + 算哈希（manifest 用它检测回写时的漂移）
+            // 一次读取：写副本 + 算哈希（manifest 用它检测回写时的漂移）。
+            // 这里用 xxHash64 而不是 SHA-256：它只需要回答"改没改"，
+            // 实测 SHA-256 359 MiB/s，是隔离复制的第二个大头（第一个是复制本身）。
             let (n, hash) = copy_and_hash(&from, &to)?;
             bytes += n;
             files += 1;
@@ -3095,44 +3096,10 @@ fn copy_tree(
     Ok((files, bytes))
 }
 
-fn collect_changed(base: &Path, root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if ISOLATE_SKIP.contains(&name.as_str()) {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            collect_changed(base, root, &path, out);
-            continue;
-        }
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let original = base.join(&rel);
-        let meta = entry.metadata().ok();
-        let too_big = meta.map(|m| m.len() > MAX_COMPARE_BYTES).unwrap_or(false);
-        let same = if too_big {
-            true // 大文件不逐字节比，按未改动处理
-        } else {
-            match (std::fs::read(&path), std::fs::read(&original)) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => false,
-            }
-        };
-        if !same {
-            out.push(rel.to_string_lossy().to_string());
-        }
-    }
-}
-
-fn changed_files(base: &Path, workdir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_changed(base, workdir, workdir, &mut out);
-    out.sort();
-    out
+/// 找出副本里被改动过的文件（逻辑在 `ui_core::isolate`，那里有单元测试）。
+fn changed_files(_base: &Path, workdir: &Path) -> Vec<String> {
+    let manifest = read_manifest(workdir);
+    ui_core::isolate::changed_files(workdir, &manifest)
 }
 
 /// 并行子代理：默认各跑一个进程 + 独立日志；`--isolate` 时再各给一份工作区副本。
@@ -3398,7 +3365,11 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
 
         // 闸二：父工作区里这个文件在子代理启动后被改过 / 删掉 / 新建过 → 漂移
         let expected = read_manifest(&sources[0].1).get(rel).cloned();
-        let current = hash_file(&ws.join(rel));
+        // manifest 里新格式是 `xxh:<hex>`；旧格式（纯 64 位 hex）是 SHA-256
+        let current = match expected.as_deref() {
+            Some(e) if e.starts_with("xxh:") => ui_core::isolate::hash_file(&ws.join(rel)),
+            _ => hash_file(&ws.join(rel)),
+        };
         let drifted = match (&expected, &current) {
             (Some(e), Some(c)) => e != c,
             (Some(_), None) => true,

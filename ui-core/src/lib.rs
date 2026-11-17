@@ -17,6 +17,8 @@ pub mod agent;
 pub mod budget;
 pub mod cancel;
 pub mod compact;
+pub mod fasthash;
+pub mod isolate;
 pub mod json;
 pub mod journal;
 pub mod mcp;
