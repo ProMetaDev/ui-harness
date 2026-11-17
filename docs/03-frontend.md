@@ -17,8 +17,9 @@
 - **主题**：暗色炭黑 + 单琥珀；明色暖纸；`auto` 跟随系统；
 - **动效**：日志逐条上浮、分段条生长、决策点弹出、审批条上浮、盖章；系统 `prefers-reduced-motion` 时全部关闭；工具行可键盘展开。
 - **顺滑**：流式 delta 按帧合并、滚动用 `requestAnimationFrame` 合并、右栏决策只让**新增项**入场、分段条只在首帧生长、工具展开做高度过渡、审批退场 160ms——避免“每来一个事件整块重绘”的卡顿。
+- **树结构**：右栏是一条 spine：`ctx / dec / bud / gate` 四个分支，context 的子段是叶子；主日志每条消息是时间轴上的节点；实验室保留表格/DAG 的血缘阅读。树只做结构提示，不替代正文。
 
-验收截图：`out/web-final-dark.png` / `web-final-light.png` / `web-final-empty.png` / `web-final-1280.png`。
+验收截图：`out/web-tree-final.png` / `web-tree-final-1280.png` / `web-final-empty.png` / `web-final-light.png`。
 
 ### 信息架构
 
