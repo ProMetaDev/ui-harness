@@ -40,6 +40,11 @@ case "$PAGE" in *U:I*) check 1 'GET / 返回页面' ;; *) check 0 'GET / 返回�
 BG=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$BASE/bg/dark.jpg")
 case "$BG" in "200 image/jpeg"*) check 1 'GET /bg/dark.jpg' ;; *) check 0 "GET /bg/dark.jpg ($BG)" ;; esac
 
+FILE=$(curl -s "$BASE/api/file?path=greet.js")
+case "$FILE" in *'export function greet'*) check 1 'GET /api/file 预览' ;; *) check 0 'GET /api/file 预览' ;; esac
+BAD=$(curl -s "$BASE/api/file?path=../etc/passwd")
+case "$BAD" in *'"ok":false'*) check 1 'GET /api/file 拒绝越界' ;; *) check 0 'GET /api/file 拒绝越界' ;; esac
+
 STATE=$(curl -s "$BASE/api/state")
 case "$STATE" in *busy*) check 1 'GET /api/state' ;; *) check 0 'GET /api/state' ;; esac
 

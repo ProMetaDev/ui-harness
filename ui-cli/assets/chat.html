@@ -359,6 +359,7 @@
   .tree .t-row{display:flex;align-items:center;gap:6px;padding:1px 6px;border-radius:4px;cursor:pointer;
                white-space:nowrap;overflow:hidden}
   .tree .t-row:hover{background:var(--panel);color:var(--text)}
+  .tree .t-row.on{background:var(--panel);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
   .tree .tcaret{width:10px;color:var(--faint);display:inline-block;text-align:center}
   .side-item.sess.on{background:var(--accent-soft);color:var(--accent)}
   .sdot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
@@ -592,6 +593,61 @@ main::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
 .cmdbtn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round}
 .cmdbtn kbd{margin-left:auto;font:10px var(--mono);color:var(--faint)}
 main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
+.main-view{position:relative;z-index:1;flex:1;min-height:0;overflow:auto;padding:24px 30px 30px}
+.live-strip{display:flex;align-items:center;gap:9px;height:32px;padding:0 20px;flex:none;z-index:2;
+  background:var(--bg-veil);border-bottom:1px solid var(--border);color:var(--muted);font:10.5px var(--mono)}
+.live-strip[hidden]{display:none}
+.live-pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 0 var(--accent-soft);
+  animation:livePulse 1.6s ease-out infinite}
+.live-text{color:var(--text)}
+.live-meta{color:var(--faint)}
+.live-spacer{flex:1}
+.live-stop{height:22px;padding:0 8px;border:1px solid var(--border);border-radius:4px;background:transparent;
+  color:var(--muted);font:10.5px var(--mono);cursor:pointer}
+.live-stop:hover{border-color:var(--bad);color:var(--bad)}
+.live-stop kbd{font:9.5px var(--mono);opacity:.6;margin-left:4px}
+@keyframes livePulse{0%{box-shadow:0 0 0 0 var(--accent-soft)}70%{box-shadow:0 0 0 6px transparent}
+  100%{box-shadow:0 0 0 0 transparent}}
+.mv-head{max-width:900px;margin:0 auto 16px;display:flex;align-items:flex-end;gap:16px;
+  padding-bottom:12px;border-bottom:1px solid var(--border)}
+.mv-head>div:first-child{min-width:0}
+.mv-head h2{margin:3px 0 0;font-size:18px;line-height:1.3;font-weight:600;letter-spacing:-.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mv-head .mv-meta{margin-left:auto;color:var(--faint);font:10.5px var(--mono);text-align:right}
+.mv-body{max-width:900px;margin:0 auto}
+.mv-empty{max-width:420px;margin:12vh auto 0;text-align:center;color:var(--muted)}
+.mv-empty-mark{font:500 44px/1 var(--mono);color:var(--accent);opacity:.55}
+.mv-empty h3{margin:14px 0 6px;font-size:14px;color:var(--text);font-weight:600}
+.mv-empty p{margin:0;font-size:12px;line-height:1.8}
+.file-view{margin:0;border:1px solid var(--border);border-left:2px solid var(--accent);
+  border-radius:0 6px 6px 0;background:rgba(18,22,27,.62);color:var(--text);
+  display:grid;grid-template-columns:46px minmax(0,1fr);max-height:calc(100vh - 210px);
+  overflow:auto;font:11.5px/1.75 var(--mono);min-height:calc(100vh - 290px)}
+html[data-theme="light"] .file-view{background:rgba(251,249,243,.78)}
+.file-view[hidden]{display:none}
+.file-gutter{padding:16px 8px;text-align:right;color:var(--faint);border-right:1px solid var(--border);
+  user-select:none;line-height:1.75;white-space:pre}
+.file-code{margin:0;padding:16px 18px;white-space:pre;tab-size:2;overflow:auto;min-width:0;line-height:1.75}
+.cap-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:24px;align-items:start}
+.cap-card{border:1px solid var(--border);border-radius:6px;background:var(--panel);overflow:hidden}
+.cap-card .cap-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
+.cap-card .cap-head .v{margin-left:auto;color:var(--faint);font:10px var(--mono)}
+.cap-row{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border-soft)}
+.cap-row:last-child{border-bottom:0}
+.cap-row:hover{background:var(--subtle)}
+.cap-row .cname{font:11.5px var(--mono);color:var(--text);min-width:92px}
+.cap-row .csum{color:var(--muted);font-size:11.5px;line-height:1.5}
+.cap-row .cmeta{margin-left:auto;color:var(--faint);font:10px var(--mono);white-space:nowrap}
+@media (max-width:1100px){.cap-grid{grid-template-columns:1fr}}
+.lab-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.lab-card{border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:13px 14px;cursor:pointer;
+  transition:border-color .16s var(--ease-soft),background-color .16s var(--ease-soft)}
+.lab-card:hover{border-color:var(--border-strong);background:var(--subtle)}
+.lab-card .lt{display:flex;align-items:center;gap:8px;font:600 12px var(--mono);color:var(--text)}
+.lab-card .lm{margin-top:6px;color:var(--faint);font:10.5px var(--mono)}
+.lab-card .lb{margin-top:10px;color:var(--muted);font-size:11.5px}
+.lab-card .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+.lab-card .dot.bad{background:var(--bad)}
 .wrap{max-width:720px;margin:0 auto;position:relative}
 /* 每条消息是时间轴上的一个节点：短横 + 小圆点 */
 .wrap::before{content:"";position:absolute;left:66px;top:6px;bottom:6px;width:1px;background:var(--border)}
@@ -945,6 +1001,53 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       </div>
       <button class="more-btn" id="moreBtn" aria-label="更多操作" aria-haspopup="true" aria-expanded="false" title="更多操作">⋯</button>
     </header>
+    <div class="live-strip" id="liveStrip" hidden>
+      <span class="live-pulse"></span>
+      <span class="live-text" id="liveText">运行中</span>
+      <span class="live-meta" id="liveMeta">0s</span>
+      <span class="live-spacer"></span>
+      <button class="live-stop" id="liveStop" type="button">停止 <kbd>Esc</kbd></button>
+    </div>
+    <section class="main-view" id="workspaceMain" hidden>
+      <div class="mv-head">
+        <div>
+          <div class="kicker">Workspace</div>
+          <h2 id="wsPath">工作区</h2>
+        </div>
+        <div class="mv-meta" id="wsMeta">选择左侧文件查看</div>
+      </div>
+      <div class="mv-body">
+        <div class="mv-empty" id="wsEmpty">
+          <div class="mv-empty-mark">/</div>
+          <h3>选一个文件</h3>
+          <p>从左侧文件树打开文件；预览是只读的，带字节数与截断提示。工具对文件的写入会先经过策略与审批。</p>
+        </div>
+        <div class="file-view" id="fileView" hidden>
+          <div class="file-gutter" id="fileGutter" aria-hidden="true"></div>
+          <pre class="file-code" id="fileCode"></pre>
+        </div>
+      </div>
+    </section>
+    <section class="main-view" id="capsMain" hidden>
+      <div class="mv-head">
+        <div>
+          <div class="kicker">Capabilities</div>
+          <h2>能力</h2>
+        </div>
+        <div class="mv-meta" id="capsMeta">正在加载…</div>
+      </div>
+      <div class="mv-body" id="capsBody"></div>
+    </section>
+    <section class="main-view" id="labMain" hidden>
+      <div class="mv-head">
+        <div>
+          <div class="kicker">Laboratory</div>
+          <h2>实验室</h2>
+        </div>
+        <div class="mv-meta" id="labMeta">扫描实验包…</div>
+      </div>
+      <div class="mv-body" id="labOverview"></div>
+    </section>
     <div class="more-menu" id="moreMenu" hidden>
       <button data-act="new"><span>新建会话</span><kbd>＋</kbd></button>
       <button data-act="snapshot"><span>导出对话快照</span><kbd>↗</kbd></button>
@@ -1364,23 +1467,55 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   }
 
   const stopBtn = document.getElementById('stop');
+  const liveStrip = document.getElementById('liveStrip');
+  const liveText = document.getElementById('liveText');
+  const liveMeta = document.getElementById('liveMeta');
+  const liveStop = document.getElementById('liveStop');
+  let busySince = 0;
+  let liveTimer = 0;
+
+  function syncLive() {
+    if (!busySince || !liveMeta) return;
+    const sec = Math.floor((Date.now() - busySince) / 1000);
+    const tok = (tokEl && tokEl.textContent) || '0';
+    liveMeta.textContent = sec + 's · ' + tok + ' tok';
+  }
 
   function setBusy(busy) {
     dot.className = 'dot' + (busy ? ' busy' : '');
     stateEl.textContent = busy ? '运行中' : '空闲';
     stopBtn.style.display = busy ? '' : 'none';
+    if (liveStrip) {
+      liveStrip.dataset.busy = busy ? '1' : '0';
+      liveStrip.hidden = !busy || (window.__uiView || 'chat') !== 'chat';
+    }
+    if (busy) {
+      if (!busySince) busySince = Date.now();
+      if (liveText) liveText.textContent = '运行中';
+      syncLive();
+      if (!liveTimer) liveTimer = setInterval(syncLive, 1000);
+    } else {
+      busySince = 0;
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = 0; }
+    }
     // UU 跟着状态走：跑的时候转圈，停下来就眨眼睛
     if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
   }
 
+  async function cancelTurn() {
+    try {
+      await fetch('/api/cancel', { method: 'POST' });
+    } catch (e) {}
+  }
   stopBtn.onclick = async () => {
     stopBtn.disabled = true;
     try {
-      await fetch('/api/cancel', { method: 'POST' });
+      await cancelTurn();
     } finally {
       setTimeout(() => { stopBtn.disabled = false; }, 800);
     }
   };
+  if (liveStop) liveStop.onclick = cancelTurn;
 
   function showApproval(ev) {
     const box = document.createElement('div');
@@ -1400,6 +1535,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       '</div>';
     approvals.appendChild(box);
     if (stateEl) stateEl.textContent = '等待批准';
+    if (liveText) liveText.textContent = '等待批准';
     if (dot) dot.className = 'dot warn live';
     for (const btn of box.querySelectorAll('button')) {
       btn.onclick = async () => {
@@ -1624,13 +1760,21 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       case 'compact':
         addSystem('上下文折叠：' + ev.dropped + ' 条，' + ev.before + ' → ' + ev.after + ' tok', ev.ts);
         break;
-      case 'approval': showApproval(ev); setQueue(ev); setStep('等待批准', 'warn live'); break;
+      case 'approval':
+        setBusy(true);
+        showApproval(ev);
+        setQueue(ev);
+        setStep('等待批准', 'warn live');
+        if (liveText) liveText.textContent = '等待批准';
+        break;
       case 'approved':
+        setBusy(true);
         addSystem('审批结果：' + ev.verdict, ev.ts);
         resolveDecision(ev.callId, ev.verdict);
         clearQueue();
         setStep('运行中', 'warn live');
         if (stateEl) stateEl.textContent = '运行中';
+        if (liveText) liveText.textContent = '运行中';
         if (dot) dot.className = 'dot busy';
         break;
       case 'cancel-requested': addSystem('已请求停止…', ev.ts); break;
@@ -1904,8 +2048,40 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   const BODIES = { chat: 'side-chat', workspace: 'side-workspace', caps: 'side-caps', lab: 'side-lab' };
   const titleEl = document.getElementById('sideTitle');
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  let currentView = 'chat';
 
   function show(view) {
+    currentView = view;
+    window.__uiView = view;
+    const live = document.getElementById('liveStrip');
+    if (live) {
+      if (view !== 'chat') live.hidden = true;
+      else if (live.dataset.busy === '1') live.hidden = false;
+    }
+    const doc = document.getElementById('doc');
+    if (doc) { doc.style.display = 'none'; doc.innerHTML = ''; }
+    const log = document.getElementById('log');
+    const empty = document.getElementById('empty');
+    if (log) log.style.display = '';
+    if (empty) empty.style.display = log && log.children.length ? 'none' : '';
+    const workspaceMain = document.getElementById('workspaceMain');
+    const capsMain = document.getElementById('capsMain');
+    const labMain = document.getElementById('labMain');
+    const scrollEl = document.querySelector('main > .scroll');
+    const composerWrap = document.querySelector('.composer-wrap');
+    const fullPage = view === 'workspace' || view === 'caps' || view === 'lab';
+    if (workspaceMain) workspaceMain.hidden = view !== 'workspace';
+    if (capsMain) capsMain.hidden = view !== 'caps';
+    if (labMain) labMain.hidden = view !== 'lab';
+    if (scrollEl) scrollEl.style.display = fullPage ? 'none' : '';
+    if (composerWrap) composerWrap.style.display = fullPage ? 'none' : '';
+    if (fullPage) shell.classList.add('right-hidden');
+    else if (view === 'chat') {
+      const log = document.getElementById('log');
+      shell.classList.toggle('right-hidden', !(log && log.children.length));
+    }
+    if (view === 'caps') renderCaps();
+    if (view === 'lab') renderLabOverview();
     document.querySelectorAll('.act[data-view]').forEach((b) => {
       b.classList.toggle('active', b.dataset.view === view);
     });
@@ -1930,6 +2106,44 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     if (view === 'workspace') loadTree('');
     if (view === 'lab') loadLab();
   }
+  let capsCache = null;
+  async function renderCaps() {
+    const body = document.getElementById('capsBody');
+    const metaEl = document.getElementById('capsMeta');
+    if (!body) return;
+    if (!capsCache) {
+      body.innerHTML = '<div class="empty-note">读取能力清单…</div>';
+      try {
+        capsCache = await (await fetch('/api/meta')).json();
+      } catch (e) {
+        body.innerHTML = '<div class="empty-note">读不到能力清单</div>';
+        return;
+      }
+    }
+    const tools = capsCache.tools || [];
+    const skills = capsCache.skills || [];
+    if (metaEl) {
+      metaEl.textContent =
+        tools.length + ' 工具 · ' + skills.length + ' 技能 · ' + (capsCache.model || '—');
+    }
+    body.innerHTML =
+      '<div class="cap-grid">' +
+      '<div class="cap-card"><div class="cap-head"><span class="kicker">tools</span>' +
+      '<span class="v">' + tools.length + '</span></div>' +
+      (tools.length
+        ? tools.map((t) => '<div class="cap-row"><span class="cname">' + esc(t.name) + '</span>' +
+            '<span class="csum">' + esc(t.summary) + '</span></div>').join('')
+        : '<div class="empty-note">没有工具</div>') +
+      '</div>' +
+      '<div class="cap-card"><div class="cap-head"><span class="kicker">skills</span>' +
+      '<span class="v">' + skills.length + '</span></div>' +
+      (skills.length
+        ? skills.map((s) => '<div class="cap-row"><span class="cname">' + esc(s.name) + '</span>' +
+            '<span class="csum">' + esc(s.description) + '</span></div>').join('')
+        : '<div class="empty-note">这个工作区还没有 skill</div>') +
+      '</div></div>';
+  }
+
   document.querySelectorAll('.act[data-view]').forEach((b) => {
     b.onclick = () => show(b.dataset.view);
   });
@@ -2031,17 +2245,21 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       const skills = meta.skills || [];
       const tl = document.getElementById('toolList');
       if (tl) {
-        tl.innerHTML = tools
-          .map((t) => '<div class="side-item" title="' + esc(t.summary) + '">' + esc(t.name) + '<span class="meta">工具</span></div>')
-          .join('');
+        tl.innerHTML =
+          '<div class="side-item">' + tools.length + ' 个工具<span class="meta">查看 →</span></div>';
+        tl.firstElementChild.onclick = () => {
+          const b = document.querySelector('.act[data-view="caps"]');
+          if (b) b.click();
+        };
       }
       const sl = document.getElementById('skillList');
       if (sl) {
-        sl.innerHTML = skills.length
-          ? skills
-              .map((s) => '<div class="side-item" title="' + esc(s.description) + '">' + esc(s.name) + '<span class="meta">技能</span></div>')
-              .join('')
-          : '<div class="side-item" style="color:var(--faint)">（这个工作区还没有 skill）</div>';
+        sl.innerHTML =
+          '<div class="side-item">' + skills.length + ' 个技能<span class="meta">查看 →</span></div>';
+        sl.firstElementChild.onclick = () => {
+          const b = document.querySelector('.act[data-view="caps"]');
+          if (b) b.click();
+        };
       }
       buildModeChips(meta.mode || 'standard');
     })
@@ -2078,12 +2296,92 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
             await loadTree(path ? path + '/' + e.name : e.name, child, (depth || 0) + 1);
           }
         };
+      } else {
+        row.onclick = () => openFile(path ? path + '/' + e.name : e.name, row);
       }
+    }
+  }
+
+  async function openFile(path, row) {
+    const panel = document.getElementById('workspaceMain');
+    const view = document.getElementById('fileView');
+    const code = document.getElementById('fileCode');
+    const gutter = document.getElementById('fileGutter');
+    const empty = document.getElementById('wsEmpty');
+    const title = document.getElementById('wsPath');
+    const meta = document.getElementById('wsMeta');
+    if (!panel || !view || !code) return;
+    if (row) {
+      document.querySelectorAll('#tree .t-row.on').forEach((r) => r.classList.remove('on'));
+      row.classList.add('on');
+    }
+    if (title) title.textContent = path;
+    if (meta) meta.textContent = '读取中…';
+    let d = { ok: false, error: '读不到' };
+    try {
+      d = await (await fetch('/api/file?path=' + encodeURIComponent(path))).json();
+    } catch (e) {
+      d = { ok: false, error: e.message };
+    }
+    if (!d.ok) {
+      if (meta) meta.textContent = d.error || '读取失败';
+      return;
+    }
+    const lines = d.text ? d.text.split('\n').length : 0;
+    if (meta) {
+      const ext = (d.path || path).split('.').pop().toUpperCase();
+      meta.textContent =
+        (ext && ext.length <= 5 ? ext : 'TEXT') + ' · 只读 · ' + d.bytes + ' B · ' + lines + ' 行' +
+        (d.truncated ? ' · 已截断 512 KB' : '') + (d.binary ? ' · 二进制' : '');
+      meta.title = d.path || path;
+    }
+    if (empty) empty.hidden = true;
+    view.hidden = false;
+    code.textContent = d.binary ? '（二进制文件，不在页面里预览）' : d.text;
+    if (gutter) {
+      gutter.textContent = d.binary || !lines
+        ? ''
+        : Array.from({ length: lines }, (_, i) => String(i + 1)).join('\n');
     }
   }
 
   // ── 实验室：实验包列表 + 报告 ──
   const docEl = document.getElementById('doc');
+  let labCache = [];
+  let labRoot = '';
+  function renderLabOverview() {
+    const box = document.getElementById('labOverview');
+    const meta = document.getElementById('labMeta');
+    if (!box) return;
+    if (meta) {
+      meta.textContent = labCache.length + ' 个实验包' + (labRoot ? ' · ' + labRoot : '');
+      meta.title = labRoot || '';
+    }
+    if (!labCache.length) {
+      box.innerHTML =
+        '<div class="mv-empty" style="margin-top:8vh"><div class="mv-empty-mark">∅</div>' +
+        '<h3>还没有实验包</h3><p>用 <span class="mono">ui lab pack</span> 生成一个；' +
+        '每个包会带产物、输入血统和结论对账。</p></div>';
+      return;
+    }
+    box.innerHTML =
+      '<div class="lab-grid">' +
+      labCache.map((b) =>
+        '<div class="lab-card" data-name="' + esc(b.name) + '">' +
+        '<div class="lt"><span class="dot ' + (b.ok ? '' : 'bad') + '"></span>' + esc(b.name) +
+        '<span class="v" style="margin-left:auto;color:var(--faint);font:10px var(--mono)">' +
+        (b.ok ? '自洽' : '有问题') + '</span></div>' +
+        '<div class="lm">' + (b.artifacts || 0) + ' 产物</div>' +
+        '<div class="lb">打开报告 · 产物哈希 / 输入血统 / 结论核对</div></div>'
+      ).join('') +
+      '</div>';
+    box.querySelectorAll('.lab-card').forEach((card) => {
+      card.onclick = () => {
+        const b = labCache.find((x) => x.name === card.dataset.name);
+        openReport(card.dataset.name, b ? b.ok : undefined);
+      };
+    });
+  }
   async function loadLab() {
     const box = document.getElementById('labList');
     if (!box) return;
@@ -2093,9 +2391,11 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       data = await (await fetch('/api/lab/bundles')).json();
     } catch (e) {}
     const list = data.bundles || [];
+    labCache = list;
+    labRoot = data.root || '';
+    renderLabOverview();
     if (!list.length) {
-      box.innerHTML =
-        '<div class="side-item" style="color:var(--faint)">还没有实验包 · 用 ui lab pack 生成</div>';
+      box.innerHTML = '<div class="side-item">0 个实验包<span class="meta">空</span></div>';
       return;
     }
     box.innerHTML = '';
@@ -2123,6 +2423,12 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     if (!docEl) return;
     const empty = document.getElementById('empty');
     const log = document.getElementById('log');
+    const scrollEl = document.querySelector('main > .scroll');
+    const composerWrap = document.querySelector('.composer-wrap');
+    const labMain = document.getElementById('labMain');
+    if (labMain) labMain.hidden = true;
+    if (scrollEl) scrollEl.style.display = '';
+    if (composerWrap) composerWrap.style.display = 'none';
     if (empty) empty.style.display = 'none';
     if (log) log.style.display = 'none';
     docEl.style.display = 'block';
@@ -2133,7 +2439,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       '<span class="sdot ' + (ok === false ? 'bad' : 'ok') + '"></span><span class="name">' + esc(name) + '</span>';
     const back = document.createElement('button');
     back.className = 'back';
-    back.textContent = '← 回到对话';
+    back.textContent = currentView === 'lab' ? '← 回到实验室' : '← 回到对话';
     back.onclick = closeDoc;
     bar.appendChild(back);
     docEl.appendChild(bar);
@@ -2146,8 +2452,20 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     docEl.style.display = 'none';
     docEl.innerHTML = '';
     const log = document.getElementById('log');
-    if (log) log.style.display = '';
     const empty = document.getElementById('empty');
+    const scrollEl = document.querySelector('main > .scroll');
+    const composerWrap = document.querySelector('.composer-wrap');
+    const labMain = document.getElementById('labMain');
+    if (currentView === 'lab') {
+      if (scrollEl) scrollEl.style.display = 'none';
+      if (composerWrap) composerWrap.style.display = 'none';
+      if (labMain) labMain.hidden = false;
+      renderLabOverview();
+      return;
+    }
+    if (scrollEl) scrollEl.style.display = '';
+    if (composerWrap) composerWrap.style.display = '';
+    if (log) log.style.display = '';
     if (empty) {
       const showEmpty = !(log && log.children.length);
       empty.style.display = showEmpty ? '' : 'none';
@@ -2366,6 +2684,9 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   // 深链：?view=workspace 直接打开某个视图（截图与分享都用得上）
   const qv = new URLSearchParams(location.search).get('view');
   if (qv && VIEWS[qv]) show(qv);
+  // 深链：?view=workspace&file=greet.js 直接打开文件（截图/分享用）
+  const qf = new URLSearchParams(location.search).get('file');
+  if (qf && qv === 'workspace') setTimeout(() => openFile(qf), 160);
   // 深链：?report=<包名> 直接打开某个实验包的报告
   const qr = new URLSearchParams(location.search).get('report');
   if (qr) setTimeout(() => openReport(qr, true), 120);

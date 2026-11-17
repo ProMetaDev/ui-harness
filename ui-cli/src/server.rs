@@ -530,7 +530,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 for e in rd.flatten().take(300) {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name == ".git" || name == "target" || name == "node_modules" {
+                    if name == ".git" || name == "target" || name == "node_modules" || name == ".ui" {
                         continue;
                     }
                     let meta = e.metadata().ok();
@@ -559,6 +559,54 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             let out = Json::obj(vec![
                 ("path", Json::from(rel.as_str())),
                 ("entries", Json::Arr(entries)),
+            ]);
+            json_response(&mut stream, &out.to_compact())
+        }
+        // 工作区文件预览：只读、限 512 KB、拒绝 .ui/.git/secrets 与越界路径。
+        ("GET", "/api/file") => {
+            let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
+            let root = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or(""));
+            let rel = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("path="))
+                .map(pct_decode)
+                .unwrap_or_default();
+            let blocked = rel
+                .split('/')
+                .any(|p| p == ".." || p == ".ui" || p == ".git" || p == "secrets" || p == "target" || p == "node_modules");
+            if rel.is_empty() || rel.starts_with('/') || blocked {
+                return json_response(&mut stream, "{\"ok\":false,\"error\":\"路径不允许\"}");
+            }
+            let root = match std::fs::canonicalize(&root) {
+                Ok(p) => p,
+                Err(e) => {
+                    return json_response(&mut stream, &format!("{{\"ok\":false,\"error\":\"工作区不可读: {}\"}}", e))
+                }
+            };
+            let path = match std::fs::canonicalize(root.join(&rel)) {
+                Ok(p) => p,
+                Err(e) => {
+                    return json_response(&mut stream, &format!("{{\"ok\":false,\"error\":\"文件不存在: {}\"}}", e))
+                }
+            };
+            if !path.starts_with(&root) || !path.is_file() {
+                return json_response(&mut stream, "{\"ok\":false,\"error\":\"路径越界或不是文件\"}");
+            }
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let truncated = size > 512 * 1024;
+            let mut bytes = Vec::new();
+            if let Ok(f) = std::fs::File::open(&path) {
+                let _ = f.take(512 * 1024).read_to_end(&mut bytes);
+            }
+            let binary = bytes.contains(&0);
+            let text = if binary { String::new() } else { String::from_utf8_lossy(&bytes).to_string() };
+            let out = Json::obj(vec![
+                ("ok", Json::Bool(true)),
+                ("path", Json::from(rel.as_str())),
+                ("bytes", Json::from(size)),
+                ("truncated", Json::Bool(truncated)),
+                ("binary", Json::Bool(binary)),
+                ("text", Json::from(text.as_str())),
             ]);
             json_response(&mut stream, &out.to_compact())
         }
@@ -853,6 +901,29 @@ fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
     stream.flush()
+}
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("");
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+                out.push(b[i]);
+                i += 1;
+            }
+            b'+' => { out.push(b' '); i += 1; }
+            c => { out.push(c); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 fn image(stream: &mut TcpStream, body: &[u8], mime: &str) -> std::io::Result<()> {
