@@ -1616,6 +1616,29 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     if (cls) b.classList.add(cls);
   }
 
+  // 内核写进 journal 的具名事件（memory/used、effect/observed …）。
+  // 只要一句话：读者需要知道"这次用了哪条记忆、改了什么"，不需要看 JSON。
+  function journalLine(kind, p) {
+    p = p || {};
+    if (kind === 'memory/used') {
+      return '记忆 ' + (p.id || '?') + ' · ' + (p.reason || '命中') +
+        (p.tokens ? ' · ' + p.tokens + ' tok' : '');
+    }
+    if (kind === 'effect/observed') {
+      const src = p.source === 'inotify' ? '事件' : '扫描';
+      return '改了什么 ' + (p.tool || '?') + ' · ' + (p.summary || '') + ' · ' + src;
+    }
+    if (kind === 'memory/write') return '记住 ' + (p.id || '?') + ' · ' + (p.text || '');
+    if (kind === 'memory/forget') return '忘掉 ' + (p.id || '?') + ' · ' + (p.reason || '');
+    return kind;
+  }
+
+  function addJournal(ev, ts) {
+    const text = journalLine(ev.kind, ev.payload);
+    if (!text) return;
+    addSystem(text, ts, 'journal-line');
+  }
+
   function escapeHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1998,6 +2021,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       case 'tool': hideEmpty(); endStream(); noteTool(ev.name, ev.ts, ev.ok); addTool(ev.name, ev.ok, ev.detail, ev.id, ev.ts); break;
       case 'snapshot': renderSnapshot(ev); break;
       case 'decision': addDecision(ev); break;
+      case 'journal': addJournal(ev, ev.ts); break;
       case 'budget':
         tokEl.textContent = ev.tokens;
         callsEl.textContent = ev.calls;

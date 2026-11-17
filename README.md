@@ -34,13 +34,13 @@ bash tools/demo-audit.sh   # 跑一轮 → 回放 → 校验 → 篡改 → 发�
 
 ```bash
 bash tools/bootstrap.sh   # 先看还缺什么（需要 Rust；其余逐项说明）
-bash tools/test.sh        # 195 个测试
+bash tools/test.sh        # 196 个测试
 bash tools/debug.sh       # 46 项门禁：构建 + 端到端 + 攻击场景 + 跨平台
 ```
 
 ```
 $ ui --version
-ui 1.0.0 (commit 0000000, built 2026-11-17)
+ui 1.0.1 (commit 0000000, built 2026-11-17)
 ```
 
 网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：
@@ -88,6 +88,21 @@ $ bash tools/kit.sh
 ```
 
 `GAP` 是**现在拦不住**的意思，我们不假装。详见 [docs/22](docs/22-verify-kit.md)。
+
+**4. 知识与记忆是证据，不是黑箱。** 知识卡绑定它描述的那份源码，记忆的每次注入都留痕：
+
+```
+$ ui replay
+   1 knowledge/use   卡片 mod-pay · path-match:src/pay/x.rs · 15 tok
+   2 turn/start      ## 预取的知识卡 … 先锁单后打款。 任务：把退款改成两步确认
+   3 memory/used     记忆 m-3f9a1c… · keyword-match:门禁 · 12 tok
+```
+
+- 卡片改了源码就不一致：`ui knowledge check` 打印 `STALE` 并退出 2（`--strict` 连"未绑定"也算红）。
+- 记忆只有**人**能写（`ui remember`），注入哪条、为什么命中，都进日志；`ui memory check` 校验记忆链。
+- 网页端（`ui serve`）同样能看到这些行——它们走同一条 SSE，不是给 CLI 的专属信息。
+
+我们**没有**做向量检索、没有自动生成规范：这两件事都无法被 `verify` 证伪。
 
 ## 界面
 
@@ -160,7 +175,7 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 
 ## 状态与许可
 
-- **v1.0.0** · **195 个测试** · **46 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
+- **v1.0.1** · **196 个测试** · **46 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
   Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
   但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。

@@ -494,7 +494,13 @@ impl Agent {
                     .collect();
                 for (id, reason, tokens) in used {
                     let payload = crate::memory::used_payload(&id, &reason, tokens);
-                    self.journal.append("memory/used", payload)?;
+                    self.journal.append("memory/used", payload.clone())?;
+                    // 网页端靠这条看见"这次用了哪条记忆"。`on_event` 是通用钩子：
+                    // 新增事件子类型不需要再改 Hooks trait。
+                    hooks.on_event(&Json::obj(vec![
+                        ("kind", Json::from("memory/used")),
+                        ("payload", payload),
+                    ]));
                     self.memory
                         .record_used(&id, &reason, tokens)
                         .map_err(AgentError::Memory)?;
@@ -969,20 +975,19 @@ impl Agent {
             if let Some((ch, overflowed)) = observed {
                 // 没变就不记：日志里塞满「什么都没发生」会淹没真正的改动
                 if !ch.is_empty() || ch.truncated || overflowed {
-                    self.journal.append(
-                        "effect/observed",
-                        Json::obj(vec![
-                            ("callId", Json::from(call.id.as_str())),
-                            ("tool", Json::from(name.as_str())),
-                            ("summary", Json::from(ch.summary())),
-                            ("changes", ch.to_json()),
-                            ("overflowed", Json::Bool(overflowed)),
-                            (
-                                "source",
-                                Json::from(if watching { "inotify" } else { "scan" }),
-                            ),
-                        ]),
-                    )?;
+                    let payload = Json::obj(vec![
+                        ("callId", Json::from(call.id.as_str())),
+                        ("tool", Json::from(name.as_str())),
+                        ("summary", Json::from(ch.summary())),
+                        ("changes", ch.to_json()),
+                        ("overflowed", Json::Bool(overflowed)),
+                        ("source", Json::from(if watching { "inotify" } else { "scan" })),
+                    ]);
+                    self.journal.append("effect/observed", payload.clone())?;
+                    hooks.on_event(&Json::obj(vec![
+                        ("kind", Json::from("effect/observed")),
+                        ("payload", payload),
+                    ]));
                 }
             }
         }

@@ -182,6 +182,26 @@ impl Hooks for WebHooks {
         ]));
     }
 
+    /// 通用钩子：把内核写的**具名事件**（memory/used、effect/observed…）推给页面。
+    ///
+    /// 有了它，以后新增事件子类型不需要再往 Hooks trait 上加回调。
+    /// 只推 `kind` 与 `payload`，不带 seq/hash——页面要的是"发生了什么"，
+    /// 链的完整性由 `ui verify` 负责。
+    fn on_event(&mut self, event: &Json) {
+        let kind = match event.str_at("kind") {
+            Some(k) => k.to_string(),
+            None => return,
+        };
+        self.hub.push(Json::obj(vec![
+            ("type", Json::from("journal")),
+            ("kind", Json::from(kind)),
+            (
+                "payload",
+                event.get("payload").cloned().unwrap_or(Json::Null),
+            ),
+        ]));
+    }
+
     fn on_compact(&mut self, before: u64, after: u64, dropped: usize) {
         self.hub.push(Json::obj(vec![
             ("type", Json::from("compact")),
@@ -988,4 +1008,39 @@ fn sse(stream: &mut TcpStream, hub: Arc<Hub>, query: &str) -> std::io::Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_event_reaches_the_sse_log() {
+        // 回归：`Hooks::on_event` 曾经是个"声明了但从不调用"的死钩子，
+        // 于是网页端永远看不到 memory/used、effect/observed 这类具名事件。
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: true,
+        };
+        hooks.on_event(&Json::obj(vec![
+            ("kind", Json::from("memory/used")),
+            (
+                "payload",
+                Json::obj(vec![
+                    ("id", Json::from("m-abc123")),
+                    ("reason", Json::from("keyword-match:门禁")),
+                    ("tokens", Json::from(12)),
+                ]),
+            ),
+        ]));
+
+        let log = hub.log.lock().unwrap();
+        assert_eq!(log.len(), 1, "应当恰好推一条 SSE 事件");
+        let line = &log[0].1;
+        assert!(line.contains("\"type\":\"journal\""), "类型应当是 journal: {}", line);
+        assert!(line.contains("memory/used"), "应当带 kind: {}", line);
+        assert!(line.contains("m-abc123"), "应当带 payload: {}", line);
+        assert!(!line.contains("hash"), "不该把链字段推给页面: {}", line);
+    }
 }
