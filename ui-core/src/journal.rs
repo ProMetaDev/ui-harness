@@ -145,6 +145,19 @@ impl Drop for FileLock {
     }
 }
 
+/// 在同一个锁文件上执行一段「读全量 → 判断 → 追加」的临界区。
+///
+/// `Journal::append` 自己已经会拿 `<file>.lock`，但**冲突检查**需要把
+/// 「重新加载 + 判断 + 写」放在同一个临界区里，否则两个 `ui remember`
+/// 并发时会各自看到旧的空库、各写一条 live。锁序固定为
+/// `<guard> → <journal>.lock`，`append` 内部只拿后者，不会反向死锁。
+pub fn with_file_lock<T>(lock_path: &Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = FileLock::acquire(lock_path)?;
+    f()
+}
 
 /// 只扫一遍文件、只解析最后一条记录的结果。
 struct TailScan {

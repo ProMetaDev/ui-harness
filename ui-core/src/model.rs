@@ -162,6 +162,8 @@ pub struct ScriptedModel {
     /// Steps to use instead when the kernel asks for a repair.
     repairs: Vec<ScriptStep>,
     repair_cursor: usize,
+    /// 把本轮快照原文当回复返回（测试用：能断言「模型到底看见了什么」）。
+    echo_snapshot: bool,
 }
 
 impl ScriptedModel {
@@ -186,6 +188,7 @@ impl ScriptedModel {
             cursor: 0,
             repairs,
             repair_cursor: 0,
+            echo_snapshot: scenario.bool_at("echoSnapshot").unwrap_or(false),
         })
     }
 }
@@ -269,10 +272,14 @@ impl Model for ScriptedModel {
 
     fn respond(
         &mut self,
-        _snapshot: &Snapshot,
+        snapshot: &Snapshot,
         repair: Option<&str>,
         _cancel: &crate::cancel::Cancel,
     ) -> Result<ModelResponse, String> {
+        if self.echo_snapshot {
+            // 测试用：回复就是模型看到的快照原文。没有协议问题（content 非空、无 toolCalls）。
+            return Ok(ModelResponse::text(snapshot.text.clone()));
+        }
         if repair.is_some() && self.repair_cursor < self.repairs.len() {
             let step = &self.repairs[self.repair_cursor];
             self.repair_cursor += 1;
@@ -683,7 +690,7 @@ mod tests {
     fn test_snapshot() -> Snapshot {
         let ws = std::env::temp_dir().join(format!("ui-model-snapshot-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&ws);
-        crate::prompt::build_snapshot(&ws, &[], &[], None, None, "", &[])
+        crate::prompt::build_snapshot(&ws, &[], &[], None, None, "", &[], "")
     }
 
     #[test]

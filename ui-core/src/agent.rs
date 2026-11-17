@@ -23,6 +23,8 @@ pub enum AgentError {
     Budget(BudgetExceeded),
     Model(String),
     Journal(io::Error),
+    /// 记忆文件坏了/写不进去：在写 `turn/start` 之前失败，不静默当成空记忆。
+    Memory(String),
 }
 
 impl fmt::Display for AgentError {
@@ -31,6 +33,7 @@ impl fmt::Display for AgentError {
             AgentError::Budget(e) => write!(f, "{}", e),
             AgentError::Model(e) => write!(f, "模型调用失败: {}", e),
             AgentError::Journal(e) => write!(f, "日志写入失败: {}", e),
+            AgentError::Memory(e) => write!(f, "记忆失败: {}", e),
         }
     }
 }
@@ -108,6 +111,16 @@ pub struct Agent {
     pub loaded_skills: Vec<(String, String)>,
     /// 工具输出在上下文里最多保留多少字符（0 = 不截断）。超出部分落盘。
     pub tool_chars: usize,
+    /// 记忆（workspace 级，跨会话）。`memory_enabled=false` 时完全不动它。
+    pub memory: crate::memory::Store,
+    pub memory_enabled: bool,
+    /// 单轮注入预算（tokens）。0 = 不注入；`UI_MEMORY_BUDGET` 覆盖默认 300。
+    pub memory_tokens: u64,
+    /// 本轮命中的记忆（`ui run` 结束后打印；也是 `memory/used` 的来源）。
+    pub memory_hits: Vec<crate::memory::Hit>,
+    /// 检索用的 query 输入。CLI 在 `knowledge` 预取改写 `input` 之前把原始任务放这里，
+    /// 避免「知识卡正文」把记忆检索带偏；为 None 时直接用本轮 input。
+    pub memory_query: Option<String>,
     /// 运行模式：只调决策严格度，不改日志格式
     pub mode: crate::mode::Mode,
     /// ??????????????(???)
@@ -225,6 +238,14 @@ impl Agent {
         } else {
             None
         };
+        // 记忆是 workspace 级的：换会话不换记忆（设计稿 §3.1）。
+        // UI_MEMORY=0 关闭读取；UI_MEMORY_BUDGET 覆盖单轮 300 tokens。
+        let memory = crate::memory::Store::open(&workspace);
+        let memory_enabled = std::env::var("UI_MEMORY").map(|v| v != "0").unwrap_or(true);
+        let memory_tokens = std::env::var("UI_MEMORY_BUDGET")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(crate::memory::DEFAULT_MAX_TOKENS);
         Agent {
             journal,
             model,
@@ -240,6 +261,11 @@ impl Agent {
             history: Vec::new(),
             loaded_skills: Vec::new(),
             tool_chars: 2000,
+            memory,
+            memory_enabled,
+            memory_tokens,
+            memory_hits: Vec::new(),
+            memory_query: None,
             mode: crate::mode::Mode::default(),
             env_scrub: true,
             // 观测式效果默认开：大仓库上可以 UI_OBSERVE=0 关掉（代价是审计看不到实际改动）
@@ -363,6 +389,28 @@ impl Agent {
     }
 
     pub fn run_turn(&mut self, input: &str, hooks: &mut dyn Hooks) -> Result<TurnReport, AgentError> {
+        // 每轮只读一次：先 refresh（坏链就在这里 fail closed，连 turn/start 都不写），
+        // 再用「本轮输入 + goal + 最近两条 user」检索一次。工具结果不触发隐式重检索。
+        if self.memory_enabled {
+            self.memory.refresh().map_err(AgentError::Memory)?;
+        }
+        let query_input = self.memory_query.take().unwrap_or_else(|| input.to_string());
+        let memory_query =
+            crate::memory::build_query(&query_input, self.goal.as_deref(), &self.history);
+        self.memory_hits = if self.memory_enabled && self.memory_tokens > 0 {
+            self.memory.retrieve(
+                &memory_query,
+                &crate::memory::Config {
+                    top_k: crate::memory::DEFAULT_TOP_K,
+                    max_tokens: self.memory_tokens,
+                    now_ms: crate::time::now_ms(),
+                },
+            )
+        } else {
+            Vec::new()
+        };
+        let memory_text = crate::memory::render(&self.memory_hits);
+
         self.turn += 1;
         let turn = self.turn;
         self.cancel.reset();
@@ -376,6 +424,7 @@ impl Agent {
         let mut tool_calls = 0usize;
         let mut last_text = String::new();
         let mut empty_replies = 0usize;
+        let mut memory_logged = false;
 
         loop {
             if self.cancel.is_cancelled() {
@@ -415,6 +464,7 @@ impl Agent {
                 None,
                 &catalog_text,
                 &self.loaded_skills,
+                &memory_text,
             );
             if let Err(e) = self.budget.charge(Dim::Tokens, snapshot.tokens as f64) {
                 self.journal.append(
@@ -428,6 +478,29 @@ impl Agent {
                 return Err(AgentError::Budget(e));
             }
             self.journal.append("prompt/snapshot", snapshot.to_json())?;
+            // 只在第一份快照落盘之后写一次：一轮一条记录，不按步重复。
+            // 每条命中各一条 `memory/used`（字段只有 id/reason/tokens）。
+            if !memory_logged && !self.memory_hits.is_empty() {
+                let used: Vec<(String, String, u64)> = self
+                    .memory_hits
+                    .iter()
+                    .map(|hit| {
+                        (
+                            hit.entry.id.clone(),
+                            hit.reason.clone(),
+                            crate::memory::budget_tokens(&hit.entry.text),
+                        )
+                    })
+                    .collect();
+                for (id, reason, tokens) in used {
+                    let payload = crate::memory::used_payload(&id, &reason, tokens);
+                    self.journal.append("memory/used", payload)?;
+                    self.memory
+                        .record_used(&id, &reason, tokens)
+                        .map_err(AgentError::Memory)?;
+                }
+                memory_logged = true;
+            }
             hooks.on_snapshot(&snapshot);
             hooks.on_budget(
                 self.budget.used(Dim::Tokens) as u64,

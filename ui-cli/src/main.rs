@@ -9,6 +9,7 @@
 
 mod frame;
 mod knowledge;
+mod memory;
 mod render;
 mod lab;
 mod providers;
@@ -307,8 +308,11 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("lab") => cmd_lab(&args),
         Some("policy") => cmd_policy(&args),
         Some("knowledge") => knowledge::cmd(&args),
+        Some("remember") => memory::cmd_remember(&args),
+        Some("forget") => memory::cmd_forget(&args),
+        Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|skills|workflow|apply|policy|knowledge）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|skills|workflow|apply|policy|knowledge|remember|forget|memory）",
             other
         )),
         None => {
@@ -342,6 +346,11 @@ fn help() -> String {
      ui knowledge check           校验卡上的 source_sha 与 touches 命中文件是否一致（STALE 退 2）\n\
      ui knowledge use <id> --reason \"...\"   手工写一条 knowledge/use（验证证据链）\n\
      ui knowledge emit <id>       写一条 knowledge/emit（卡片来源绑定 + 确认位）\n\
+     ui remember \"<text>\"        写一条记忆（--kind fact|pref|pitfall|build --key k --scope workspace|project --expires DAYS）\n\
+     ui forget <id> --reason \"...\"  写墓碑：下轮起不再注入（未知 id 退 1）\n\
+     ui memory list [--all]       列出记忆（默认只列有效；--all 含墓碑/过期）\n\
+     ui memory check              校验记忆文件哈希链 + id/内容一致（损坏退 2）\n\
+     ui prompt --memory-query \"...\"  单独渲染一次记忆检索（不写事件、不跑 turn）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
@@ -1200,6 +1209,9 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
         return Err("缺少 --task 或 --task-file".to_string());
     };
     let limits = limits_from(args);
+    // 记忆检索用**原始任务**：knowledge 预取会把卡片正文拼进首个提示词，
+    // 那不该改变「这一轮该命中哪条记忆」。
+    let memory_input = task.clone();
 
     let model = build_model(args)?;
 
@@ -1209,6 +1221,7 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     println!("journal   {}", jp.display());
 
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
+    agent.memory_query = Some(memory_input);
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
@@ -1217,6 +1230,10 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
+    }
+    if args.flag("no-memory") {
+        agent.memory_enabled = false;
+        agent.memory_hits.clear();
     }
     if let Some(text) = args.get("append-system-prompt") {
         ui_core::prompt::set_extra_system(text);
@@ -1252,6 +1269,21 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
         "结束原因 {} · {} 步 · {} 次工具 · 约 {} tokens",
         report.reason, report.steps, report.tool_calls, report.tokens
     );
+    if !agent.memory_hits.is_empty() {
+        println!(
+            "\n记忆注入 {} 条（正文进快照 memory 段，已写 memory/used）：",
+            agent.memory_hits.len()
+        );
+        for hit in &agent.memory_hits {
+            println!(
+                "  {} · {} · {} tok · {}",
+                hit.entry.id,
+                hit.reason,
+                ui_core::memory::budget_tokens(&hit.entry.text),
+                hit.entry.text
+            );
+        }
+    }
     // 并行子代理靠这个文件把「答案」带回父进程（stdout 里混着日志，不可靠）
     if let Some(path) = args.get("result-file") {
         if let Some(parent) = Path::new(path).parent() {
@@ -2198,7 +2230,31 @@ fn cmd_prompt(args: &Args) -> Result<i32, String> {
             .collect();
         tools.retain(|t| want.iter().any(|w| *w == t.name));
     }
-    let snap = ui_core::prompt::build_snapshot(&ws, &tools, &[], None, None, "", &[]);
+    let snap = {
+        // `--memory-query "..."`：单独渲染一次检索结果（不写事件、不跑 turn），
+        // 用来回答「这个 query 会注入哪几条记忆」。没有它时快照与以前完全一样。
+        let memory_text = match args.get("memory-query") {
+            Some(query) => {
+                let mut store = ui_core::memory::Store::open(&ws);
+                store.refresh().map_err(|e| e.to_string())?;
+                let budget = std::env::var("UI_MEMORY_BUDGET")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(ui_core::memory::DEFAULT_MAX_TOKENS);
+                let hits = store.retrieve(
+                    query,
+                    &ui_core::memory::Config {
+                        top_k: ui_core::memory::DEFAULT_TOP_K,
+                        max_tokens: budget,
+                        now_ms: ui_core::time::now_ms(),
+                    },
+                );
+                ui_core::memory::render(&hits)
+            }
+            None => String::new(),
+        };
+        ui_core::prompt::build_snapshot(&ws, &tools, &[], None, None, "", &[], &memory_text)
+    };
     if args.flag("json") {
         println!("{}", snap.to_json().to_compact());
         return Ok(0);
@@ -3004,6 +3060,8 @@ const ISOLATE_SKIP: &[&str] = ui_core::isolate::SKIP;
 fn copy_and_hash(from: &Path, to: &Path) -> std::io::Result<(u64, Option<String>)> {
     use std::io::{Read, Write};
 
+    // 只有 reflink 分支需要 size；Windows 上没有 reflink，别留下未使用变量
+    #[cfg(not(windows))]
     let size = from.metadata().map(|m| m.len()).unwrap_or(0);
 
     // 大文件先试写时复制：btrfs/xfs 上是 O(1)。失败（ext4 等）就退回普通复制。

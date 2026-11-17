@@ -23,6 +23,7 @@ pub mod json;
 pub mod journal;
 pub mod knowledge;
 pub mod mcp;
+pub mod memory;
 pub mod mode;
 pub mod model;
 pub mod observe;

@@ -28,8 +28,9 @@ pub fn cmd(args: &Args) -> Result<i32, String> {
         Some("check") => check(&ws, args),
         Some("use") => use_card(&ws, args),
         Some("emit") => emit(&ws, args),
+        Some("bind") => bind(&ws, args),
         Some(other) => Err(format!(
-            "未知子命令 `knowledge {}`（list | check | use | emit）",
+            "未知子命令 `knowledge {}`（list | check | use | emit | bind）",
             other
         )),
         None => Ok(0),
@@ -153,6 +154,56 @@ fn check(ws: &Path, args: &Args) -> Result<i32, String> {
         return Ok(2);
     }
     println!("结论  PASS");
+    Ok(0)
+}
+
+/// 把卡片的 `source_sha` 重算并写回文件。
+///
+/// 为什么需要它：没有这个命令，"绑定"就得靠人手工复现哈希算法——
+/// 而手写一份同算法很容易和产品实现漂移（第一次写门禁脚本就是这么错的）。
+fn bind(ws: &Path, args: &Args) -> Result<i32, String> {
+    let id = args
+        .sub(1)
+        .ok_or("用法：ui knowledge bind <id> [--dry-run]")?
+        .to_string();
+    let card = knowledge::find(ws, &id)
+        .ok_or_else(|| format!("没有 id 为 `{}` 的知识卡（{}/*.md）", id, knowledge::DIR))?;
+
+    let digest = knowledge::source_digest(ws, &card.touches).ok_or_else(|| {
+        format!(
+            "卡 `{}` 的 touches 没有命中任何文件（{}），无法绑定",
+            id,
+            card.touches.join(", ")
+        )
+    })?;
+
+    let dry = args.flag("dry-run");
+    if dry {
+        println!("{} → {}", if card.source_sha.is_empty() { "(空)".to_string() } else { card.source_sha.clone() }, digest);
+        return Ok(0);
+    }
+
+    // 卡片文件名不一定等于 id（例如 pay.md 里写 id: mod-pay）
+    let path = card.path.clone();
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读卡片失败: {}", e))?;
+    // 只替换 front-matter 里第一处 `source_sha:` 这一行
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = false;
+    for line in text.lines() {
+        if !replaced && line.trim_start().starts_with("source_sha:") {
+            out.push_str(&format!("source_sha: {}\n", digest));
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        return Err(format!("卡片 `{}` 的 front-matter 里没有 source_sha 字段", id));
+    }
+    std::fs::write(&path, out).map_err(|e| format!("写卡片失败: {}", e))?;
+
+    println!("✓ 已绑定 {} → source_sha={}", card.id, digest);
     Ok(0)
 }
 

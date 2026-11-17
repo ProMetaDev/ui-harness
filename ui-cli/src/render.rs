@@ -152,6 +152,13 @@ pub fn event_row(e: &Json) -> String {
             e.u64_at("generated_by_seq").unwrap_or(0),
             e.str_at("confirmed_by").unwrap_or("none")
         ),
+        // 记忆：这一行就是「模型为什么知道这条」的证据（照 knowledge/use 的写法）。
+        "memory/used" => format!(
+            "记忆 {} · {} · {} tok",
+            e.str_at("id").unwrap_or("?"),
+            e.str_at("reason").unwrap_or(""),
+            e.u64_at("tokens").unwrap_or(0)
+        ),
         "approval/answered" => format!(
             "{} · {}",
             e.str_at("tool").unwrap_or("?"),

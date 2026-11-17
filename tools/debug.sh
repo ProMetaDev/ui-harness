@@ -137,6 +137,7 @@ run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scru
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
 run "隔离副本 manifest（xxh 格式）" bash tools/verify_manifest.sh
+run "知识卡来源绑定（bind / STALE）" bash tools/verify_knowledge.sh
 run "干净检出的 HEAD 可构建" bash tools/verify_head_clean.sh
 run "Windows 构建 fail-closed（失败必须非零）" bash tools/verify_build_failclosed.sh
 run "Windows target 下测试代码可编译" bash tools/verify_win_tests_compile.sh
