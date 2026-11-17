@@ -685,6 +685,14 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .ff-note{margin-top:12px;padding-top:9px;border-top:1px solid var(--border);color:var(--faint);
   font-size:10.5px;line-height:1.65}
 @media (max-width:1100px){.ws-layout{grid-template-columns:1fr}.file-facts{position:static}}
+.coach{max-width:900px;margin:0 auto 12px;display:flex;align-items:center;gap:10px;padding:8px 10px;
+  border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:0 5px 5px 0;
+  background:var(--panel);color:var(--muted);font-size:11.5px;line-height:1.5}
+.coach[hidden]{display:none}
+.coach-mark{color:var(--accent);font:9.5px var(--mono);letter-spacing:.12em;flex:none}
+.coach button{margin-left:auto;flex:none;height:22px;padding:0 7px;border:1px solid var(--border);
+  border-radius:4px;background:transparent;color:var(--faint);font:10px var(--mono);cursor:pointer}
+.coach button:hover{color:var(--text);border-color:var(--border-strong)}
 .cap-toolbar{max-width:900px;margin:0 auto 10px;display:flex;align-items:center;gap:12px}
 .cap-toolbar input{flex:1;height:30px;padding:0 10px;border:1px solid var(--border);border-radius:5px;
   background:var(--panel);color:var(--text);font:11px var(--mono);outline:none}
@@ -1097,6 +1105,11 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
         <div class="mv-meta" id="wsMeta">选择左侧文件查看</div>
         <select class="ws-pick" id="wsPick" aria-label="选择文件"></select>
       </div>
+      <div class="coach" id="wsCoach" hidden>
+        <span class="coach-mark">START</span>
+        <span>预览是只读的；工具写入会先经过策略与审批，不会直接改盘。</span>
+        <button type="button" data-coach="workspace">知道了</button>
+      </div>
       <div class="mv-body">
         <div class="mv-empty" id="wsEmpty">
           <div class="mv-empty-mark">/</div>
@@ -1135,6 +1148,11 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
         </div>
         <div class="mv-meta" id="capsMeta">正在加载…</div>
       </div>
+      <div class="coach" id="capsCoach" hidden>
+        <span class="coach-mark">START</span>
+        <span>按组看能力：读=自动、写=按模式、执行=需审批；顶部搜索可以按名字或风险过滤。</span>
+        <button type="button" data-coach="caps">知道了</button>
+      </div>
       <div class="cap-toolbar">
         <input type="search" id="capFilter" placeholder="过滤工具 / 技能 / 风险" aria-label="过滤能力">
         <span id="capCount">—</span>
@@ -1148,6 +1166,11 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
           <h2>实验室</h2>
         </div>
         <div class="mv-meta" id="labMeta">扫描实验包…</div>
+      </div>
+      <div class="coach" id="labCoach" hidden>
+        <span class="coach-mark">START</span>
+        <span>实验包记录产物、输入血统和结论对账；先跑一次基准，或从左侧打开已有实验包。</span>
+        <button type="button" data-coach="lab">知道了</button>
       </div>
       <div class="mv-body" id="labOverview"></div>
     </section>
@@ -2192,9 +2215,30 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
   let currentView = 'chat';
 
+  const COACH_EL = { workspace: 'wsCoach', caps: 'capsCoach', lab: 'labCoach' };
+  function showCoach(view) {
+    const el = document.getElementById(COACH_EL[view] || '');
+    if (!el) return;
+    try { if (localStorage.getItem('ui.coach.' + view + '.v1') === '1') return; } catch (e) {}
+    el.hidden = false;
+  }
+  function hideCoach(view) {
+    const el = document.getElementById(COACH_EL[view] || '');
+    if (el) el.hidden = true;
+    try { localStorage.setItem('ui.coach.' + view + '.v1', '1'); } catch (e) {}
+  }
+  document.querySelectorAll('[data-coach]').forEach((btn) => {
+    btn.onclick = () => hideCoach(btn.dataset.coach);
+  });
+
   function show(view) {
     currentView = view;
     window.__uiView = view;
+    if (view !== 'chat') {
+      const tc = document.getElementById('tourCard');
+      if (tc && !tc.hidden) endTour();
+    }
+    if (view === 'workspace' || view === 'caps' || view === 'lab') showCoach(view);
     const live = document.getElementById('liveStrip');
     if (live) {
       if (view !== 'chat') live.hidden = true;
@@ -2341,7 +2385,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       });
       if (countEl) countEl.textContent = q ? shown + ' 项匹配' : (tools.length + skills.length) + ' 项';
     };
-    if (filterEl) filterEl.oninput = apply;
+    if (filterEl) filterEl.oninput = () => { apply(); hideCoach('caps'); };
     apply();
   }
 
@@ -2575,6 +2619,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       meta.title = d.path || path;
     }
     if (facts) facts.hidden = false;
+    hideCoach('workspace');
     const setFact = (id, value) => {
       const el = document.getElementById(id);
       if (el) el.textContent = value;
@@ -2724,6 +2769,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     const scrollEl = document.querySelector('main > .scroll');
     const composerWrap = document.querySelector('.composer-wrap');
     const labMain = document.getElementById('labMain');
+    hideCoach('lab');
     if (labMain) labMain.hidden = true;
     if (scrollEl) scrollEl.style.display = '';
     if (composerWrap) composerWrap.style.display = 'none';
@@ -2791,6 +2837,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   const labRun = document.getElementById('labRun');
   if (labRun) {
     labRun.onclick = async () => {
+      hideCoach('lab');
       try {
         const r = await (await fetch('/api/lab/run', { method: 'POST' })).json();
         if (!r.ok) setLabState(r.reason || '不能跑');
