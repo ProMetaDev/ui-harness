@@ -51,7 +51,10 @@ if command -v rustup >/dev/null 2>&1; then
   fi
 fi
 
-cd "$UI_ROOT" || exit 1
+# 必须在构建副本里跑：直接在 X: 上跑 cargo 会写 Cargo.lock，
+# 而 dev.sh 同时在 rsync X: → 副本，可能拷到写了一半的锁文件（真实踩过两次）。
+bash "$UI_ROOT/tools/sync.sh" >/dev/null
+cd "$UI_BUILD_DIR" || exit 1
 echo "== 构建 ui.exe =="
 cargo build --offline --release --target x86_64-pc-windows-gnu -p ui-cli 2>&1 | tail -6
 

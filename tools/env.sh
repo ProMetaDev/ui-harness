@@ -8,6 +8,16 @@
 UI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export UI_ROOT
 
+# 统一用 rustup 安装的 cargo。
+# 踩过：系统 cargo（老版本）读不了 rustup cargo 生成的 lockfile v4，
+# 报 "lock file version 4 requires -Znext-lockfile-bump"，看起来像仓库坏了。
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+  case ":$PATH:" in
+    *":$HOME/.cargo/bin:"*) ;;
+    *) export PATH="$HOME/.cargo/bin:$PATH" ;;
+  esac
+fi
+
 # 构建副本（cargo 在 ext4 上快得多；Windows 挂载盘上编译会很慢）
 export UI_BUILD_DIR="${UI_BUILD_DIR:-$HOME/ui}"
 # 构建产物目录

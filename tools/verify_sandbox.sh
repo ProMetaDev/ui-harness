@@ -30,9 +30,15 @@ cat > "$WS/sc.json" <<JSON
   {"content":"完成"}]}
 JSON
 
-"$UI_BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --yes >/dev/null 2>&1
+out=$("$UI_BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --yes 2>&1)
+# 有些环境「有 Landlock syscall 但 apply 失败」（容器/受限内核）。
+# 这时我们的实现会 fail closed，shell 全部失败——这是环境限制，不是回归。
+if printf '%s' "$out" | grep -q '沙箱不可用'; then
+  echo "SKIP 这个环境里 Landlock 不可用（shell 已 fail closed）。CI 上可能出现，本地 WSL 不会。"
+  exit 0
+fi
 
-[ -f "$WS/inside.txt" ] || { echo "FAIL 工作区内写不了"; exit 1; }
+[ -f "$WS/inside.txt" ] || { echo "FAIL 工作区内写不了（且不是"沙箱不可用"）"; echo "$out" | tail -3; exit 1; }
 if [ -f "$OUTSIDE" ]; then
   rm -f "$OUTSIDE"
   echo "FAIL 工作区外竟然写成功了（沙箱没生效）"

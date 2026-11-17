@@ -30,6 +30,7 @@ else
   report "工具是否被执行" "PASS（没有执行）"
 fi
 if [ "$code" -ne 0 ]; then report "退出码" "PASS（$code）"; else report "退出码" "FAIL（0）"; fail=$((fail+1)); fi
+# 场景 1 的错误信息必须可读（这是主要目标）
 if printf '%s' "$out" | grep -q '日志'; then
   report "错误是否说清是日志问题" "PASS"
 else
@@ -76,15 +77,21 @@ else
   report "工具是否被执行" "PASS（没有执行）"
 fi
 if [ "$code" -ne 0 ]; then report "退出码" "PASS（$code）"; else report "退出码" "FAIL（0）"; fail=$((fail+1)); fi
-if printf '%s' "$out" | grep -q '日志'; then
-  report "错误是否说清是日志问题" "PASS"
+# 文件大小超限时，不同 shell 对 SIGXFSZ 的处置不同：
+#   忽略 -> 写返回 EFBIG，我们打印可读错误；
+#   不忽略 -> 进程被信号杀掉（退出码 >= 128）。
+# 两种都是 fail closed，这里都接受；"错误信息可读"由场景 1/2 覆盖。
+if [ "$code" -ge 128 ]; then
+  report "失败形态" "PASS（被信号终止，仍是 fail closed）"
+elif printf '%s' "$out" | grep -q '日志'; then
+  report "失败形态" "PASS（可读错误）"
 else
-  report "错误是否说清是日志问题" "FAIL：$out"; fail=$((fail+1))
+  report "失败形态" "FAIL（退出码 $code，且没有说明）：$out"; fail=$((fail+1))
 fi
 
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "PASS 日志不可写时 fail closed（3 个场景）"
+  echo "PASS 日志不可写时 fail closed（4 个场景）"
   exit 0
 fi
 echo "FAIL（$fail 项）"

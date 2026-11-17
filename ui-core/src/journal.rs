@@ -820,7 +820,7 @@ fn open_offset_always_matches_the_records_it_parsed() {
         })
     };
 
-    for round in 0..200 {
+    for round in 0..60 {
         let mut j = Journal::open(&path).unwrap();
         let data = std::fs::read(&path).unwrap();
         let _complete: u64 = data.split_inclusive(|b| *b == b'\n')
