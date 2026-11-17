@@ -3,7 +3,7 @@
 [![ci](https://github.com/ProMetaDev/ui-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/ProMetaDev/ui-harness/actions/workflows/ci.yml)
 
 **把 agent 的每一步变成可审计的执行记录**：可校验、可回放、可崩溃对账。
-Rust 内核，零第三方依赖，单二进制 1.9 MB。
+Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二进制走，不依赖 CDN。
 
 ---
 
@@ -41,6 +41,14 @@ bash tools/debug.sh       # 46 项门禁：构建 + 端到端 + 攻击场景 + �
 ```
 $ ui --version
 ui 1.0.0 (commit 0000000, built 2026-11-17)
+```
+
+网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：
+
+```bash
+cargo build --release
+./target/release/ui serve --workspace . --port 7788
+# 打开终端打印的 http://127.0.0.1:7788/?t=…
 ```
 
 真实模型接上就能用（任何 OpenAI 兼容端点）：
@@ -83,15 +91,30 @@ $ bash tools/kit.sh
 
 ## 界面
 
-终端（`ui tui`）与网页（`ui serve`）共用同一套状态：同一个内核、同一份日志。
+终端（`ui tui`）与网页（`ui serve`）共用同一套状态：同一个内核、同一份日志、同一套策略。
 
-![网页端](docs/images/chat.png)
+![网页端 · 对话与 step trace](docs/images/chat.png)
 
-真实对话里每一次工具调用都带决策与结果（上图第三条是 shell 被批准后执行）。
+网页端不是“聊天页加几个侧栏”，而是四个工作台：
 
-| 实验室（`ui lab`） | 会话（多会话互不干扰） |
+| 对话 / step trace | 工作区 |
 |---|---|
-| ![实验室](docs/images/lab.png) | ![会话](docs/images/sessions.png) |
+| 日志、决策、审批、`+41ms` 耗时、遥测状态栏 | 文件树 + 只读预览 + 行号 + 复制/换行 |
+| ![对话](docs/images/chat.png) | ![工作区](docs/images/workspace.png) |
+
+| 能力矩阵 | 实验室 |
+|---|---|
+| 文件 / 执行 / 外部 / 状态 / 元五组，effect + 审批门 + 搜索 | 实验包、报告、空/错/加载三态 |
+| ![能力](docs/images/capabilities.png) | ![实验室](docs/images/lab.png) |
+
+首开有 3 步教练，工作区 / 能力 / 实验室各有一次性上下文提示；`?` 或 `⋯ → 重新看引导` 可重开。
+
+![首开引导](docs/images/onboarding.png)
+
+设计约束（配色、树结构、动效、背景板）在 [docs/03-frontend.md](docs/03-frontend.md)；
+实验室血缘 DAG 的独立原型在 [design/lab-lineage.html](design/lab-lineage.html)，目前是静态样例，未接生产数据：
+
+![实验室血缘原型](docs/images/lineage.png)
 
 ## 主要命令
 
@@ -138,7 +161,8 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 ## 状态与许可
 
 - **v1.0.0** · **195 个测试** · **46 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
-- 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验），
-  但**没有 OS 沙箱**，也没有经过第三方评审。
+- 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
+  Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
+  但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。
 - 版本演进见 [CHANGELOG.md](CHANGELOG.md)；设计笔记在 [docs/](docs/)。
 - 许可证：Apache-2.0。
