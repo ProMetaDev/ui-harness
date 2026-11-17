@@ -8,6 +8,7 @@
 //!   ui preview                render one full-screen frame (no tty needed)
 
 mod frame;
+mod knowledge;
 mod render;
 mod lab;
 mod providers;
@@ -305,8 +306,9 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
         Some("policy") => cmd_policy(&args),
+        Some("knowledge") => knowledge::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|skills|workflow|apply|policy）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|skills|workflow|apply|policy|knowledge）",
             other
         )),
         None => {
@@ -336,6 +338,10 @@ fn help() -> String {
      ui lab claim --name acc --value 0.9   声明结论（必须被产物背书）\n\
      ui lab verify <包目录>       校验：产物哈希 / 输入版本 / 结论 / 日志链\n\
      ui lab table <包...>         多 seed 对照表（输入不一致拒绝求均值）\n\
+     ui knowledge list            列出 docs/knowledge 下的知识卡（id/确认位/来源 sha/touches）\n\
+     ui knowledge check           校验卡上的 source_sha 与 touches 命中文件是否一致（STALE 退 2）\n\
+     ui knowledge use <id> --reason \"...\"   手工写一条 knowledge/use（验证证据链）\n\
+     ui knowledge emit <id>       写一条 knowledge/emit（卡片来源绑定 + 确认位）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
@@ -1217,6 +1223,12 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     }
     // `--skills a,b`：并行子代理或脚本化调用时，直接在开场前预加载
     preload_skills(&mut agent, &ws, &skill_list(args))?;
+    // K2：任务开始前做一次**确定性**知识预取。
+    // 命中 → 正文拼进首个提示词前 + 每张卡一条 knowledge/use；未命中 → 行为与之前完全一致。
+    let task = match knowledge::prefetch_for_run(&mut agent, &ws, &task, knowledge::MAX_PREFETCH)? {
+        Some(block) => format!("{}\n任务：{}", block, task),
+        None => task,
+    };
     let mut hooks = ConsoleHooks::new(args.flag("yes"), false);
 
     // 取消传播：父进程（或包装它的工作流）一死，stdin 管道关闭 → 读到 EOF → 自我取消
@@ -2982,8 +2994,8 @@ struct ChildResult {
 }
 
 /// 隔离副本里不需要的东西：日志、产物、依赖、node_modules
-const ISOLATE_SKIP: &[&str] = &[".ui", "out", "target", "node_modules", ".git", "secrets"];
-const MAX_COMPARE_BYTES: u64 = 2 * 1024 * 1024;
+// 跳过列表与比对侧共用一份，避免"复制了但永远扫不到"
+const ISOLATE_SKIP: &[&str] = ui_core::isolate::SKIP;
 
 /// 复制并**在同一次读取里**算出哈希。
 ///
@@ -3089,7 +3101,11 @@ fn copy_tree(
             bytes += n;
             files += 1;
             if let (Ok(rel), Some(h)) = (from.strip_prefix(root), hash) {
-                manifest.push((rel.to_string_lossy().to_string(), h));
+                // 键格式与读取侧（ui_core::isolate::rel_key）保持一致
+                manifest.push((
+                    ui_core::isolate::rel_key(&rel.to_string_lossy()),
+                    h,
+                ));
             }
         }
     }
@@ -3134,12 +3150,24 @@ fn run_parallel(
                 let mut manifest: Vec<(String, String)> = Vec::new();
                 match copy_tree(&ws, &copy, &ws, &mut manifest) {
                     Ok(_) => {
+                        // manifest 是漂移检测的唯一依据：写不进去就必须失败，
+                        // 不能 `let _ =` 吞掉——否则 changed 会变成"整个副本"，
+                        // apply 全部判漂移，子代理的改动一个也合不回来。
                         let text = manifest
                             .iter()
                             .map(|(rel, h)| format!("{}\t{}", rel, h))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let _ = std::fs::write(agent_root.join("manifest.txt"), text);
+                        if let Err(e) = std::fs::write(agent_root.join("manifest.txt"), text) {
+                            return ChildResult {
+                                id,
+                                ok: false,
+                                summary: format!("写 manifest 失败: {}", e),
+                                journal: agent_root.join("journal.txt"),
+                                workdir: None,
+                                changed: Vec::new(),
+                            };
+                        }
                         Some(copy)
                     }
                     Err(e) => {

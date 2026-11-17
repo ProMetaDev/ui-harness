@@ -14,6 +14,27 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
+/// 副本里**不复制、也不扫描**的目录名。
+///
+/// 必须是唯一来源：复制侧（`copy_tree`）和比对侧（`changed_files`）用同一份，
+/// 否则会出现"复制进去了但永远扫不到"的静默丢失。
+/// 特别注意 `secrets`：它不进副本，子代理在副本里新建的 `secrets/*` 也就不该被合并回去。
+pub const SKIP: &[&str] = &[".ui", "out", "target", "node_modules", ".git", "secrets"];
+
+/// manifest 的键格式：统一用 `/` 作分隔符。
+///
+/// 只在 Windows 上转换——Linux 的合法文件名可以包含字面 `\`，
+/// 无条件替换会把 `a\b` 错当成目录 `a/b`。
+#[cfg(windows)]
+pub fn rel_key(rel: &str) -> String {
+    rel.replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+pub fn rel_key(rel: &str) -> String {
+    rel.to_string()
+}
+
 /// 与 manifest 里同样的算法与格式（`xxh:<16 hex>`）。
 pub fn hash_file(path: &Path) -> Option<String> {
     let mut f = std::fs::File::open(path).ok()?;
@@ -48,7 +69,7 @@ fn walk(root: &Path, dir: &Path, manifest: &HashMap<String, String>, out: &mut V
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if crate::observe::SKIP_DIRS.contains(&name.as_str()) {
+        if SKIP.contains(&name.as_str()) {
             continue;
         }
         let path = entry.path();
@@ -57,7 +78,7 @@ fn walk(root: &Path, dir: &Path, manifest: &HashMap<String, String>, out: &mut V
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let key = rel.to_string_lossy().replace('\\', "/");
+        let key = rel_key(&rel.to_string_lossy());
         let unchanged = match (manifest.get(&key), hash_file(&path)) {
             (Some(expected), Some(now)) => expected == &now,
             _ => false,
@@ -144,6 +165,57 @@ mod tests {
         fs::create_dir_all(d.join("target")).unwrap();
         fs::write(d.join("target/x.o"), "junk").unwrap();
         assert!(changed_files(&d, &HashMap::new()).is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn experiments_changes_are_detected() {
+        // 回归（对抗复查抓到）：比对侧曾用 observe::SKIP_DIRS，
+        // 它把 experiments/ 排除在外，但复制侧会把它复制进去——
+        // 于是子代理在默认实验包目录里的改动被静默丢弃。
+        let d = tmp("experiments");
+        fs::create_dir_all(d.join("experiments")).unwrap();
+        let f = d.join("experiments/e.json");
+        fs::write(&f, "{\"v\":1}").unwrap();
+        let m = manifest_of(&d, "experiments/e.json");
+        assert!(changed_files(&d, &m).is_empty(), "没改不该报");
+
+        fs::write(&f, "{\"v\":2}").unwrap();
+        assert_eq!(changed_files(&d, &m), vec!["experiments/e.json".to_string()]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn secrets_are_never_tracked() {
+        // 反向：secrets 不在副本里，子代理在副本里新建的 secrets/* 也不该被合并回去
+        let d = tmp("secrets");
+        fs::create_dir_all(d.join("secrets")).unwrap();
+        fs::write(d.join("secrets/token.txt"), "leak").unwrap();
+        assert!(changed_files(&d, &HashMap::new()).is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nested_paths_round_trip_through_the_manifest() {
+        // 回归（Windows）：写入侧曾用原始路径、读取侧把 `\` 换成 `/`，
+        // 子目录文件全部 miss → apply 判漂移 → 改动不回写。
+        let d = tmp("nested");
+        fs::create_dir_all(d.join("src/pay")).unwrap();
+        let f = d.join("src/pay/a.py");
+        fs::write(&f, "one").unwrap();
+
+        let key = rel_key("src/pay/a.py");
+        let mut m = HashMap::new();
+        m.insert(key.clone(), hash_file(&f).unwrap());
+        assert!(changed_files(&d, &m).is_empty(), "键格式不一致会误判为改动");
+
+        fs::write(&f, "two").unwrap();
+        assert_eq!(changed_files(&d, &m), vec![key]);
+
+        // Linux 上合法文件名可以包含字面反斜杠：rel_key 不能把它当目录分隔符改写，
+        // 否则这个文件永远 manifest miss（只有 Windows 才需要归一化）。
+        #[cfg(not(windows))]
+        assert_eq!(rel_key(r"a\b"), r"a\b");
         let _ = fs::remove_dir_all(&d);
     }
 }

@@ -43,7 +43,8 @@
 | 收益 | 风险 |
 |---|---|
 | 哈希 0.27 s → **约 0.03 s**，3 副本 1040 ms → **约 800 ms** | 64 位碰撞概率 1e-19 量级，且只用于"是否改动"判断，不背审计结论 |
-| 语义零变化，测试几乎不用改 | 需要处理旧 manifest（按长度识别：64 hex = sha256，16 hex = xxh） |
+| 判据仍是内容，不是时间 | 需要处理旧 manifest（按长度识别：64 hex = sha256，16 hex = xxh） |
+|  | **不是"语义零变化"**：跳过目录表要统一、删除仍不合并（见下方复查记录） |
 
 ### 方案 A：惰性哈希（不算，只记 size+mtime）
 
@@ -88,7 +89,7 @@ B 的价值会进一步放大。ext4（当前 WSL 的工作区）不支持，所
 5. 测试：
    - 复制后 manifest 与源文件一致（同文件 → 同值）；
    - 内容改一个字节 → 值变；
-   - `--isolate` 全流程 + `apply` 冲突/漂移两个闸仍然工作（现有 `verify_team` / `verify_accept` 覆盖）；
+   - `--isolate` 全流程 + `apply` 冲突/漂移两个闸仍然工作（真正的端到端覆盖是 `tools/debug.sh` 里的 `check_isolate_apply`）；
    - 旧 manifest（64 hex）仍能被读出并参与比较。
 6. 基准：`tools/bench_observe.sh` 旁边加一个 `tools/bench_isolate.sh`，
    对 94 MB / 8000 文件跑 3 副本，记录中位数。
@@ -147,4 +148,34 @@ WSL2 的墙钟会被 Hyper-V 时间同步校正，偶发**向后跳**，用 `dat
 
 1. **删除不会被合并**：子代理删掉文件，`changed` 里不会出现，父工作区该文件保留。
 2. `verify_team.sh` **没有任何断言**，只打印输出——它在门禁里"通过"并不证明协作模式正确。
-   真正的行为断言在 `ui-core` 的单元测试和 `verify_accept` 里。
+   真正的行为断言在 `ui-core` 的单元测试、`tools/debug.sh` 的 `check_isolate_apply`、
+   以及 `tools/verify_manifest.sh` 里。
+
+## 对抗复查抓到的问题（已修）
+
+提交 `709fa34` 之后另开一路做了只读复查，抓到**两个真回归**和一个新的失败模式。
+都修了，并各补了能钉住它们的测试。
+
+| # | 问题 | 触发条件 | 后果 | 修法 |
+|---|---|---|---|---|
+| P1 | 比对侧用 `observe::SKIP_DIRS`、复制侧用 `ISOLATE_SKIP`，两张表不一致 | 工作区有 `experiments/`（本产品默认实验包目录）、`dist/`、`.venv/`、`__pycache__/` | 这些目录**会被复制进副本却不参与比对**，子代理的改动静默丢失，日志写"没有改动任何文件" | `ui_core::isolate::SKIP` 成为唯一来源，复制与比对共用；测试 `experiments_changes_are_detected` |
+| P1b | 反向：`secrets` 在复制跳过表里、却不在比对跳过表里 | 子代理在副本里新建 `secrets/*` | 会被 `apply` 回写进真实 `secrets/` | 同上，`secrets` 现在两侧都跳过；测试 `secrets_are_never_tracked` |
+| P2 | manifest 写入侧用原始路径、读取侧把 `\` 换成 `/` | Windows + 隔离子代理 + 子目录里的已有文件被改 | 全部 manifest miss → `apply` 判漂移（退出码 4），**改过的文件一个都不回写** | 两侧统一走 `ui_core::isolate::rel_key`（只在 Windows 归一化）；测试 `nested_paths_round_trip_through_the_manifest` |
+| P3 | manifest 写入失败被 `let _ =` 吞掉 | 磁盘满 / `.ui` 只读 | manifest 缺失 → `changed` 变成整个副本 → 上千条假改动，`apply` 全判漂移 | 写失败直接把该子代理标 `ok=false` 并说明原因 |
+
+复查还纠正了两处**我自己写错的文档**：
+
+- "语义零变化"是假的（跳过表变了、删除仍不合并）；
+- "由 `verify_team` / `verify_accept` 覆盖"是错的（`verify_team` 连 `--isolate` 都没传）。
+
+### 这个改动的代价（之前没写）
+
+修掉 >2MB 盲区后，**收尾阶段要把每个副本完整读一遍**（算哈希）。
+对有大数据集/模型权重的工作区，收尾 I/O 与复制本身同量级；3 个代理就是 3 遍。
+这是"正确性换 I/O"，不是免费的性能提升。
+
+### 基准口径的实话
+
+`tools/bench_isolate.sh` 每组 5 次、**顺序跑不交错**，计时包含进程启动与 mock 模型步骤；
+工作区是 8000 个 10 KB 文件（`du` 约 94 MB，含目录开销）。中位数取法没问题，
+但同机 warm cache 下 ±30 ms 的抖动是正常的——**-20% 是大致量级，不是精确值**。
