@@ -131,12 +131,16 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
             Ok(t) => t,
             Err(_) => corrupt!(true, Some(report.last_seq), format!("第 {} 行不是合法 UTF-8（撕裂）", line_no)),
         };
-        let event = match json::parse(text) {
-            Ok(v) => v,
-            Err(e) => corrupt!(false, Some(expected_seq), format!("第 {} 行不是 JSON: {}", line_no, e)),
+
+        // 只取四个字段（seq/prev/kind/callId），不解析整条事件。
+        // 日志里 prompt/snapshot 这类事件很大，而校验根本不需要它们的内容——
+        // 完整解析它们纯属浪费（实测 30 万条时占了大头）。
+        let fields = match scan_fields(line) {
+            Some(f) => f,
+            None => corrupt!(false, Some(expected_seq), format!("第 {} 行不是合法 JSON", line_no)),
         };
 
-        let seq = event.u64_at("seq").unwrap_or(0);
+        let seq = fields.seq;
         if seq != expected_seq {
             corrupt!(
                 false,
@@ -144,7 +148,7 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
                 format!("seq 不连续：期望 {}，实际 {}", expected_seq, seq)
             );
         }
-        if event.str_at("prev").unwrap_or("") != prev {
+        if fields.prev != prev {
             corrupt!(false, Some(seq), "prev 与上一条的 hash 不接".to_string());
         }
 
@@ -159,11 +163,13 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
         report.last_seq = seq;
         report.events += 1;
 
-        match event.str_at("kind").unwrap_or("") {
+        // 只有这两类事件需要完整解析（resume 要拿 args）
+        match fields.kind.as_str() {
             "turn/start" => {
                 report.turns += 1;
-                open_turn = Some(event.u64_at("turn").unwrap_or(0));
-                open_turn_event = Some(event.clone());
+                let turn_no = fields.turn.unwrap_or(0);
+                open_turn = Some(turn_no);
+                open_turn_event = json::parse(text).ok();
             }
             "turn/end" => {
                 open_turn = None;
@@ -171,12 +177,14 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
             }
             "tool/start" => {
                 report.tool_starts += 1;
-                let id = event.str_at("callId").unwrap_or("?").to_string();
+                let id = fields.call_id.clone().unwrap_or_else(|| "?".to_string());
                 open.insert(id.clone());
-                open_events.insert(id, event.clone());
+                if let Ok(ev) = json::parse(text) {
+                    open_events.insert(id, ev);
+                }
             }
             "tool/end" => {
-                let id = event.str_at("callId").unwrap_or("?").to_string();
+                let id = fields.call_id.clone().unwrap_or_else(|| "?".to_string());
                 open.remove(&id);
                 open_events.remove(&id);
             }
@@ -210,3 +218,239 @@ pub(crate) fn trailing_hash(line: &[u8]) -> Option<(usize, String)> {
     }
     Some((start, hex.to_string()))
 }
+
+/// 校验只需要这几个字段。不解析完整 JSON——日志里 prompt/snapshot 这类
+/// 事件很大，完整解析它们纯属浪费。
+struct Fields {
+    seq: u64,
+    prev: String,
+    kind: String,
+    call_id: Option<String>,
+    turn: Option<u64>,
+}
+
+/// 扫描一条事件里的少数顶层字段。
+///
+/// 只认「顶层、值为字符串或整数」的写法；遇到转义、嵌套或任何看不懂的结构
+/// 就返回 None，由调用方退回完整解析——**宁可慢一点，也不能把坏日志判成好的**。
+fn scan_fields(line: &[u8]) -> Option<Fields> {
+    let mut seq: Option<u64> = None;
+    let mut prev: Option<String> = None;
+    let mut kind: Option<String> = None;
+    let mut call_id: Option<String> = None;
+    let mut turn: Option<u64> = None;
+
+    let mut i = 0usize;
+    let n = line.len();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    // 当前字符串（键或值）的起点
+    let mut str_start = 0usize;
+    // 上一个结束的字符串是不是键
+    let mut last_was_key: Option<String> = None;
+
+    while i < n {
+        let b = line[i];
+        if in_string {
+            if escaped {
+                // 这些字段的值不该出现转义；出现了就不猜，退回完整解析
+                return None;
+            }
+            if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+                let s = std::str::from_utf8(&line[str_start..i]).ok()?;
+                if depth == 1 {
+                    match last_was_key.take() {
+                        None => last_was_key = Some(s.to_string()),
+                        Some(_) => {}
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                escaped = false;
+                str_start = i + 1;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > 1 {
+                    // 嵌套结构：这里不处理
+                    return None;
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            b':' => {
+                // 键后面是值：只对需要的键取值，其余直接跳过（不分配字符串）
+                if depth == 1 {
+                    if let Some(key) = last_was_key.take() {
+                        let val_start = i + 1;
+                        match key.as_str() {
+                            "seq" => {
+                                let (num, next) = read_number(line, val_start)?;
+                                seq = Some(num);
+                                i = next;
+                                continue;
+                            }
+                            "turn" => {
+                                let (num, next) = read_number(line, val_start)?;
+                                turn = Some(num);
+                                i = next;
+                                continue;
+                            }
+                            "prev" | "kind" | "callId" => {
+                                let (s, next) = read_simple_string(line, val_start)?;
+                                match key.as_str() {
+                                    "prev" => prev = Some(s),
+                                    "kind" => kind = Some(s),
+                                    _ => call_id = Some(s),
+                                }
+                                i = next;
+                                continue;
+                            }
+                            _ => {
+                                i = skip_value(line, val_start)?;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    Some(Fields {
+        seq: seq?,
+        prev: prev?,
+        kind: kind.unwrap_or_default(),
+        call_id,
+        turn,
+    })
+}
+
+/// 读一个整数字段，返回 (值, 下一个位置)。
+fn read_number(line: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut i = start;
+    while i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    let from = i;
+    while i < line.len() && line[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == from {
+        return None;
+    }
+    let s = std::str::from_utf8(&line[from..i]).ok()?;
+    Some((s.parse::<u64>().ok()?, i))
+}
+
+/// 读一个**不含转义**的字符串字段，返回 (值, 下一个位置)。
+fn read_simple_string(line: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut i = start;
+    while i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    if i >= line.len() || line[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let from = i;
+    while i < line.len() {
+        match line[i] {
+            b'\\' => return None, // 有转义：不猜，交给调用方
+            b'"' => {
+                let s = std::str::from_utf8(&line[from..i]).ok()?.to_string();
+                return Some((s, i + 1));
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// 跳过一个值（字符串/数字/对象/数组/字面量），返回下一个位置。
+fn skip_value(line: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    if i >= line.len() {
+        return None;
+    }
+    match line[i] {
+        b'"' => {
+            i += 1;
+            let mut esc = false;
+            while i < line.len() {
+                match line[i] {
+                    b'\\' => {
+                        esc = !esc;
+                        i += 1;
+                    }
+                    b'"' => {
+                        if esc {
+                            esc = false;
+                            i += 1;
+                        } else {
+                            return Some(i + 1);
+                        }
+                    }
+                    _ => {
+                        esc = false;
+                        i += 1;
+                    }
+                }
+            }
+            None
+        }
+        b'{' | b'[' => {
+            let mut depth = 0i32;
+            let mut in_str = false;
+            let mut esc = false;
+            while i < line.len() {
+                let c = line[i];
+                if in_str {
+                    if esc {
+                        esc = false;
+                    } else if c == b'\\' {
+                        esc = true;
+                    } else if c == b'"' {
+                        in_str = false;
+                    }
+                } else {
+                    match c {
+                        b'"' => in_str = true,
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(i + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            while i < line.len() && line[i] != b',' && line[i] != b'}' {
+                i += 1;
+            }
+            Some(i)
+        }
+    }
+}
+
