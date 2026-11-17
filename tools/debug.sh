@@ -136,6 +136,7 @@ run "日志不可写（必须 fail closed）" bash tools/verify_failclosed.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
+run "隔离副本 manifest（xxh 格式）" bash tools/verify_manifest.sh
 run "导出查看器并校验" check_viewer
 
 echo
