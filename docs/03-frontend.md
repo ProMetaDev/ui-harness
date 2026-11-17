@@ -16,6 +16,7 @@
 - **空状态**：Pre-flight + 三个真实入口 + workspace readiness；
 - **主题**：暗色炭黑 + 单琥珀；明色暖纸；`auto` 跟随系统；
 - **动效**：日志逐条上浮、分段条生长、决策点弹出、审批条上浮、盖章；系统 `prefers-reduced-motion` 时全部关闭；工具行可键盘展开。
+- **顺滑**：流式 delta 按帧合并、滚动用 `requestAnimationFrame` 合并、右栏决策只让**新增项**入场、分段条只在首帧生长、工具展开做高度过渡、审批退场 160ms——避免“每来一个事件整块重绘”的卡顿。
 
 验收截图：`out/web-final-dark.png` / `web-final-light.png` / `web-final-empty.png` / `web-final-1280.png`。
 

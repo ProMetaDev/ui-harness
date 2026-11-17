@@ -524,6 +524,7 @@ main{padding:0;overflow:hidden}
 .side-title .brand-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .side-sub{padding:0 16px 12px;font-size:10.5px;letter-spacing:.02em;color:var(--faint)}
 .side-body{padding:0 10px 14px}
+.side-body.view-in{animation:v2fade .2s var(--ease-out)}
 .side-sec{margin:16px 6px 7px;font-size:9.5px;letter-spacing:.14em}
 .side-item{font-size:12.5px;padding:7px 8px;border-radius:5px}
 .side-item:hover{background:var(--panel);color:var(--text)}
@@ -580,8 +581,9 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .row.tool .tag{height:17px;margin:0;padding:0 5px;border-radius:3px;font:500 9.5px/17px var(--mono)}
 .row.tool .tooldetail{color:var(--faint);font:10.5px/1.6 var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row.tool .dot{width:6px;height:6px}
-.row.tool .tool-full{display:none;grid-column:2;min-width:0}
-.row.tool.open .tool-full{display:block;animation:v2fade .2s var(--ease-out)}
+.row.tool .tool-full{display:block;grid-column:2;min-width:0;max-height:0;opacity:0;overflow:hidden;
+  transition:max-height .3s var(--ease-out),opacity .18s var(--ease-out)}
+.row.tool.open .tool-full{max-height:320px;opacity:1}
 .row.tool .full{margin:4px 0 0 12px;padding:8px 10px;border:1px solid var(--border);border-left:2px solid var(--accent);
   border-radius:0 5px 5px 0;background:var(--bg);font:11px/1.7 var(--mono);color:var(--text);
   max-height:240px;overflow:auto;white-space:pre-wrap}
@@ -609,6 +611,8 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .approval pre{margin:6px 0 0;padding:7px 9px;background:var(--bg);border:1px solid var(--border);
   border-radius:4px;font:10.5px/1.55 var(--mono);color:var(--text);max-height:120px;overflow:auto}
 .approval .acts kbd{font:9.5px var(--mono);opacity:.7;margin-left:3px}
+.approval button:disabled{opacity:.5;cursor:default}
+.approval.leaving{animation:v2gate-out .16s var(--ease-soft) forwards}
 .approval .acts{display:flex;align-items:center;gap:6px;padding:8px 12px}
 .approval .acts button{height:28px;font-size:11.5px;border-radius:5px}
 .approval .acts button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
@@ -619,6 +623,9 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
   background:radial-gradient(circle,var(--accent-soft),transparent 70%);opacity:.55}
 .insp-head{position:relative;z-index:1;padding:14px 16px 10px;display:flex;align-items:flex-start;gap:10px}
 .stepno{font:500 26px/1 var(--mono);letter-spacing:-.06em;color:var(--text)}
+.stepno.tick{animation:v2tick .32s var(--ease-out)}
+@keyframes v2tick{0%{opacity:.35;transform:translateY(-4px)}100%{opacity:1;transform:none}}
+@keyframes v2gate-out{to{opacity:0;transform:translateY(6px)}}
 .insp-head .lbl{padding-top:3px}
 .insp-head .st{margin-top:3px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
 .insp-head .st b{font-weight:500;color:var(--muted)}
@@ -627,7 +634,13 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .blk .blk-head .v{margin-left:auto;font:9.5px var(--mono);color:var(--faint)}
 .hr{height:1px;background:var(--border);margin:13px 0}
 .segbar{display:flex;height:8px;border-radius:3px;overflow:hidden;background:var(--border);gap:1px;position:relative}
-.segbar i{display:block;height:100%;transform-origin:left;animation:v2grow .8s var(--ease-out) both}
+.segbar i{display:block;height:100%;transform-origin:left;transition:width .45s var(--ease-out)}
+.segbar.is-first i{animation:v2grow .8s var(--ease-out) both}
+.segbar.is-first i:nth-child(1){animation-delay:.12s}
+.segbar.is-first i:nth-child(2){animation-delay:.18s}
+.segbar.is-first i:nth-child(3){animation-delay:.24s}
+.segbar.is-first i:nth-child(4){animation-delay:.30s}
+.segbar.is-first i:nth-child(5){animation-delay:.36s}
 .segbar i.s0{background:var(--accent)} .segbar i.s1{background:var(--accent-2,#c9862f);opacity:.8}
 .segbar i.s2{background:var(--accent-2,#c9862f);opacity:.55} .segbar i.s3{background:var(--border-strong)}
 .segbar i.s4{background:var(--faint)}
@@ -643,11 +656,13 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .secrow .id{font:11px var(--mono);color:var(--text);overflow:hidden;text-overflow:ellipsis}
 .secrow .own{font:9.5px var(--mono);color:var(--faint);text-align:right;overflow:hidden;text-overflow:ellipsis}
 .secrow .tk{font:10px var(--mono);color:var(--muted);text-align:right}
-.dec{position:relative;padding-left:14px;margin-left:2px;padding-bottom:9px;animation:v2rise .34s var(--ease-out) both}
+.dec{position:relative;padding-left:14px;margin-left:2px;padding-bottom:9px}
+.dec.is-new{animation:v2rise .34s var(--ease-out) both}
 .dec::before{content:"";position:absolute;left:0;top:5px;bottom:-4px;width:1px;background:var(--border)}
 .dec:last-child::before{display:none}
 .dec .dd{position:absolute;left:-2px;top:4px;width:5px;height:5px;border-radius:50%;background:var(--border);
-  border:1px solid var(--bg);animation:v2pop .34s var(--ease-out) both}
+  border:1px solid var(--bg)}
+.dec.is-new .dd{animation:v2pop .34s var(--ease-out) both}
 .dec.allow .dd{background:var(--ok)} .dec.ask .dd{background:var(--warn)} .dec.deny .dd{background:var(--bad)}
 .dec .r1{display:flex;align-items:center;gap:6px;font-size:11px}
 .dec .r1 .t{font:500 11px var(--mono);color:var(--text)}
@@ -664,7 +679,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .budget .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s var(--ease-out)}
 .budget .pct{width:30px;text-align:right;font:9.5px var(--mono);color:var(--faint)}
 .queue-item{display:flex;gap:8px;align-items:flex-start;padding:7px 8px;border:1px solid var(--border);
-  border-radius:5px;background:var(--panel)}
+  border-radius:5px;background:var(--panel);animation:v2fade .2s var(--ease-out)}
 .queue-item .qt{font:11px var(--mono);color:var(--text)}
 .queue-item .qs{margin-top:2px;font-size:10px;color:var(--faint);line-height:1.5}
 .insp-foot{padding:9px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;
@@ -685,7 +700,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 
 /* empty / preflight */
 .empty{max-width:980px;display:none;margin:0 auto;padding:0}
-.empty.show{display:block}
+.empty.show{display:block;animation:v2fade .25s var(--ease-out)}
 .empty-grid{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:32px;align-items:start;
   margin-top:6vh;padding:0 30px}
 .preflight{position:relative;padding-top:4px}
@@ -721,7 +736,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .prep-foot .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
 
 /* lab doc */
-.doc{max-width:820px;margin:0 auto;padding:4px 0 28px;color:var(--text)}
+.doc{max-width:820px;margin:0 auto;padding:4px 0 28px;color:var(--text);animation:v2fade .22s var(--ease-out)}
 .doc-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
 .doc-bar .name{font:600 13px var(--mono);color:var(--text)}
 .doc-bar .back{margin-left:auto;padding:4px 10px;border-radius:5px;border:1px solid var(--border);
@@ -731,6 +746,7 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 
 /* status bar */
 .statusbar{background:var(--panel);color:var(--muted);border-top:1px solid var(--border);font:10.5px/1 var(--mono);gap:14px}
+.statusbar .dot{transition:background-color .2s var(--ease-soft)}
 .statusbar .pill{background:var(--accent);color:var(--on-accent);border-radius:3px;padding:2px 6px}
 .statusbar .dot.busy{background:var(--warn);animation:v2pulse 1.9s ease-in-out infinite}
 
@@ -1210,6 +1226,12 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     b.textContent = text;
   }
 
+  // 流式增量按帧合并：SSE 一秒可能几十条，逐条写 DOM 会让主线程忙
+  let deltaRaf = 0;
+  function flushDelta() {
+    deltaRaf = 0;
+    if (live) live.bubble.textContent = live.text;
+  }
   function addDelta(text) {
     if (!text) return;
     if (!live) {
@@ -1217,7 +1239,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       live = { row: b.parentElement, bubble: b, tsEl: b.tsEl, text: '' };
     }
     live.text += text;
-    live.bubble.textContent = live.text;
+    if (!deltaRaf) deltaRaf = requestAnimationFrame(flushDelta);
   }
 
   // 只调工具、content 为空的回复没有 assistant 事件：把只含原始增量的
@@ -1256,7 +1278,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       open = !open;
       b.setAttribute('aria-expanded', String(open));
       b.parentElement.classList.toggle('open', open);
-      if (!open) { holder.innerHTML = ''; return; }
+      if (!open) return; // 保留已取到的内容，收起只靠 CSS 高度过渡
       if (cached === null) {
         holder.innerHTML = '<pre class="full">加载中…</pre>';
         try {
@@ -1282,10 +1304,20 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   }
 
   // 只有用户本来就在底部时才自动滚动，否则读历史时会被拽走
+  // 合并到下一帧：流式 delta 可能每秒几十条，逐条读 scrollHeight 会强制布局
+  let scrollQueued = false;
+  let scrollForce = false;
   function scrollDown(force) {
-    const main = document.querySelector('main > .scroll') || document.querySelector('main');
-    const near = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
-    if (force || near) main.scrollTop = main.scrollHeight;
+    scrollForce = scrollForce || !!force;
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      const main = document.querySelector('main > .scroll') || document.querySelector('main');
+      const near = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+      if (scrollForce || near) main.scrollTop = main.scrollHeight;
+      scrollForce = false;
+    });
   }
 
   const stopBtn = document.getElementById('stop');
@@ -1329,7 +1361,9 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     for (const btn of box.querySelectorAll('button')) {
       btn.onclick = async () => {
         const verdict = btn.dataset.v;
-        box.remove();
+        box.classList.add('leaving');
+        for (const b of box.querySelectorAll('button')) b.disabled = true;
+        setTimeout(() => box.remove(), 160);
         resolveDecision(box.dataset.callId, verdict);
         clearQueue();
         await fetch('/api/approve', {
@@ -1386,6 +1420,8 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   const queueCountEl = document.getElementById('queueCount');
   let stepCount = 0;
   let decisions = [];
+  let seenDecisions = new Set();
+  let firstSnapshot = true;
 
   function setStep(text, cls) {
     if (stepStateEl) {
@@ -1400,6 +1436,9 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   function beginTurn() {
     stepCount = 0;
     decisions = [];
+    seenDecisions = new Set();
+    firstSnapshot = true;
+    if (ctxBarEl) { ctxBarEl.classList.remove('is-first'); delete ctxBarEl.dataset.animated; }
     if (stepNoEl) stepNoEl.textContent = '—';
     if (decCountEl) decCountEl.textContent = '0';
     if (decisionListEl) decisionListEl.innerHTML = '<div class="empty-note">还没有工具调用</div>';
@@ -1408,7 +1447,12 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
 
   function renderSnapshot(ev) {
     stepCount += 1;
-    if (stepNoEl) stepNoEl.textContent = String(stepCount).padStart(2, '0');
+    if (stepNoEl) {
+      stepNoEl.textContent = String(stepCount).padStart(2, '0');
+      stepNoEl.classList.remove('tick');
+      void stepNoEl.offsetWidth;
+      stepNoEl.classList.add('tick');
+    }
     const sections = ev.sections || [];
     const total = sections.reduce((n, s) => n + Number(s.tokens || 0), 0) || 1;
     if (ctxMetaEl) {
@@ -1416,10 +1460,17 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
         Math.round(Number(ev.bytes || 0) / 102.4) / 10 + ' KB';
     }
     if (ctxBarEl) {
+      // 只有第一步播放“生长”；后续快照只更新宽度，避免每次 step 都重播动画
+      if (firstSnapshot && !ctxBarEl.dataset.animated) {
+        ctxBarEl.classList.add('is-first');
+        ctxBarEl.dataset.animated = '1';
+        setTimeout(() => ctxBarEl && ctxBarEl.classList.remove('is-first'), 1000);
+      }
       ctxBarEl.innerHTML = sections.map((s, i) =>
         '<i class="s' + (i % 5) + '" style="width:' +
         Math.max(2, Math.round((Number(s.tokens || 0) / total) * 100)) + '%"></i>'
       ).join('');
+      firstSnapshot = false;
     }
     if (ctxSectionsEl) {
       ctxSectionsEl.innerHTML = sections.map((s, i) =>
@@ -1440,13 +1491,15 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     }
     decisionListEl.innerHTML = decisions.map((d) => {
       const v = String(d.decision || 'ask');
-      return '<div class="dec ' + v + '" data-call-id="' + escapeHtml(d.callId || '') + '" data-key="' +
+      const fresh = !seenDecisions.has(d._key) ? ' is-new' : '';
+      return '<div class="dec ' + v + fresh + '" data-call-id="' + escapeHtml(d.callId || '') + '" data-key="' +
         escapeHtml(d._key || '') + '">' +
         '<span class="dd"></span>' +
         '<div class="r1"><span class="t">' + escapeHtml(d.tool) + '</span>' +
         '<span class="chip ' + v + '">' + v + '</span></div>' +
         '<div class="r2">' + escapeHtml(d.reason || '') + '</div></div>';
     }).join('');
+    for (const d of decisions) seenDecisions.add(d._key);
   }
 
   function addDecision(ev) {
@@ -1815,7 +1868,13 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     });
     for (const [k, id] of Object.entries(BODIES)) {
       const el = document.getElementById(id);
-      if (el) el.hidden = k !== view;
+      if (!el) continue;
+      el.hidden = k !== view;
+      if (k === view) {
+        el.classList.remove('view-in');
+        void el.offsetWidth;
+        el.classList.add('view-in');
+      }
     }
     if (titleEl) titleEl.textContent = VIEWS[view] || '对话';
     const mhTitle = document.getElementById('sessionTitle');
