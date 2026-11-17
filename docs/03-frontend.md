@@ -36,12 +36,14 @@
 
 活动栏终于切的是**主画布**，不再只是换侧栏：
 
-- **工作区**：左侧文件树，右侧只读预览；`/api/file` 限 512 KB、拒绝 `.ui/.git/secrets/target/node_modules` 与越界路径；代码带行号，页头显示字节数 / 行数 / 截断；
+- **工作区**：左侧文件树，右侧只读预览；`/api/file` 限 512 KB、拒绝 `.ui/.git/secrets/target/node_modules` 与越界路径；文件卡是 content-height，带面包屑、复制路径、换行、行号、字节 / 行数 / 截断；≤900 时侧栏隐藏，页头出现根目录文件选择器；
 - **能力**：主画布是工具 / 技能对照表，侧栏只留计数和「查看 →」，避免同一份清单出现两遍；
-- **实验室**：主画布是实验包卡片，点开进报告；侧栏保留扫描 / 跑基准；空状态主区解释怎么生成；
-- **运行态**：对话页 masthead 下多一条 `liveStrip`：`● 运行中 · 12s · 1.2k tok · 停止 Esc`；等待审批时变「等待批准」；非对话主画布自动隐藏。
+- **实验室**：主画布是实验包卡片，点开进报告；侧栏保留扫描 / 跑基准；空 / 错误 / 加载三态各有出口，不在 fetch 未回时假装「没有包」；
+- **运行态**：对话页 masthead 下多一条 `liveStrip`：`● 运行中 · 12s · 1.2k tok · 停止 Esc`；等待审批时变「等待批准」；快照会带 `__UI_BUSY__`，只显示状态、隐藏停止；非对话主画布自动隐藏；SSE 断开不再把 busy 误置为 false。
 
 验收截图：`out/web-workspace-p0-final.png` / `web-caps-p0.png` / `web-lab-p0.png`。
+
+实验室血缘原型：`design/lab-lineage.html`（静态样例，输入 → RUN → 产物 → 结论，mtime 弱证据用虚线，未背书结论不画边）。生产接入需要先让 `/api/lab/report` 从 `manifest.jsonl` / `inputs.jsonl` / `claims.json` 返回结构化数组；在此之前不画假 DAG。
 
 ### 信息架构
 

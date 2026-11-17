@@ -459,8 +459,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
                 .join(",");
             let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
             let inject = format!(
-                "<script>window.__UI_BOOT__=[{}];window.__UI_READY__={};</script>\n</head>",
+                "<script>window.__UI_BOOT__=[{}];window.__UI_BUSY__={};window.__UI_READY__={};</script>\n</head>",
                 boot,
+                hub.busy.load(Ordering::SeqCst),
                 ready.to_compact()
             );
             let page = CHAT_HTML.replace("</head>", &inject);

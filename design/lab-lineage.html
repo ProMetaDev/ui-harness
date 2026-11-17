@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lr-s2 · artifact lineage — U:I lab</title>
+<style>
+/* ────────────────────────────────────────────────────────────────────────
+   U:I / lab lineage — standalone design prototype (not production code)
+   Visual language: charcoal, one amber, 1px rules, mono labels, node dots.
+   No external fonts, scripts, or images. Dark first; light is a token swap.
+   ──────────────────────────────────────────────────────────────────────── */
+:root{
+  --s-ink-1000:#0b0d10; --s-ink-950:#0e1115; --s-ink-900:#12161b;
+  --s-ink-850:#161b21; --s-ink-800:#1b2128; --s-ink-700:#252c35;
+  --s-ink-500:#59616d; --s-ink-400:#7d8590; --s-ink-300:#a8adaf;
+  --s-amber-500:#e3a24b; --s-amber-600:#c9862f; --s-amber-700:#a8631f;
+  --green-500:#8bc49a; --red-500:#de7a66;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono",monospace;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:var(--s-ink-1000); --bg-2:var(--s-ink-950);
+  --panel:var(--s-ink-900); --panel-2:var(--s-ink-850);
+  --line:#232a33; --line-soft:#1a2027; --wire:#4a515c;
+  --text:#ece9e0; --text-2:#bcb9ae; --muted:#8f8d83; --faint:#66665f;
+  --accent:var(--s-amber-500); --accent-2:var(--s-amber-600);
+  --accent-soft:rgba(227,162,75,.12); --accent-ink:#1a1206;
+  --ok:var(--green-500); --ok-soft:rgba(139,196,154,.10);
+  --warn:var(--s-amber-500); --warn-soft:rgba(227,162,75,.10);
+  --bad:var(--red-500); --bad-soft:rgba(222,122,102,.10);
+}
+html[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f4f1e9; --bg-2:#efebe1;
+  --panel:#fbf9f3; --panel-2:#f0ece2;
+  --line:#d7d1c3; --line-soft:#e5dfd3; --wire:#a39b8c;
+  --text:#1e1c18; --text-2:#4d4a42; --muted:#6d695f; --faint:#969185;
+  --accent:var(--s-amber-700); --accent-2:#8a4f16;
+  --accent-soft:rgba(168,99,31,.09); --accent-ink:#fffdf8;
+  --ok:#3f7a4e; --ok-soft:rgba(63,122,78,.10);
+  --warn:#9a5d17; --warn-soft:rgba(154,93,23,.10);
+  --bad:#a8402f; --bad-soft:rgba(168,64,47,.09);
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  margin:0;color:var(--text);background:var(--bg);
+  font:13px/1.6 var(--sans);-webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(680px 260px at 78% -6%,var(--accent-soft),transparent 66%),
+    radial-gradient(var(--line-soft) 1px,transparent 1px);
+  background-size:auto,22px 22px;
+  opacity:.55;
+  -webkit-mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.25) 55%,transparent 88%);
+          mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.25) 55%,transparent 88%);
+}
+::selection{background:var(--accent-soft);color:var(--text)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+code{font-family:var(--mono);font-size:.95em;color:var(--text-2)}
+h1{margin:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.spacer{flex:1;min-width:0}
+.kicker{
+  font:600 9.5px/1.4 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+  color:var(--faint);
+}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
+.dot.ok{background:var(--ok)}
+.dot.bad{background:var(--bad)}
+.dot.acc{background:var(--accent)}
+.dot.ring{background:transparent;border:1px solid var(--muted)}
+.dot.fill{background:var(--text-2)}
+
+.page{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:26px 28px 34px}
+
+/* ── masthead ─────────────────────────────────────────────────────────── */
+.masthead{border-bottom:1px solid var(--line);padding-bottom:17px}
+.topline{display:flex;align-items:center;gap:12px;min-height:24px;flex-wrap:wrap}
+.brand{font:600 18px/1 var(--mono);letter-spacing:-.05em;color:var(--accent)}
+.prototag{
+  font:500 9px/1 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--faint);
+  border:1px solid var(--line);border-radius:3px;padding:4px 6px;white-space:nowrap;
+}
+.theme-switch{display:inline-flex;border:1px solid var(--line);border-radius:4px;background:var(--panel);padding:2px;margin-left:auto}
+.theme-switch button{
+  height:20px;padding:0 8px;border-radius:2px;font:10px/1 var(--mono);
+  letter-spacing:.07em;text-transform:uppercase;color:var(--faint);
+}
+.theme-switch button:hover{color:var(--muted)}
+.theme-switch button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+.titleline{display:flex;align-items:flex-end;justify-content:space-between;gap:22px;margin-top:15px;flex-wrap:wrap}
+h1{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;font-size:23px;line-height:1.2;font-weight:600;letter-spacing:-.02em}
+h1 .bundle-id{font:600 23px/1 var(--mono);letter-spacing:-.04em}
+h1 .h1sub{color:var(--muted);font-size:16px;font-weight:400;letter-spacing:-.01em}
+.sub{margin:6px 0 0;color:var(--faint);font:10.5px/1.55 var(--mono);overflow-wrap:anywhere}
+.badges{display:flex;align-items:center;justify-content:flex-end;gap:5px;flex-wrap:wrap}
+.badge{
+  display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 7px;
+  border:1px solid var(--line);border-radius:3px;background:var(--panel);
+  color:var(--muted);font:500 9.5px/1 var(--mono);letter-spacing:.05em;
+  text-transform:uppercase;white-space:nowrap;
+}
+.badge b{color:var(--text);font-weight:500}
+.badge.ok{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
+.badge.bad{background:var(--bad-soft);border-color:transparent;color:var(--bad)}
+
+/* ── legend ───────────────────────────────────────────────────────────── */
+.legendbar{
+  display:flex;align-items:center;gap:18px 24px;flex-wrap:wrap;
+  padding:10px 0 11px;border-bottom:1px solid var(--line-soft);
+}
+.legend{display:flex;align-items:center;gap:9px 18px;flex-wrap:wrap;min-width:0}
+.lg{display:inline-flex;align-items:center;gap:7px;font:10px/1 var(--mono);color:var(--muted);white-space:nowrap}
+.ln{position:relative;display:inline-block;width:24px;height:1px;background:var(--wire);flex:none}
+.ln.solid::after{
+  content:"";position:absolute;right:0;top:-2.5px;width:4px;height:4px;
+  border-top:1px solid var(--wire);border-right:1px solid var(--wire);transform:rotate(45deg);
+}
+.ln.dashed{background:repeating-linear-gradient(90deg,var(--wire) 0 4px,transparent 4px 8px)}
+.ln.none{
+  width:13px;height:13px;background:none;border:1px solid var(--line);border-radius:2px;
+  color:var(--bad);font:9px/12px var(--mono);text-align:center;
+}
+.nd{display:inline-block;width:6px;height:6px;border-radius:50%;flex:none}
+.nd.ring{background:transparent;border:1px solid var(--muted)}
+.nd.fill{background:var(--text-2)}
+.nd.acc{background:var(--accent)}
+.hashn{margin-left:auto;color:var(--faint);white-space:nowrap}
+.hashn b{color:var(--muted);font-weight:500}
+.hashn code{color:var(--text-2);font-size:10px}
+.toggle{display:inline-flex;align-items:center;gap:7px;font:10px var(--mono);color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap}
+.toggle input{
+  appearance:none;-webkit-appearance:none;position:relative;width:22px;height:12px;margin:0;
+  border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;
+}
+.toggle input::after{
+  content:"";position:absolute;top:1px;left:1px;width:8px;height:8px;border-radius:50%;
+  background:var(--faint);transition:transform .12s,background .12s;
+}
+.toggle input:checked::after{transform:translateX(10px);background:var(--accent)}
+.toggle input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ── canvas + graph ───────────────────────────────────────────────────── */
+.canvas{
+  --col-in:232px; --col-art:336px; --gutter:28px;
+  position:relative;margin-top:16px;padding:12px 18px 18px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg-2);
+  isolation:isolate;
+}
+.canvas::before{
+  content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(var(--line-soft) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+  background-size:40px 40px;opacity:.55;
+  -webkit-mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.35) 62%,transparent 92%);
+          mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.35) 62%,transparent 92%);
+}
+.colhead,.lineage,.claimband{position:relative;z-index:1}
+.wires{position:absolute;inset:0;z-index:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+.wires .spine{stroke:var(--wire);stroke-width:1}
+.wires .port{fill:var(--panel);stroke:var(--wire);stroke-width:1}
+.wires .edge{
+  fill:none;stroke:var(--wire);stroke-width:1;stroke-linecap:round;stroke-linejoin:round;
+  transition:stroke .14s,opacity .18s;
+}
+.wires .edge.weak{stroke-dasharray:4 4}
+.wires .edge.hot{stroke:var(--accent);stroke-width:1.5}
+.wires .edge.faded{opacity:.12}
+#arw path{fill:var(--wire)}
+#arw-hot path{fill:var(--accent)}
+
+.colhead{
+  display:grid;grid-template-columns:var(--col-in) minmax(110px,1fr) var(--col-art) var(--gutter);
+  align-items:end;padding:2px 0 12px;border-bottom:1px solid var(--line-soft);
+}
+.ch{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ch-k{
+  display:flex;align-items:center;gap:6px;font:600 9.5px/1 var(--mono);
+  letter-spacing:.14em;text-transform:uppercase;color:var(--text-2);
+}
+.ch-m{font:9.5px/1.4 var(--mono);color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch.run{align-items:center;text-align:center}
+.ch.run .ch-k{justify-content:center}
+.ch.run .ch-m{color:var(--muted)}
+
+.lineage{
+  display:grid;grid-template-columns:var(--col-in) minmax(110px,1fr) var(--col-art) var(--gutter);
+  align-items:start;
+}
+.col{display:flex;flex-direction:column;gap:12px;min-width:0;padding-top:14px}
+.spine{min-height:100%;width:100%}
+.gutter{min-height:100%}
+
+.node{
+  position:relative;background:var(--panel);border:1px solid var(--line);border-radius:4px;
+  padding:8px 10px 9px;cursor:pointer;outline:none;
+  transition:border-color .14s,background .14s,opacity .18s;
+}
+.node:hover{border-color:var(--muted)}
+.node:focus-visible{border-color:var(--accent);outline:1px solid var(--accent);outline-offset:2px}
+.node.hot{border-color:var(--accent);background:var(--panel-2)}
+.nhead{
+  display:flex;align-items:center;gap:7px;min-height:11px;
+  font:600 9px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+}
+.nhead .nseq{margin-left:auto;letter-spacing:.03em;text-transform:none;color:var(--faint)}
+.npath{
+  margin-top:6px;font:12.5px/1.35 var(--mono);color:var(--text);
+  overflow-wrap:anywhere;
+}
+.npath .dir{color:var(--faint)}
+.nmeta{
+  display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+  margin-top:3px;font:10px/1.4 var(--mono);color:var(--muted);
+}
+.hash{
+  color:var(--faint);white-space:nowrap;cursor:help;
+  border-bottom:1px dotted var(--line);
+}
+.nev{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin-top:6px;padding-top:6px;border-top:1px solid var(--line-soft);
+  font:9.5px/1.3 var(--mono);color:var(--faint);
+}
+.evk{color:var(--faint);letter-spacing:.04em}
+.prov{
+  display:inline-flex;align-items:center;height:15px;padding:0 5px;border-radius:2px;
+  border:1px solid var(--line);color:var(--muted);font:9px/1 var(--mono);
+  letter-spacing:.05em;text-transform:uppercase;
+}
+.prov.weak{color:var(--warn);border-color:var(--warn);background:var(--warn-soft)}
+.col-note{
+  margin-top:1px;padding-top:8px;border-top:1px solid var(--line-soft);
+  font:9.5px/1.6 var(--mono);color:var(--faint);
+}
+.col-note b{color:var(--muted);font-weight:500}
+
+/* ── claims band ──────────────────────────────────────────────────────── */
+.claimband{margin-top:20px;padding-top:14px;border-top:1px solid var(--line)}
+.bandhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:17px}
+.bandhead .kicker{color:var(--text-2)}
+.bandnote{font:9.5px/1.4 var(--mono);color:var(--faint)}
+.claims{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.claim{
+  position:relative;background:var(--panel);border:1px solid var(--line);border-radius:4px;
+  padding:8px 10px 9px;cursor:pointer;outline:none;
+  transition:border-color .14s,background .14s,opacity .18s;
+}
+.claim:hover{border-color:var(--muted)}
+.claim:focus-visible{border-color:var(--accent);outline:1px solid var(--accent);outline-offset:2px}
+.claim.hot{border-color:var(--accent);background:var(--panel-2)}
+.claim.bad{border-color:var(--bad)}
+.chead{
+  display:flex;align-items:center;gap:6px;
+  font:600 9px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+}
+.cstatus{margin-left:auto;letter-spacing:.04em;text-transform:none}
+.claim.ok .cstatus{color:var(--ok)}
+.claim.bad .cstatus{color:var(--bad)}
+.cval{display:flex;align-items:baseline;gap:8px;margin-top:7px}
+.cname{font:500 10.5px/1 var(--mono);color:var(--muted);letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis}
+.cnum{
+  margin-left:auto;font:600 17px/1 var(--mono);color:var(--text);
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+.claim.bad .cnum{color:var(--bad)}
+.cev{margin-top:6px;font:9.5px/1.5 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+.cev b{color:var(--text);font-weight:500}
+.cev code{font-size:9.5px;color:var(--muted)}
+.cnote{margin-top:3px;font:9px/1.45 var(--mono);color:var(--faint)}
+
+.verifybar{
+  display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;
+  margin-top:12px;padding:8px 10px;border:1px solid var(--line);border-radius:4px;
+  background:var(--panel);font:9.5px/1.4 var(--mono);color:var(--muted);
+}
+.vlabel{
+  display:inline-flex;align-items:center;gap:7px;font-weight:600;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--text-2);
+}
+.vdiamond{width:7px;height:7px;background:var(--accent);transform:rotate(45deg);display:inline-block;flex:none}
+.vitem{display:inline-flex;align-items:center;gap:5px}
+.vitem.bad{color:var(--bad)}
+.vspacer{flex:1;min-width:0}
+.vexit{color:var(--bad);white-space:nowrap}
+
+/* ── notes, raw, footer ───────────────────────────────────────────────── */
+.caveat{
+  display:grid;grid-template-columns:1fr 1fr;gap:10px 30px;
+  margin-top:16px;padding-top:13px;border-top:1px solid var(--line-soft);
+}
+.caveat h2{
+  margin:0 0 5px;font:600 9px/1.4 var(--mono);letter-spacing:.14em;
+  text-transform:uppercase;color:var(--text-2);
+}
+.caveat p{margin:0;color:var(--muted);font-size:11px;line-height:1.65}
+.caveat p + p{margin-top:4px}
+.caveat code{font-size:10px;color:var(--text-2)}
+
+.raw{margin-top:15px;border-top:1px solid var(--line-soft);padding-top:11px}
+.raw summary{
+  list-style:none;display:flex;align-items:center;gap:10px;cursor:pointer;
+  padding:3px 0;color:var(--muted);font:10px/1 var(--mono);user-select:none;
+}
+.raw summary::-webkit-details-marker{display:none}
+.raw summary::before{content:"+";width:12px;color:var(--faint);font:11px/1 var(--mono)}
+.raw[open] summary::before{content:"−"}
+.rawhint{margin-left:auto;color:var(--faint);font-size:9.5px}
+.rawgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.rawblk{border:1px solid var(--line);border-radius:4px;background:var(--bg-2);overflow:hidden}
+.rawhead{
+  display:flex;justify-content:space-between;gap:10px;padding:6px 9px;
+  border-bottom:1px solid var(--line-soft);color:var(--muted);
+  font:9.5px/1.3 var(--mono);letter-spacing:.05em;
+}
+.rawhead span{color:var(--faint)}
+.rawblk pre{
+  margin:0;padding:9px;font:9.5px/1.65 var(--mono);color:var(--text-2);
+  max-height:180px;overflow:auto;white-space:pre;
+}
+.rawblk pre .k{color:var(--muted)}
+
+.foot{
+  display:flex;justify-content:space-between;gap:8px 20px;flex-wrap:wrap;
+  margin-top:20px;padding-top:11px;border-top:1px solid var(--line-soft);
+  color:var(--faint);font:9.5px/1.6 var(--mono);
+}
+.foot b{color:var(--muted);font-weight:500}
+
+/* focus dims everything not on the traced path */
+.canvas.focusing .node:not(.hot),
+.canvas.focusing .claim:not(.hot){opacity:.38}
+
+/* ── responsive: 900px is the target ──────────────────────────────────── */
+@media (max-width:1000px){
+  .canvas{--col-in:212px;--col-art:300px;--gutter:26px}
+}
+@media (max-width:880px){
+  .canvas{--col-in:192px;--col-art:264px;--gutter:24px;padding:10px 14px 16px}
+  .claims{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .page{padding:22px 20px 30px}
+  .badges{justify-content:flex-start}
+}
+@media (max-width:720px){
+  .canvas{--col-in:168px;--col-art:224px;--gutter:20px}
+  .colhead{grid-template-columns:var(--col-in) minmax(80px,1fr) var(--col-art) var(--gutter)}
+  .claims{grid-template-columns:1fr}
+  .caveat{grid-template-columns:1fr}
+  .rawgrid{grid-template-columns:1fr}
+  h1{font-size:20px}
+  h1 .bundle-id,h1 .h1sub{font-size:20px}
+}
+@media (max-width:560px){
+  .canvas{--col-in:1fr;--col-art:1fr;--gutter:0px}
+  .colhead{display:none}
+  .lineage{grid-template-columns:1fr}
+  .spine,.gutter{display:none}
+  .col{padding-top:12px}
+  .wires{display:none}
+  .hashn{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none !important;animation:none !important}
+}
+</style>
+</head>
+<body>
+<!--
+  ──────────────────────────────────────────────────────────────────────────
+  DATA FIELD MAP — every visible label is driven by a real bundle field.
+  Shapes are copied from ui-cli/src/lab.rs and the writer in ui-cli/src/main.rs
+  (`ui lab pack`, ~line 1524 onward). Nothing here is parsed from report.md.
+
+    manifest.jsonl (one JSON object per line, read by lab.rs):
+      {"path","sha256","bytes",
+       "producedBy":{"seq","tool","provenance":"journal"|"mtime"}}
+      path       -> node filename (bundle copies it to artifacts/<path>)
+      bytes      -> "86 B"
+      sha256     -> "9bea23…3572" (first 6 + last 4; full digest in title)
+      producedBy.tool + .seq      -> "fs_write" + "seq 12"
+      producedBy.provenance       -> solid edge (journal) / dashed (mtime)
+      provenance == "mtime" means the file had no fs.write event and was only
+      attributed by modification time (seq 0, tool "(脚本产出)").
+
+    inputs.jsonl:
+      {"path","sha256","bytes","readBy":{"seq","tool"}}
+      path -> left-column filename; readBy.seq/tool -> "seq 03 · fs_read".
+
+    claims.json:
+      {"claims":[{"name","value"}]}
+      name/value -> claim card. There is no artifact id in this file. Backing
+      is recomputed with the lab.rs rule: any numeric leaf of any JSON artifact
+      within max(|value|*1e-3, 1e-9). The matched leaf path is shown; an
+      unmatched claim deliberately gets NO edge.
+
+    meta.json:
+      name / createdMs / workspace / journalEvents -> masthead + run node.
+      env + commands are only shown in the raw records below.
+
+    verify (ui lab verify):
+      artifacts/inputs/claims counts + issues -> badges, verify bar, exit code.
+  ──────────────────────────────────────────────────────────────────────────
+-->
+<div class="page">
+
+  <header class="masthead">
+    <div class="topline">
+      <span class="brand" aria-label="U:I">U:I</span>
+      <span class="kicker">Lab / artifact lineage</span>
+      <span class="prototag">prototype · static sample</span>
+      <div class="theme-switch" role="group" aria-label="Theme">
+        <button type="button" data-theme-set="dark" aria-pressed="true">dark</button>
+        <button type="button" data-theme-set="light" aria-pressed="false">light</button>
+      </div>
+    </div>
+    <div class="titleline">
+      <div class="ident">
+        <h1><span class="bundle-id">lr-s2</span><span class="h1sub">Learning rate sweep</span></h1>
+        <p class="sub mono" id="packLine"></p>
+      </div>
+      <div class="badges" id="badges" aria-label="Bundle totals"></div>
+    </div>
+  </header>
+
+  <section class="legendbar" aria-label="Legend">
+    <div class="legend">
+      <span class="lg"><i class="ln solid" aria-hidden="true"></i>recorded read / write</span>
+      <span class="lg"><i class="ln dashed" aria-hidden="true"></i>mtime-only · weak</span>
+      <span class="lg"><i class="ln none" aria-hidden="true">×</i>no edge: unbacked claim</span>
+      <span class="lg"><i class="nd ring" aria-hidden="true"></i>input</span>
+      <span class="lg"><i class="nd fill" aria-hidden="true"></i>artifact</span>
+      <span class="lg"><i class="nd acc" aria-hidden="true"></i>claim / verify</span>
+      <span class="lg hashn">sha256 <b>6+4</b> · <code>9bea23…3572</code> · hover = full digest</span>
+    </div>
+    <label class="toggle" title="Hide the loss_curve.svg edge: it comes from mtime, not a journal write event">
+      <input type="checkbox" id="weakToggle" checked>
+      show mtime-only
+    </label>
+  </section>
+
+  <noscript>
+    <p class="sub mono" style="margin:12px 0 0">This prototype builds the DAG in the browser. Enable JS to see it.</p>
+  </noscript>
+
+  <main class="canvas" id="canvas" aria-label="Artifact lineage graph">
+    <div class="colhead">
+      <div class="ch">
+        <span class="ch-k">Inputs</span>
+        <span class="ch-m" id="inputHead">read at seq 03 / 05</span>
+      </div>
+      <div class="ch run">
+        <span class="ch-k"><i class="dot acc" aria-hidden="true"></i>Run</span>
+        <span class="ch-m" id="runHead">journal.jsonl</span>
+      </div>
+      <div class="ch">
+        <span class="ch-k">Artifacts</span>
+        <span class="ch-m">contained in the bundle · manifest.jsonl</span>
+      </div>
+      <div aria-hidden="true"></div>
+    </div>
+
+    <div class="lineage">
+      <div class="col col-inputs" id="inputs"></div>
+      <div class="spine" id="spine" aria-hidden="true"></div>
+      <div class="col col-artifacts" id="artifacts"></div>
+      <div class="gutter" aria-hidden="true"></div>
+    </div>
+
+    <section class="claimband" aria-label="Claims and verification">
+      <div class="bandhead">
+        <span class="kicker">Claims / verification</span>
+        <span class="bandnote">checked against numeric artifact leaves · tolerance 0.1% · value-only match</span>
+      </div>
+      <div class="claims" id="claims"></div>
+      <div class="verifybar" id="verifybar"></div>
+    </section>
+
+    <svg class="wires" id="wires" aria-hidden="true" focusable="false">
+      <defs>
+        <marker id="arw" viewBox="0 0 6 6" refX="5.4" refY="3" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z"></path>
+        </marker>
+        <marker id="arw-hot" viewBox="0 0 6 6" refX="5.4" refY="3" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z"></path>
+        </marker>
+      </defs>
+      <g id="wireG"></g>
+    </svg>
+  </main>
+
+  <section class="caveat" aria-label="How to read this graph">
+    <div>
+      <h2>One run, not pairwise provenance</h2>
+      <p>Both columns meet at the run node. <code>producedBy.seq</code> and <code>readBy.seq</code> are real journal events, but the bundle never records <em>which</em> read fed <em>which</em> write. An input → artifact edge would be an inference from order or filenames, so it is not drawn.</p>
+    </div>
+    <div>
+      <h2>Claims are matched by value, not name</h2>
+      <p><code>claims.json</code> stores only <code>{name, value}</code>. The verifier scans numeric leaves and ignores the claim name, so the card shows the leaf that actually hit. No hit means no line — never a guessed one. <code>f1</code> searches the same leaves and stays unconnected.</p>
+    </div>
+  </section>
+
+  <details class="raw">
+    <summary>
+      <span class="kicker">Raw bundle records</span>
+      <span class="rawhint">the exact fields behind every label</span>
+    </summary>
+    <div class="rawgrid">
+      <div class="rawblk">
+        <div class="rawhead">manifest.jsonl <span id="rawManifestN"></span></div>
+        <pre id="rawManifest"></pre>
+      </div>
+      <div class="rawblk">
+        <div class="rawhead">inputs.jsonl <span id="rawInputsN"></span></div>
+        <pre id="rawInputs"></pre>
+      </div>
+      <div class="rawblk">
+        <div class="rawhead">claims.json <span>declared, not trusted</span></div>
+        <pre id="rawClaims"></pre>
+      </div>
+      <div class="rawblk">
+        <div class="rawhead">meta.json <span>bundle identity</span></div>
+        <pre id="rawMeta"></pre>
+      </div>
+    </div>
+  </details>
+
+  <footer class="foot">
+    <span><b>U:I</b> · standalone prototype, not the production lab view</span>
+    <span>sample bundle · no external assets · tab a node to trace its path</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ────────────────────────────────────────────────────────────────────
+     SAMPLE BUNDLE (static). Shapes mirror the real bundle:
+       manifest.jsonl lines = { path, sha256, bytes, producedBy{seq,tool,provenance} }
+       inputs.jsonl lines   = { path, sha256, bytes, readBy{seq,tool} }
+       claims.json          = { claims: [{name, value}] }
+       meta.json            = { name, createdMs, workspace, journalEvents, env, commands }
+     `leaves` is what lab.rs::numeric_leaves would read from artifacts/*.json
+     (non-recursive, JSON files only). The sample sha256 values are 64-hex sample
+     data; they are truncated for display, never shown in full in the graph.
+     ──────────────────────────────────────────────────────────────────── */
+  var BUNDLE = {
+    meta: {
+      name: "lr-s2",
+      createdMs: 1794816240000,              /* 2026-11-16T16:04+08:00 */
+      workspace: "/home/loom/exp/lr-s2",
+      journalEvents: 42,
+      env: { os: "Linux", kernel: "6.8.0-45-generic", cpus: 8, python: "3.11.9" },
+      commands: ["python train.py --lr 0.03 --seed 2"]
+    },
+    manifest: [
+      {
+        path: "metrics.json",
+        sha256: "9bea23415e0bebe4a172cc9c69762d5d855e96f63318506a9efa9cfd2c563572",
+        bytes: 86,
+        producedBy: { seq: 12, tool: "fs_write", provenance: "journal" }
+      },
+      {
+        path: "holdout.json",
+        sha256: "a9e812d39328e1128c260cb77014e2cb479c57f9827ce7f9db8119346ae3102b",
+        bytes: 91,
+        producedBy: { seq: 16, tool: "fs_write", provenance: "journal" }
+      },
+      {
+        path: "loss_curve.svg",
+        sha256: "ef3e6c0ee1253b086978d87e8a34d28caffbe473e526249ea7127eada52c9aad",
+        bytes: 1536,
+        producedBy: { seq: 0, tool: "(脚本产出)", provenance: "mtime" }
+      }
+    ],
+    inputs: [
+      {
+        path: "data/train.csv",
+        sha256: "5d92553bf9c8c50972281f7ab42c4b04096d46cfc02099f249c87939512b9e79",
+        bytes: 8703,
+        readBy: { seq: 3, tool: "fs_read" }
+      },
+      {
+        path: "config/lr.yaml",
+        sha256: "78b4e64f6945effa3ed02e3e28716fc0646f6fee84327af1fca8cbf5af873be0",
+        bytes: 72,
+        readBy: { seq: 5, tool: "fs_read" }
+      }
+    ],
+    claims: [
+      { name: "accuracy", value: 0.72 },
+      { name: "loss", value: 0.3142 },
+      { name: "epochs", value: 3 },
+      { name: "f1", value: 0.7412 }
+    ],
+    leaves: {
+      "metrics.json": { seed: 2, epochs: 3, lr: 0.03, batch: 64, accuracy: 0.72, loss: 0.3142, wall_s: 41.2 },
+      "holdout.json": { n: 2000, accuracy: 0.6884, f1: 0.6884, precision: 0.701, recall: 0.676 }
+    },
+    verify: {
+      artifactsOk: 3,
+      inputsOk: 2,
+      claimsOk: 3,
+      claimsTotal: 4,
+      journalOk: true,
+      issues: ["结论 f1 = 0.7412 无产物背书"],
+      exitCode: 3
+    }
+  };
+
+  /* ── tiny helpers ─────────────────────────────────────────────────── */
+  var NS = "http://www.w3.org/2000/svg";
+  var nf = new Intl.NumberFormat("en-US");
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function pad(n) { return String(n).length < 2 ? "0" + n : String(n); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function truncHash(h) { return h.slice(0, 6) + "\u2026" + h.slice(-4); }
+  function fmtBytes(n) { return nf.format(n) + " B"; }
+  function fmtNum(x) { return String(x); }
+  function fmtSmall(x) {
+    if (x === 0) return "0";
+    return String(Number(x.toPrecision(3)));
+  }
+  function fmtPacked(ms) {
+    var d = new Date(ms + 8 * 3600 * 1000); /* sample bundle is +08:00 */
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
+      " " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + " +08:00";
+  }
+
+  /* ── derive claim backing exactly like lab.rs::verify_bundle ──────── */
+  var artifacts = BUNDLE.manifest.slice().sort(function (a, b) {
+    var sa = a.producedBy.seq || Number.MAX_SAFE_INTEGER; /* mtime (seq 0) last */
+    var sb = b.producedBy.seq || Number.MAX_SAFE_INTEGER;
+    return sa - sb;
+  });
+
+  function leavesOf(artifact) {
+    var obj = BUNDLE.leaves[artifact.path];
+    if (!obj) return [];
+    return Object.keys(obj).filter(function (k) {
+      return typeof obj[k] === "number";
+    }).map(function (k) {
+      return { leaf: k, value: obj[k] };
+    });
+  }
+
+  var totalLeaves = artifacts.reduce(function (n, a) { return n + leavesOf(a).length; }, 0);
+  var jsonArtifacts = artifacts.filter(function (a) { return !!BUNDLE.leaves[a.path]; }).length;
+
+  var claims = BUNDLE.claims.map(function (c, i) {
+    var tol = Math.max(Math.abs(c.value) * 1e-3, 1e-9);
+    var hit = null;
+    for (var ai = 0; ai < artifacts.length && !hit; ai++) {
+      var ls = leavesOf(artifacts[ai]);
+      for (var li = 0; li < ls.length; li++) {
+        if (Math.abs(ls[li].value - c.value) <= tol) {
+          hit = { artifact: artifacts[ai], leaf: ls[li].leaf, value: ls[li].value, tol: tol };
+          break;
+        }
+      }
+    }
+    return { id: "clm:" + i, idx: i, name: c.name, value: c.value, match: hit };
+  });
+
+  var inputs = BUNDLE.inputs.map(function (x, i) {
+    return { id: "in:" + i, idx: i, path: x.path, sha256: x.sha256, bytes: x.bytes, readBy: x.readBy };
+  });
+  var arts = artifacts.map(function (x, i) {
+    return {
+      id: "art:" + i, idx: i, path: x.path, sha256: x.sha256, bytes: x.bytes,
+      producedBy: x.producedBy, weak: x.producedBy.provenance !== "journal"
+    };
+  });
+
+  /* ── header ───────────────────────────────────────────────────────── */
+  $("#packLine").textContent =
+    "bundles/" + BUNDLE.meta.name + " · workspace " + BUNDLE.meta.workspace +
+    " · packed " + fmtPacked(BUNDLE.meta.createdMs);
+  $("#runHead").textContent = "journal.jsonl · " + BUNDLE.meta.journalEvents + " events · chain ok";
+  $("#inputHead").textContent = "read at " + inputs.map(function (n) {
+    return "seq " + pad(n.readBy.seq);
+  }).join(" / ");
+
+  var issues = BUNDLE.verify.issues;
+  $("#badges").innerHTML =
+    '<span class="badge"><b>' + BUNDLE.manifest.length + "</b> artifacts</span>" +
+    '<span class="badge"><b>' + BUNDLE.inputs.length + "</b> inputs</span>" +
+    '<span class="badge"><b>' + BUNDLE.verify.claimsOk + "/" + BUNDLE.verify.claimsTotal + "</b> claims</span>" +
+    '<span class="badge ok"><i class="dot ok"></i>journal ok</span>' +
+    '<span class="badge ' + (issues.length ? "bad" : "ok") + '"><i class="dot ' +
+      (issues.length ? "bad" : "ok") + '"></i>' + issues.length + " issue" + (issues.length === 1 ? "" : "s") + "</span>";
+
+  /* ── node markup ──────────────────────────────────────────────────── */
+  function inputCard(n) {
+    return '<div class="node input" data-id="' + n.id + '" tabindex="0" ' +
+      'aria-label="Input ' + esc(n.path) + ', read at journal sequence ' + n.readBy.seq + '. Focus to trace.">' +
+      '<div class="nhead"><span class="dot ring"></span><span>input ' + pad(n.idx + 1) + '</span>' +
+      '<span class="nseq">seq ' + pad(n.readBy.seq) + "</span></div>" +
+      '<div class="npath">' + esc(n.path) + "</div>" +
+      '<div class="nmeta"><span>' + fmtBytes(n.bytes) + "</span>" +
+      '<span class="hash" title="sha256 ' + n.sha256 + '">' + truncHash(n.sha256) + "</span></div>" +
+      '<div class="nev"><span class="evk">readBy</span>' + esc(n.readBy.tool) + "</div>" +
+      "</div>";
+  }
+
+  function artifactCard(n) {
+    var weak = n.weak;
+    return '<div class="node artifact" data-id="' + n.id + '" tabindex="0" ' +
+      'aria-label="Artifact ' + esc(n.path) + ', ' + (weak ? "mtime-only" : "journal") + ' provenance. Focus to trace.">' +
+      '<div class="nhead"><span class="dot fill"></span><span>artifact ' + pad(n.idx + 1) + '</span>' +
+      '<span class="nseq">' + (n.producedBy.seq ? "seq " + pad(n.producedBy.seq) : "no seq") + "</span></div>" +
+      '<div class="npath"><span class="dir">artifacts/</span>' + esc(n.path) + "</div>" +
+      '<div class="nmeta"><span>' + fmtBytes(n.bytes) + "</span>" +
+      '<span class="hash" title="sha256 ' + n.sha256 + '">' + truncHash(n.sha256) + "</span></div>" +
+      '<div class="nev"><span class="prov' + (weak ? " weak" : "") + '">' +
+        esc(n.producedBy.provenance) + "</span>" +
+        (weak
+          ? '<span title="No fs.write event: attributed only by mtime; seq 0">' + esc(n.producedBy.tool) + "</span>"
+          : "<span>" + esc(n.producedBy.tool) + "</span>") +
+      "</div></div>";
+  }
+
+  function claimCard(c) {
+    var ok = !!c.match;
+    var delta = ok ? Math.abs(c.match.value - c.value) : null;
+    var ev = ok
+      ? "via <b>" + esc(c.match.artifact.path) + "</b> · leaf <code>" + esc(c.match.leaf) + "</code>"
+      : "no numeric leaf within 0.1%";
+    var note = ok
+      ? "Δ " + fmtSmall(delta) + " · tol " + fmtSmall(c.match.tol) + " · match is by value, not by name"
+      : "checked " + totalLeaves + " leaves in " + jsonArtifacts + " JSON artifacts · no edge drawn";
+    return '<article class="claim ' + (ok ? "ok" : "bad") + '" data-id="' + c.id + '" tabindex="0" ' +
+      'aria-label="Claim ' + esc(c.name) + ' = ' + c.value + ", " +
+      (ok ? "backed by " + esc(c.match.artifact.path) : "unbacked") + '. Focus to trace.">' +
+      '<div class="chead"><span class="dot ' + (ok ? "ok" : "bad") + '"></span>' +
+        '<span>claim ' + pad(c.idx + 1) + "</span>" +
+        '<span class="cstatus">' + (ok ? "verified" : "unbacked") + "</span></div>" +
+      '<div class="cval"><span class="cname">' + esc(c.name) + "</span>" +
+        '<span class="cnum">' + esc(fmtNum(c.value)) + "</span></div>" +
+      '<div class="cev">' + ev + "</div>" +
+      '<div class="cnote">' + note + "</div>" +
+      "</article>";
+  }
+
+  $("#inputs").innerHTML = inputs.map(inputCard).join("") +
+    '<div class="col-note">Only paths with a recorded <b>fs/read</b> event appear here. A missing <b>inputs.jsonl</b> leaves this column empty; nothing is guessed from filenames.</div>';
+  $("#artifacts").innerHTML = arts.map(artifactCard).join("") +
+    '<div class="col-note">Dashed provenance = <b>mtime</b>, not an <b>fs.write</b>: the file was touched during the run, which is weaker evidence than a tool event.</div>';
+  $("#claims").innerHTML = claims.map(claimCard).join("");
+
+  var v = BUNDLE.verify;
+  $("#verifybar").innerHTML =
+    '<span class="vlabel"><span class="vdiamond"></span>verify</span>' +
+    '<span class="vitem"><i class="dot ok"></i>' + v.artifactsOk + "/" + BUNDLE.manifest.length + " artifact hashes</span>" +
+    '<span class="vitem"><i class="dot ok"></i>' + v.inputsOk + "/" + BUNDLE.inputs.length + " inputs unchanged</span>" +
+    '<span class="vitem"><i class="dot ok"></i>journal chain · ' + BUNDLE.meta.journalEvents + " events</span>" +
+    '<span class="vitem ' + (v.claimsOk < v.claimsTotal ? "bad" : "") + '"><i class="dot ' +
+      (v.claimsOk < v.claimsTotal ? "bad" : "ok") + '"></i>' + v.claimsOk + "/" + v.claimsTotal + " claims backed</span>" +
+    '<span class="vspacer"></span>' +
+    '<span class="vexit">exit ' + v.exitCode + " · " + v.issues.length + " issue</span>";
+
+  /* ── raw records ──────────────────────────────────────────────────── */
+  function jsonl(rows) {
+    return rows.map(function (r) { return JSON.stringify(r); }).join("\n");
+  }
+  $("#rawManifest").textContent = jsonl(BUNDLE.manifest);
+  $("#rawInputs").textContent = jsonl(BUNDLE.inputs);
+  $("#rawClaims").textContent = JSON.stringify({ claims: BUNDLE.claims }, null, 2);
+  $("#rawMeta").textContent = JSON.stringify(BUNDLE.meta, null, 2);
+  $("#rawManifestN").textContent = BUNDLE.manifest.length + " lines";
+  $("#rawInputsN").textContent = BUNDLE.inputs.length + " lines";
+
+  /* ── edges from recorded fields ───────────────────────────────────── */
+  var EDGES = [];
+  inputs.forEach(function (n, i) {
+    EDGES.push({ id: "e:in" + i + ">run", from: n.id, to: "run", kind: "read", weak: false, lane: 0 });
+  });
+  arts.forEach(function (n, i) {
+    EDGES.push({ id: "e:run>art" + i, from: "run", to: n.id, kind: "produce", weak: n.weak, lane: 0 });
+  });
+  claims.filter(function (c) { return c.match; }).forEach(function (c, i) {
+    var art = arts.filter(function (a) { return a.path === c.match.artifact.path; })[0];
+    EDGES.push({ id: "e:" + art.id + ">" + c.id, from: art.id, to: c.id, kind: "backs", weak: false, lane: i });
+  });
+
+  var byFrom = new Map();
+  var byTo = new Map();
+  EDGES.forEach(function (e) {
+    if (!byFrom.has(e.from)) byFrom.set(e.from, []);
+    byFrom.get(e.from).push(e);
+    if (!byTo.has(e.to)) byTo.set(e.to, []);
+    byTo.get(e.to).push(e);
+  });
+
+  /* ── wires ────────────────────────────────────────────────────────── */
+  var canvas = $("#canvas");
+  var wires = $("#wires");
+  var wireG = $("#wireG");
+  var spine = $("#spine");
+  var inputsBox = $("#inputs");
+  var artsBox = $("#artifacts");
+  var claimsBox = $("#claims");
+
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(NS, tag);
+    Object.keys(attrs).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    return el;
+  }
+
+  function boxOf(el) {
+    var r = el.getBoundingClientRect();
+    var c = canvas.getBoundingClientRect();
+    return {
+      left: r.left - c.left, right: r.right - c.left,
+      top: r.top - c.top, bottom: r.bottom - c.top,
+      cx: (r.left + r.right) / 2 - c.left,
+      cy: (r.top + r.bottom) / 2 - c.top
+    };
+  }
+
+  function drawWires() {
+    var cRect = canvas.getBoundingClientRect();
+    var w = Math.max(1, Math.round(cRect.width));
+    var h = Math.max(1, Math.round(cRect.height));
+    wires.setAttribute("viewBox", "0 0 " + w + " " + h);
+
+    clearFocus();
+    while (wireG.firstChild) wireG.removeChild(wireG.firstChild);
+
+    var showWeak = $("#weakToggle").checked;
+    var spineBox = spine.getBoundingClientRect();
+    var sx = spineBox.left + spineBox.width / 2 - cRect.left;
+
+    var els = {};
+    inputsBox.querySelectorAll(".node").forEach(function (el) { els[el.dataset.id] = el; });
+    artsBox.querySelectorAll(".node").forEach(function (el) { els[el.dataset.id] = el; });
+    claimsBox.querySelectorAll(".claim").forEach(function (el) { els[el.dataset.id] = el; });
+
+    var centers = [];
+    Object.keys(els).forEach(function (id) {
+      if (id.indexOf("clm:") !== 0) centers.push(boxOf(els[id]).cy);
+    });
+    var minY = Math.min.apply(null, centers) - 7;
+    var maxY = Math.max.apply(null, centers) + 7;
+    wireG.appendChild(svgEl("line", {
+      x1: sx, y1: minY, x2: sx, y2: maxY, "class": "spine"
+    }));
+    centers.forEach(function (y) {
+      wireG.appendChild(svgEl("circle", { cx: sx, cy: y, r: 2.4, "class": "port" }));
+    });
+
+    var claimTops = claimsBox.querySelectorAll(".claim");
+    var minClaimTop = Infinity;
+    claimTops.forEach(function (el) { minClaimTop = Math.min(minClaimTop, boxOf(el).top); });
+    var railY = (isFinite(minClaimTop) ? minClaimTop : 0) - 12;
+
+    EDGES.forEach(function (e) {
+      if (e.weak && !showWeak) return;
+      var d = "";
+      var startPort = null;
+      var endPort = null;
+      if (e.kind === "read") {
+        var f = boxOf(els[e.from]);
+        d = "M " + f.right + " " + f.cy + " H " + (sx - 4);
+        startPort = [f.right, f.cy];
+      } else if (e.kind === "produce") {
+        var t = boxOf(els[e.to]);
+        d = "M " + (sx + 4) + " " + t.cy + " H " + (t.left - 4);
+        endPort = [t.left, t.cy];
+      } else {
+        var a = boxOf(els[e.from]);
+        var cl = boxOf(els[e.to]);
+        var lane = a.right + 7 + e.lane * 6;
+        d = "M " + a.right + " " + a.cy +
+            " H " + lane +
+            " V " + railY +
+            " H " + cl.cx +
+            " V " + (cl.top - 5);
+        startPort = [a.right, a.cy];
+      }
+      var path = svgEl("path", {
+        d: d,
+        "class": "edge" + (e.weak ? " weak" : ""),
+        "data-id": e.id,
+        "marker-end": "url(#arw)"
+      });
+      wireG.appendChild(path);
+      if (startPort) {
+        wireG.appendChild(svgEl("circle", {
+          cx: startPort[0], cy: startPort[1], r: 2.4, "class": "port"
+        }));
+      }
+      if (endPort) {
+        wireG.appendChild(svgEl("circle", {
+          cx: endPort[0], cy: endPort[1], r: 2.4, "class": "port"
+        }));
+      }
+    });
+  }
+
+  /* ── hover / focus: trace the lineage path ───────────────────────── */
+  function trace(start, mode) {
+    var hotN = new Set([start]);
+    var hotE = new Set();
+    var queue = [start];
+    var seen = new Set([start]);
+    while (queue.length) {
+      var cur = queue.shift();
+      var lists = [];
+      if (mode === "back" || mode === "both") lists.push(byTo.get(cur) || []);
+      if (mode === "fwd" || mode === "both") lists.push(byFrom.get(cur) || []);
+      for (var li = 0; li < lists.length; li++) {
+        var list = lists[li];
+        for (var ei = 0; ei < list.length; ei++) {
+          var e = list[ei];
+          hotE.add(e.id);
+          hotN.add(e.from);
+          hotN.add(e.to);
+          var next = e.from === cur ? e.to : e.from;
+          if (!seen.has(next)) { seen.add(next); queue.push(next); }
+        }
+      }
+    }
+    return { nodes: hotN, edges: hotE };
+  }
+
+  function focusFor(id) {
+    if (id.indexOf("clm:") === 0) return trace(id, "back");
+    if (id.indexOf("art:") === 0) {
+      var t = trace(id, "back");
+      (byFrom.get(id) || []).forEach(function (e) {
+        t.edges.add(e.id);
+        t.nodes.add(e.to);
+      });
+      return t;
+    }
+    if (id.indexOf("in:") === 0) return trace(id, "fwd");
+    return trace(id, "both");
+  }
+
+  function paintFocus(t) {
+    canvas.classList.add("focusing");
+    document.querySelectorAll("#canvas .node, #canvas .claim").forEach(function (el) {
+      el.classList.toggle("hot", t.nodes.has(el.dataset.id));
+    });
+    wireG.querySelectorAll("path.edge").forEach(function (p) {
+      var on = t.edges.has(p.dataset.id);
+      p.classList.toggle("hot", on);
+      p.classList.toggle("faded", !on);
+      p.setAttribute("marker-end", on ? "url(#arw-hot)" : "url(#arw)");
+    });
+  }
+
+  function clearFocus() {
+    canvas.classList.remove("focusing");
+    document.querySelectorAll("#canvas .node, #canvas .claim").forEach(function (el) {
+      el.classList.remove("hot");
+    });
+    wireG.querySelectorAll("path.edge").forEach(function (p) {
+      p.classList.remove("hot", "faded");
+      p.setAttribute("marker-end", "url(#arw)");
+    });
+  }
+
+  document.querySelectorAll("#canvas .node, #canvas .claim").forEach(function (node) {
+    var id = node.dataset.id;
+    node.addEventListener("pointerenter", function () { paintFocus(focusFor(id)); });
+    node.addEventListener("focus", function () { paintFocus(focusFor(id)); });
+    node.addEventListener("click", function () { paintFocus(focusFor(id)); });
+    node.addEventListener("pointerleave", function () {
+      if (document.activeElement !== node) clearFocus();
+    });
+    node.addEventListener("blur", clearFocus);
+  });
+
+  /* ── controls ─────────────────────────────────────────────────────── */
+  function setTheme(t) {
+    document.documentElement.dataset.theme = t;
+    document.querySelectorAll("[data-theme-set]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.themeSet === t));
+    });
+  }
+  document.querySelectorAll("[data-theme-set]").forEach(function (b) {
+    b.addEventListener("click", function () { setTheme(b.dataset.themeSet); });
+  });
+
+  $("#weakToggle").addEventListener("change", function () { drawWires(); });
+
+  var raf = 0;
+  function scheduleDraw() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(function () { raf = 0; drawWires(); });
+  }
+  window.addEventListener("resize", scheduleDraw);
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(scheduleDraw).observe(canvas);
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { drawWires(); });
+  }
+
+  var params = new URLSearchParams(location.search);
+  if (params.get("theme") === "light") setTheme("light");
+  if (params.get("weak") === "0") $("#weakToggle").checked = false;
+
+  drawWires();
+})();
+</script>
+</body>
+</html>

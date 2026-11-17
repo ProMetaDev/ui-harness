@@ -455,7 +455,7 @@
 html[data-theme="light"],:root{
   --bg:#f4f1e9; --panel:#fbf9f3; --subtle:#f0ece2;
   --border:#d7d1c3; --border-strong:#bdb5a5;
-  --text:#1e1c18; --muted:#6d695f; --faint:#969185;
+  --text:#1e1c18; --muted:#6d695f; --faint:#747065;
   --accent:#a8631f; --accent-2:#8a4f16; --accent-soft:rgba(168,99,31,.09); --on-accent:#fffdf8;
   --ok:#3f7a4e; --ok-soft:rgba(63,122,78,.10);
   --warn:#9a5d17; --warn-soft:rgba(154,93,23,.10);
@@ -470,7 +470,7 @@ html[data-theme="light"],:root{
 html[data-theme="dark"]{
   --bg:#0b0d10; --panel:#12161b; --subtle:#0e1115;
   --border:#232a33; --border-strong:#343c47;
-  --text:#ece9e0; --muted:#8f8d83; --faint:#66665f;
+  --text:#ece9e0; --muted:#8f8d83; --faint:#85837a;
   --accent:#e3a24b; --accent-2:#c9862f; --accent-soft:rgba(227,162,75,.12); --on-accent:#1a1206;
   --ok:#8bc49a; --ok-soft:rgba(139,196,154,.10);
   --warn:#e3a24b; --warn-soft:rgba(227,162,75,.10);
@@ -486,7 +486,7 @@ html[data-theme="dark"]{
   html[data-theme="auto"]{
     --bg:#0b0d10; --panel:#12161b; --subtle:#0e1115;
     --border:#232a33; --border-strong:#343c47;
-    --text:#ece9e0; --muted:#8f8d83; --faint:#66665f;
+    --text:#ece9e0; --muted:#8f8d83; --faint:#85837a;
     --accent:#e3a24b; --accent-2:#c9862f; --accent-soft:rgba(227,162,75,.12); --on-accent:#1a1206;
     --ok:#8bc49a; --ok-soft:rgba(139,196,154,.10);
     --warn:#e3a24b; --warn-soft:rgba(227,162,75,.10);
@@ -614,20 +614,52 @@ main > .scroll{position:relative;z-index:1;padding:26px 30px 16px}
 .mv-head h2{margin:3px 0 0;font-size:18px;line-height:1.3;font-weight:600;letter-spacing:-.02em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mv-head .mv-meta{margin-left:auto;color:var(--faint);font:10.5px var(--mono);text-align:right}
+.ws-pick{display:none}
+@media (max-width:900px){
+  .ws-pick{display:block;max-width:150px;height:28px;border:1px solid var(--border);border-radius:4px;
+    background:var(--panel);color:var(--text);font:10.5px var(--mono)}
+}
 .mv-body{max-width:900px;margin:0 auto}
 .mv-empty{max-width:420px;margin:12vh auto 0;text-align:center;color:var(--muted)}
 .mv-empty-mark{font:500 44px/1 var(--mono);color:var(--accent);opacity:.55}
 .mv-empty h3{margin:14px 0 6px;font-size:14px;color:var(--text);font-weight:600}
 .mv-empty p{margin:0;font-size:12px;line-height:1.8}
-.file-view{margin:0;border:1px solid var(--border);border-left:2px solid var(--accent);
-  border-radius:0 6px 6px 0;background:rgba(18,22,27,.62);color:var(--text);
-  display:grid;grid-template-columns:46px minmax(0,1fr);max-height:calc(100vh - 210px);
-  overflow:auto;font:11.5px/1.75 var(--mono);min-height:calc(100vh - 290px)}
-html[data-theme="light"] .file-view{background:rgba(251,249,243,.78)}
+.mv-retry{margin-top:14px;height:30px;padding:0 12px;border:1px solid var(--border-strong);border-radius:5px;
+  background:var(--panel);color:var(--text);font:11px var(--mono);cursor:pointer}
+.mv-retry:hover{border-color:var(--accent);color:var(--accent)}
+.ws-layout{display:grid;grid-template-columns:minmax(0,1fr) 176px;gap:14px;align-items:start}
+.file-card{min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);
+  border-left:2px solid var(--accent);border-radius:0 6px 6px 0;background:var(--panel);
+  max-height:calc(100vh - 250px)}
+.file-card[hidden]{display:none}
+.file-bar{height:34px;display:flex;align-items:center;gap:8px;padding:0 10px;flex:none;
+  border-bottom:1px solid var(--border);background:var(--panel)}
+.fcrumbs{flex:1;min-width:0;color:var(--muted);font:10.5px var(--mono);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fcrumbs b{color:var(--text);font-weight:500}
+.file-bar button{height:22px;padding:0 7px;border:1px solid var(--border);border-radius:4px;
+  background:transparent;color:var(--faint);font:10px var(--mono);cursor:pointer}
+.file-bar button:hover{color:var(--text);border-color:var(--border-strong)}
+.file-view{margin:0;border:0;border-radius:0;background:transparent;color:var(--text);
+  display:grid;grid-template-columns:46px minmax(0,1fr);overflow:auto;
+  font:11.5px/1.75 var(--mono);min-height:0}
 .file-view[hidden]{display:none}
+.file-code.wrap{white-space:pre-wrap;word-break:break-word}
 .file-gutter{padding:16px 8px;text-align:right;color:var(--faint);border-right:1px solid var(--border);
   user-select:none;line-height:1.75;white-space:pre}
 .file-code{margin:0;padding:16px 18px;white-space:pre;tab-size:2;overflow:auto;min-width:0;line-height:1.75}
+.file-facts{border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:12px;
+  position:sticky;top:0}
+.file-facts[hidden]{display:none}
+.ff-kicker{font:10.5px var(--mono);letter-spacing:.14em;color:var(--faint);margin-bottom:8px}
+.ff-path{font:10.5px/1.5 var(--mono);color:var(--text);word-break:break-all;padding-bottom:9px;
+  border-bottom:1px solid var(--border);margin-bottom:9px}
+.ff-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;
+  color:var(--faint);font:10.5px var(--mono)}
+.ff-row b{color:var(--muted);font-weight:500}
+.ff-note{margin-top:12px;padding-top:9px;border-top:1px solid var(--border);color:var(--faint);
+  font-size:10.5px;line-height:1.65}
+@media (max-width:1100px){.ws-layout{grid-template-columns:1fr}.file-facts{position:static}}
 .cap-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:24px;align-items:start}
 .cap-card{border:1px solid var(--border);border-radius:6px;background:var(--panel);overflow:hidden}
 .cap-card .cap-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
@@ -911,12 +943,16 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   .mh-path{display:none}
 }
 @media (max-width:900px){
-  .shell{grid-template-columns:54px minmax(0,1fr)}
+  .shell,.shell.right-hidden{grid-template-columns:54px minmax(0,1fr)}
+  main{grid-column:2}
+  .right{display:none;grid-column:auto}
   .sidebar{display:none}
   .shell .statusbar{grid-column:1/-1}
   .cmdbtn{display:none}
   .empty-grid{grid-template-columns:1fr;gap:26px}
   .prep{border-left:0;border-top:1px solid var(--border);padding:18px 0 0;min-height:0}
+  .ws-layout{grid-template-columns:1fr}
+  .file-facts{position:static}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;
@@ -1001,12 +1037,12 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       </div>
       <button class="more-btn" id="moreBtn" aria-label="更多操作" aria-haspopup="true" aria-expanded="false" title="更多操作">⋯</button>
     </header>
-    <div class="live-strip" id="liveStrip" hidden>
-      <span class="live-pulse"></span>
+    <div class="live-strip" id="liveStrip" role="status" aria-live="polite" hidden>
+      <span class="live-pulse" aria-hidden="true"></span>
       <span class="live-text" id="liveText">运行中</span>
       <span class="live-meta" id="liveMeta">0s</span>
       <span class="live-spacer"></span>
-      <button class="live-stop" id="liveStop" type="button">停止 <kbd>Esc</kbd></button>
+      <button class="live-stop" id="liveStop" type="button" aria-keyshortcuts="Escape">停止 <kbd>Esc</kbd></button>
     </div>
     <section class="main-view" id="workspaceMain" hidden>
       <div class="mv-head">
@@ -1015,6 +1051,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
           <h2 id="wsPath">工作区</h2>
         </div>
         <div class="mv-meta" id="wsMeta">选择左侧文件查看</div>
+        <select class="ws-pick" id="wsPick" aria-label="选择文件"></select>
       </div>
       <div class="mv-body">
         <div class="mv-empty" id="wsEmpty">
@@ -1022,9 +1059,27 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
           <h3>选一个文件</h3>
           <p>从左侧文件树打开文件；预览是只读的，带字节数与截断提示。工具对文件的写入会先经过策略与审批。</p>
         </div>
-        <div class="file-view" id="fileView" hidden>
-          <div class="file-gutter" id="fileGutter" aria-hidden="true"></div>
-          <pre class="file-code" id="fileCode"></pre>
+        <div class="ws-layout">
+          <div class="file-card" id="fileCard" hidden>
+            <div class="file-bar">
+              <div class="fcrumbs" id="fileCrumbs">—</div>
+              <button type="button" id="fileWrap" title="切换自动换行">换行</button>
+              <button type="button" id="fileCopy" title="复制文件路径">复制路径</button>
+            </div>
+            <div class="file-view" id="fileView" aria-busy="false">
+              <div class="file-gutter" id="fileGutter" aria-hidden="true"></div>
+              <pre class="file-code" id="fileCode"></pre>
+            </div>
+          </div>
+          <aside class="file-facts" id="fileFacts" hidden>
+            <div class="ff-kicker">FILE</div>
+            <div class="ff-path" id="ffPath">—</div>
+            <div class="ff-row"><span>类型</span><b id="ffExt">—</b></div>
+            <div class="ff-row"><span>大小</span><b id="ffBytes">—</b></div>
+            <div class="ff-row"><span>行数</span><b id="ffLines">—</b></div>
+            <div class="ff-row"><span>模式</span><b>只读</b></div>
+            <div class="ff-note">工具写入会先经过策略与审批；预览不落盘。</div>
+          </aside>
         </div>
       </div>
     </section>
@@ -1497,15 +1552,19 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     } else {
       busySince = 0;
       if (liveTimer) { clearInterval(liveTimer); liveTimer = 0; }
+      if (liveStop) liveStop.disabled = false;
     }
     // UU 跟着状态走：跑的时候转圈，停下来就眨眼睛
     if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
   }
 
   async function cancelTurn() {
+    if (liveStop && !liveStop.hidden) liveStop.disabled = true;
     try {
       await fetch('/api/cancel', { method: 'POST' });
-    } catch (e) {}
+    } catch (e) {
+      if (liveStop) liveStop.disabled = false;
+    }
   }
   stopBtn.onclick = async () => {
     stopBtn.disabled = true;
@@ -1516,10 +1575,22 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     }
   };
   if (liveStop) liveStop.onclick = cancelTurn;
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const paletteEl = document.getElementById('palette');
+    const moreEl = document.getElementById('moreMenu');
+    if ((paletteEl && !paletteEl.hidden) || (moreEl && !moreEl.hidden)) return;
+    if (liveStrip && liveStrip.dataset.busy === '1') {
+      e.preventDefault();
+      cancelTurn();
+    }
+  });
 
   function showApproval(ev) {
     const box = document.createElement('div');
     box.className = 'approval';
+    box.setAttribute('role', 'alertdialog');
+    box.setAttribute('aria-label', '需要审批：' + (ev.tool || '工具'));
     box.dataset.callId = ev.callId || '';
     box.innerHTML =
       '<h3>需要批准 · ' + escapeHtml(ev.tool) + '</h3>' +
@@ -1987,7 +2058,7 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
       scrollDown();
     };
     es.onerror = () => {
-      setBusy(false);
+      // 不在这里 setBusy(false)：连接闪断不代表回合结束，重连会补 state/事件
       es.close();
       if (shotMode) return; // 截图模式不重连，否则浏览器永远等不到 network idle
       // EventSource 自带的自动重连会复用旧 URL（旧 since），这里自己管
@@ -1997,10 +2068,14 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
 
   if (window.__UI_BOOT__) {
     for (const ev of window.__UI_BOOT__) handle(ev);
-    setBusy(false);
+    setBusy(!!window.__UI_BUSY__ || !!document.querySelector('.approval'));
     const snapPending = !!document.querySelector('.approval');
     if (stateEl) stateEl.textContent = snapPending ? '快照 · 待批准' : '快照';
     if (dot) dot.className = 'dot ' + (snapPending ? 'warn live' : 'ok');
+    if (liveText && liveStrip && !liveStrip.hidden) {
+      liveText.textContent = snapPending ? '快照 · 待批准' : '快照 · 运行中';
+    }
+    if (liveStop) { liveStop.hidden = true; liveStop.disabled = true; }
     document.getElementById('hint').textContent = '这是对话快照（只读）。';
     document.getElementById('send').disabled = true;
     document.getElementById('stop').style.display = 'none';
@@ -2036,7 +2111,12 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
 
   fetch('/api/state')
     .then((r) => r.json())
-    .then((s) => { setBusy(!!s.busy); if (s.seq) lastSeq = Math.max(lastSeq, 0); })
+    .then((s) => {
+      if (Number(s.seq || 0) >= lastSeq) {
+        if (s.seq) lastSeq = Number(s.seq);
+        setBusy(!!s.busy);
+      }
+    })
     .catch(() => {});
 })();
 </script>
@@ -2274,6 +2354,15 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     try {
       data = await (await fetch('/api/tree?path=' + encodeURIComponent(path || ''))).json();
     } catch (e) {}
+    if (!path) {
+      const pick = document.getElementById('wsPick');
+      if (pick) {
+        const files = (data.entries || []).filter((e) => !e.dir);
+        pick.innerHTML = '<option value="">选择文件…</option>' +
+          files.map((e) => '<option value="' + esc(e.name) + '">' + esc(e.name) + '</option>').join('');
+        pick.onchange = () => { if (pick.value) openFile(pick.value, null); };
+      }
+    }
     for (const e of data.entries || []) {
       const row = document.createElement('div');
       row.className = 't-row';
@@ -2302,66 +2391,145 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
     }
   }
 
+  let fileSeq = 0;
+  let openPath = '';
   async function openFile(path, row) {
     const panel = document.getElementById('workspaceMain');
+    const card = document.getElementById('fileCard');
     const view = document.getElementById('fileView');
     const code = document.getElementById('fileCode');
     const gutter = document.getElementById('fileGutter');
+    const facts = document.getElementById('fileFacts');
     const empty = document.getElementById('wsEmpty');
     const title = document.getElementById('wsPath');
     const meta = document.getElementById('wsMeta');
+    const crumbs = document.getElementById('fileCrumbs');
+    const copyBtn = document.getElementById('fileCopy');
+    const wrapBtn = document.getElementById('fileWrap');
+    const pick = document.getElementById('wsPick');
     if (!panel || !view || !code) return;
+    if (pick) pick.value = path;
+    const seq = ++fileSeq;
+    openPath = path;
     if (row) {
       document.querySelectorAll('#tree .t-row.on').forEach((r) => r.classList.remove('on'));
       row.classList.add('on');
     }
     if (title) title.textContent = path;
     if (meta) meta.textContent = '读取中…';
+    if (card) card.hidden = false;
+    if (facts) facts.hidden = true;
+    if (empty) empty.hidden = true;
+    if (code) code.textContent = '读取中…';
+    if (gutter) gutter.textContent = '';
+    view.hidden = false;
+    view.setAttribute('aria-busy', 'true');
+    if (crumbs) {
+      const parts = path.split('/');
+      crumbs.innerHTML = parts.map((p, i) =>
+        i === parts.length - 1 ? '<b>' + esc(p) + '</b>' : esc(p) + ' / '
+      ).join('');
+    }
     let d = { ok: false, error: '读不到' };
     try {
       d = await (await fetch('/api/file?path=' + encodeURIComponent(path))).json();
     } catch (e) {
       d = { ok: false, error: e.message };
     }
+    if (seq !== fileSeq) return; // 快速连点：只认最后一次
+    view.setAttribute('aria-busy', 'false');
     if (!d.ok) {
-      if (meta) meta.textContent = d.error || '读取失败';
+      code.textContent = '读取失败：' + (d.error || '未知错误');
+      if (gutter) gutter.textContent = '';
+      if (meta) meta.textContent = '读取失败';
+      if (facts) facts.hidden = true;
       return;
     }
     const lines = d.text ? d.text.split('\n').length : 0;
+    const ext = (d.path || path).split('.').pop().toUpperCase();
     if (meta) {
-      const ext = (d.path || path).split('.').pop().toUpperCase();
       meta.textContent =
         (ext && ext.length <= 5 ? ext : 'TEXT') + ' · 只读 · ' + d.bytes + ' B · ' + lines + ' 行' +
         (d.truncated ? ' · 已截断 512 KB' : '') + (d.binary ? ' · 二进制' : '');
       meta.title = d.path || path;
     }
-    if (empty) empty.hidden = true;
-    view.hidden = false;
+    if (facts) facts.hidden = false;
+    const setFact = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    };
+    setFact('ffPath', d.path || path);
+    setFact('ffExt', ext && ext.length <= 5 ? ext : 'TEXT');
+    setFact('ffBytes', d.bytes + ' B');
+    setFact('ffLines', String(lines));
     code.textContent = d.binary ? '（二进制文件，不在页面里预览）' : d.text;
     if (gutter) {
       gutter.textContent = d.binary || !lines
         ? ''
         : Array.from({ length: lines }, (_, i) => String(i + 1)).join('\n');
     }
+    if (wrapBtn && code) {
+      const shouldWrap = /\.(md|txt|markdown)$/i.test(path);
+      code.classList.toggle('wrap', shouldWrap);
+      wrapBtn.textContent = shouldWrap ? '不换行' : '换行';
+      wrapBtn.onclick = () => {
+        code.classList.toggle('wrap');
+        wrapBtn.textContent = code.classList.contains('wrap') ? '不换行' : '换行';
+      };
+    }
+    if (copyBtn) {
+      copyBtn.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(openPath);
+          copyBtn.textContent = '已复制';
+          setTimeout(() => { copyBtn.textContent = '复制路径'; }, 1200);
+        } catch (e) {}
+      };
+    }
   }
 
   // ── 实验室：实验包列表 + 报告 ──
   const docEl = document.getElementById('doc');
-  let labCache = [];
+  let labCache = null;
   let labRoot = '';
+  let labError = '';
   function renderLabOverview() {
     const box = document.getElementById('labOverview');
     const meta = document.getElementById('labMeta');
     if (!box) return;
     if (meta) {
-      meta.textContent = labCache.length + ' 个实验包' + (labRoot ? ' · ' + labRoot : '');
+      meta.textContent = labCache === null
+        ? '扫描实验包…'
+        : (labError || (labCache.length + ' 个实验包' + (labRoot ? ' · ' + labRoot : '')));
       meta.title = labRoot || '';
+    }
+    if (labError) {
+      box.innerHTML =
+        '<div class="mv-empty" style="margin-top:8vh"><div class="mv-empty-mark">!</div>' +
+        '<h3>读不到实验包</h3><p>' + esc(labError) + '</p>' +
+        '<button class="mv-retry" type="button">重试</button></div>';
+      const retry = box.querySelector('.mv-retry');
+      if (retry) retry.onclick = loadLab;
+      return;
+    }
+    if (labCache === null) {
+      box.innerHTML = '<div class="lab-grid">' +
+        '<div class="lab-card" style="opacity:.45"><div class="lt"><span class="dot"></span>扫描中…</div>' +
+        '<div class="lm">读取 bundles/</div></div></div>';
+      return;
     }
     if (!labCache.length) {
       box.innerHTML =
         '<div class="mv-empty" style="margin-top:8vh"><div class="mv-empty-mark">∅</div>' +
         '<h3>还没有实验包</h3><p>用 <span class="mono">ui lab pack</span> 生成一个；' +
-        '每个包会带产物、输入血统和结论对账。</p></div>';
+        '每个包会带产物、输入血统和结论对账。</p>' +
+        '<div style="display:flex;gap:8px;justify-content:center;margin-top:14px">' +
+        '<button class="mv-retry" type="button" data-lab="run">跑一次基准</button>' +
+        '<button class="mv-retry" type="button" data-lab="refresh">重新扫描</button></div></div>';
+      const run = box.querySelector('[data-lab="run"]');
+      if (run) run.onclick = () => { const b = document.getElementById('labRun'); if (b) b.click(); };
+      const refresh = box.querySelector('[data-lab="refresh"]');
+      if (refresh) refresh.onclick = loadLab;
       return;
     }
     box.innerHTML =
@@ -2385,11 +2553,20 @@ body,.activity,.sidebar,main,.right,.statusbar,.tabbar,.masthead,.composer-wrap,
   async function loadLab() {
     const box = document.getElementById('labList');
     if (!box) return;
+    labCache = null;
+    labError = '';
     box.innerHTML = '<div class="side-item" style="color:var(--faint)">扫描中…</div>';
+    renderLabOverview();
     let data = { bundles: [] };
     try {
       data = await (await fetch('/api/lab/bundles')).json();
-    } catch (e) {}
+    } catch (e) {
+      labError = e.message || '网络错误';
+      labCache = [];
+      box.innerHTML = '<div class="side-item">读取失败<span class="meta">!</span></div>';
+      renderLabOverview();
+      return;
+    }
     const list = data.bundles || [];
     labCache = list;
     labRoot = data.root || '';
