@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use ui_core::agent::{ApprovalRequest, Hooks};
 use ui_core::json::{self, Json};
+use ui_core::prompt::Snapshot;
 
 use ui_core::tools::ToolResult;
 use ui_core::{Agent, Decision};
@@ -118,6 +119,43 @@ impl Hooks for WebHooks {
         ]));
     }
 
+    fn on_snapshot(&mut self, snapshot: &Snapshot) {
+        // 右栏「当前步」的数据源：分段 + 计价，和 journal 同一处产生。
+        self.hub.push(Json::obj(vec![
+            ("type", Json::from("snapshot")),
+            ("id", Json::from(snapshot.id.as_str())),
+            ("tokens", Json::from(snapshot.tokens)),
+            ("bytes", Json::from(snapshot.bytes)),
+            (
+                "sections",
+                Json::Arr(
+                    snapshot
+                        .sections
+                        .iter()
+                        .map(|s| {
+                            Json::obj(vec![
+                                ("id", Json::from(s.id)),
+                                ("owner", Json::from(s.owner)),
+                                ("tokens", Json::from(s.tokens)),
+                                ("bytes", Json::from(s.bytes)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]));
+    }
+
+    fn on_decision(&mut self, call_id: &str, tool: &str, decision: Decision, reason: &str) {
+        self.hub.push(Json::obj(vec![
+            ("type", Json::from("decision")),
+            ("callId", Json::from(call_id)),
+            ("tool", Json::from(tool)),
+            ("decision", Json::from(decision.name())),
+            ("reason", Json::from(reason)),
+        ]));
+    }
+
     fn on_tool(&mut self, name: &str, _args: &Json, result: &ToolResult) {
         let detail = result
             .error
@@ -156,6 +194,7 @@ impl Hooks for WebHooks {
             self.hub.push(Json::obj(vec![
                 ("type", Json::from("approved")),
                 ("verdict", Json::from("auto")),
+                ("callId", Json::from(req.call_id.as_str())),
             ]));
             return Decision::Allow;
         }
@@ -163,6 +202,7 @@ impl Hooks for WebHooks {
         *self.hub.approval.lock().unwrap() = Some(tx);
         self.hub.push(Json::obj(vec![
             ("type", Json::from("approval")),
+            ("callId", Json::from(req.call_id.as_str())),
             ("tool", Json::from(req.tool.as_str())),
             (
                 "effects",
@@ -195,6 +235,7 @@ impl Hooks for WebHooks {
                         self.hub.push(Json::obj(vec![
                             ("type", Json::from("approved")),
                             ("verdict", Json::from("cancelled")),
+                            ("callId", Json::from(req.call_id.as_str())),
                         ]));
                         return Decision::Deny;
                     }

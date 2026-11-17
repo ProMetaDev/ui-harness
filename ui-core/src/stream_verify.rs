@@ -24,6 +24,10 @@ pub struct StreamReport {
     pub corrupt: Option<Corrupt>,
     pub open_turn: Option<u64>,
     pub open_tools: Vec<String>,
+    /// 未完成调用的**原始事件**（tool/start），resume 需要 args 才能判断能否重放
+    pub open_tool_events: Vec<crate::json::Json>,
+    /// 未完成轮次的**原始事件**（turn/start）
+    pub open_turn_event: Option<crate::json::Json>,
     /// 校验通过的字节数（用于截断修复）
     pub good_bytes: usize,
 }
@@ -44,9 +48,13 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
         corrupt: None,
         open_turn: None,
         open_tools: Vec::new(),
+        open_tool_events: Vec::new(),
+        open_turn_event: None,
         good_bytes: 0,
     };
     let mut open: BTreeSet<String> = BTreeSet::new();
+    let mut open_events: std::collections::BTreeMap<String, crate::json::Json> = Default::default();
+    let mut open_turn_event: Option<crate::json::Json> = None;
     let mut open_turn: Option<u64> = None;
     let mut line_no = 0usize;
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
@@ -134,14 +142,22 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
             "turn/start" => {
                 report.turns += 1;
                 open_turn = Some(event.u64_at("turn").unwrap_or(0));
+                open_turn_event = Some(event.clone());
             }
-            "turn/end" => open_turn = None,
+            "turn/end" => {
+                open_turn = None;
+                open_turn_event = None;
+            }
             "tool/start" => {
                 report.tool_starts += 1;
-                open.insert(event.str_at("callId").unwrap_or("?").to_string());
+                let id = event.str_at("callId").unwrap_or("?").to_string();
+                open.insert(id.clone());
+                open_events.insert(id, event.clone());
             }
             "tool/end" => {
-                open.remove(event.str_at("callId").unwrap_or("?"));
+                let id = event.str_at("callId").unwrap_or("?").to_string();
+                open.remove(&id);
+                open_events.remove(&id);
             }
             _ => {}
         }
@@ -149,12 +165,14 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
 
     report.open_turn = open_turn;
     report.open_tools = open.into_iter().collect();
+    report.open_tool_events = open_events.into_values().collect();
+    report.open_turn_event = open_turn_event;
     report.good_bytes = good_bytes;
     Ok(report)
 }
 
 /// 返回 (切点偏移, hash)。切点之后是 `,"hash":"…"}`，校验时用 `}` 补回。
-fn trailing_hash(line: &[u8]) -> Option<(usize, String)> {
+pub(crate) fn trailing_hash(line: &[u8]) -> Option<(usize, String)> {
     if line.last() != Some(&b'}') || line.len() < 12 {
         return None;
     }

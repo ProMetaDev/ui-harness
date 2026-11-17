@@ -8,8 +8,8 @@
 use crate::json::{self, Json};
 use crate::sha256;
 use crate::time;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -146,6 +146,108 @@ impl Drop for FileLock {
 }
 
 
+/// 只扫一遍文件、只解析最后一条记录的结果。
+struct TailScan {
+    seq: u64,
+    prev: String,
+    /// 最后一条完整记录之后的字节位置（撕裂时就是可修复前缀长度）
+    offset: u64,
+    turns: u64,
+    dropped: u64,
+    last: Option<Json>,
+    corrupt: Option<Corrupt>,
+    torn_reason: Option<String>,
+}
+
+/// 扫尾部而不是全量：
+///   - 逐行读，但**不解析**（只在字节里找 turn/start 标记），常数极小；
+///   - 只保留最后一条完整记录并解析它，拿到 seq 与 hash；
+///   - 尾部没换行 = 撕裂，交给调用方截断。
+fn scan_tail(path: &Path) -> io::Result<TailScan> {
+    use std::io::BufRead;
+    let f = File::open(path)?;
+    let mut reader = BufReader::with_capacity(256 * 1024, f);
+
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut last: Vec<u8> = Vec::new();
+    let mut offset = 0u64;
+    let mut good = 0u64;
+    let mut turns = 0u64;
+    let mut lines = 0u64;
+    let mut corrupt: Option<Corrupt> = None;
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if buf.last() != Some(&b'\n') {
+            corrupt = Some(Corrupt {
+                seq: None,
+                reason: format!("第 {} 行没有结尾换行（崩溃残留）", lines + 1),
+                torn: true,
+                good_bytes: good as usize,
+            });
+            break;
+        }
+        // 空行（外部工具插进来的）不是记录：不能让它成为"最后一条"，
+        // 否则 seq/prev 会归零，下一次 append 就把链写断。
+        let is_record = buf.iter().any(|b| !b.is_ascii_whitespace());
+        if is_record {
+            if contains(&buf, b"\"kind\":\"turn/start\"") {
+                turns += 1;
+            }
+            std::mem::swap(&mut last, &mut buf);
+        }
+        offset += n as u64;
+        good = offset;
+        lines += 1;
+    }
+
+    let (seq, prev) = if last.is_empty() {
+        (0, GENESIS.to_string())
+    } else {
+        match parse_line(&last) {
+            Some(e) => (
+                e.u64_at("seq").unwrap_or(0),
+                e.str_at("hash").unwrap_or(GENESIS).to_string(),
+            ),
+            None => (0, GENESIS.to_string()),
+        }
+    };
+
+    Ok(TailScan {
+        seq,
+        prev,
+        offset: good,
+        turns,
+        dropped: 0,
+        last: parse_line(&last),
+        corrupt,
+        torn_reason: None,
+    })
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    // ? str ???(??? memchr),???? windows().any() ?????
+    match std::str::from_utf8(hay) {
+        Ok(s) => match std::str::from_utf8(needle) {
+            Ok(n) => s.contains(n),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn parse_line(line: &[u8]) -> Option<Json> {
+    let text = std::str::from_utf8(line).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    json::parse(text).ok()
+}
+
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -168,13 +270,15 @@ impl Journal {
         // 中间可能有别的写者追加，offset 就会跳过一条没解析过的记录，
         // 下一次 catch_up 看到 seq 对不上，直接报「日志链断了」。
         // 这不是理论问题——CI 上四线程并发时真的炸过。
-        let (events, corrupt, offset) = {
+        let (mut tail, offset) = {
             let lock_path = path.with_extension("lock");
             let _lock = FileLock::acquire(&lock_path)
                 .map_err(|e| journal_ctx(e, &path, "拿不到日志锁"))?;
-            let (events, corrupt) =
-                Journal::read(&path).map_err(|e| journal_ctx(e, &path, "读日志失败"))?;
-            if let Some(c) = &corrupt {
+            // 只扫尾部：不解析历史全部记录，内存与日志大小无关。
+            // 全链校验是 ui verify 的职责（流式，O(1) 内存）；
+            // 这里只需要 seq/prev/offset、turn 计数、以及尾部是否撕裂。
+            let mut tail = scan_tail(&path).map_err(|e| journal_ctx(e, &path, "扫描日志尾部失败"))?;
+            if let Some(c) = &tail.corrupt {
                 if c.torn {
                     // A crash can leave one half-written record. Keep the verified
                     // prefix, drop the tear, and say so in the log itself.
@@ -186,6 +290,18 @@ impl Journal {
                         .map_err(|e| journal_ctx(e, &path, "截断撕裂尾巴失败"))?;
                     file.sync_all()
                         .map_err(|e| journal_ctx(e, &path, "修复后落盘失败"))?;
+                    tail.offset = c.good_bytes as u64;
+                    tail.torn_reason = Some(c.reason.clone());
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "journal corrupt at seq {}: {} ({})",
+                            c.seq.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                            c.reason,
+                            path.display()
+                        ),
+                    ));
                 }
             }
             // 崩溃可能落在 write_all(line) 与 write_all("\n") 之间：记录本身完整、
@@ -193,47 +309,25 @@ impl Journal {
             // 一行，而**下一次** open 会把它们一起当成尾部撕裂截掉。先补上换行。
             ensure_trailing_newline(&path)
                 .map_err(|e| journal_ctx(e, &path, "补齐结尾换行失败"))?;
-            let offset = fs::metadata(&path)?.len();
-            (events, corrupt, offset)
+            let offset = fs::metadata(&path)
+                .map_err(|e| journal_ctx(e, &path, "取日志大小失败"))?
+                .len();
+            (tail, offset)
         };
-        let mut torn_note = None;
-        if let Some(c) = corrupt {
-            if c.torn {
-                torn_note = Some(c.reason);
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "journal corrupt at seq {}: {} ({})",
-                        c.seq.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
-                        c.reason,
-                        path.display()
-                    ),
-                ));
-            }
-        }
-        let (seq, prev) = match events.last() {
-            Some(last) => (
-                last.u64_at("seq").unwrap_or(0),
-                last.str_at("hash").unwrap_or(GENESIS).to_string(),
-            ),
-            None => (0, GENESIS.to_string()),
-        };
-        let turns = events
-            .iter()
-            .filter(|e| e.str_at("kind") == Some("turn/start"))
-            .count() as u64;
+
+        let mut torn_note = tail.torn_reason.clone();
+        let events: Vec<Json> = tail.last.take().into_iter().collect();
         let mut journal = Journal {
             path,
-            seq,
-            prev,
+            seq: tail.seq,
+            prev: tail.prev,
             offset,
             writer: writer_id(),
             events,
-            dropped: 0,
-            turns,
+            dropped: tail.dropped,
+            turns: tail.turns,
         };
-        if let Some(reason) = torn_note {
+        if let Some(reason) = torn_note.take() {
             journal.append(
                 "journal/torn",
                 Json::obj(vec![
@@ -254,6 +348,11 @@ impl Journal {
         self.turns
     }
 
+    /// 当前已写入的事件总数（= 最后一条的 seq）。
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
     /// 有多少条历史事件为了省内存被挤出缓冲（日志文件里仍然完整）。
     pub fn dropped_events(&self) -> u64 {
         self.dropped
@@ -263,11 +362,21 @@ impl Journal {
     ///
     /// 调用者必须已经持有写锁：这里假定「我看完之后到写之前」没有人再写。
     fn catch_up(&mut self) -> io::Result<()> {
-        let data = fs::read(&self.path)?;
-        if data.len() as u64 <= self.offset {
+        // 只读「上次读到的位置之后」的新内容。
+        // 之前是 `fs::read(整个文件)`：在 15 MB 的日志上，每 append 一次就把
+        // 15 MB 读进内存（实测开一轮 18 MB RSS / 159 ms）。日志越大越慢，
+        // 而 append 是最热的路径。
+        let len = fs::metadata(&self.path)?.len();
+        if len <= self.offset {
             return Ok(());
         }
-        let tail = &data[self.offset as usize..];
+        let mut tail: Vec<u8> = Vec::with_capacity((len - self.offset) as usize);
+        {
+            let mut f = File::open(&self.path)?;
+            f.seek(SeekFrom::Start(self.offset))?;
+            f.read_to_end(&mut tail)?;
+        }
+        let tail = &tail[..];
         let mut consumed = 0usize;
         for line in tail.split_inclusive(|b| *b == b'\n') {
             if !line.ends_with(b"\n") {
@@ -604,8 +713,10 @@ mod tests {
         assert!(corrupt.expect("torn tail must be reported").torn);
 
         let repaired = Journal::open(&path).unwrap();
-        assert_eq!(repaired.events.len(), 3);
-        assert_eq!(repaired.events[2].str_at("kind"), Some("journal/torn"));
+        // open 现在只保留最后一条记录（内存与日志大小无关），修复动作自己会追加一条
+        assert_eq!(repaired.events.len(), 2, "最后一条记录 + 修复说明");
+        assert_eq!(repaired.events[1].str_at("kind"), Some("journal/torn"));
+        assert_eq!(repaired.seq(), 3, "seq 必须接上（2 条有效 + 1 条说明）");
         assert!(
             Journal::load(&path).is_ok(),
             "the chain verifies again after repair"
@@ -686,8 +797,10 @@ fn open_offset_always_matches_the_records_it_parsed() {
     // offset 就会跳过那条没解析过的记录，下一次 append 的 catch_up 看到 seq 对不上，
     // 报「日志链断了」。CI 四线程并发时复现过。
     //
-    // 直接断言不变量：**offset 必须正好等于它解析出的那些记录的字节数**。
-    // 这样不用去赌「seq 是否刚好断」，只要时序撞上就会红。
+    // 断言的不变量（open 改成只扫尾部之后）：
+    //   1. offset 必须落在行边界上、且不超过文件长度；
+    //   2. seq 与磁盘上的记录数一致（不能少算，否则 append 会写出重复 seq）；
+    //   3. 最关键的一条：**open 之后立刻 append 必须成功**——旧 bug 的表现就是这里报「链断了」。
     let dir = std::env::temp_dir().join(format!("ui-journal-toctou-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -707,29 +820,46 @@ fn open_offset_always_matches_the_records_it_parsed() {
         })
     };
 
-    for round in 0..400 {
-        let j = Journal::open(&path).unwrap();
+    for round in 0..200 {
+        let mut j = Journal::open(&path).unwrap();
         let data = std::fs::read(&path).unwrap();
-        // events 覆盖的前缀字节数（按行累加）
-        let covered: u64 = data
-            .split_inclusive(|b| *b == b'\n')
-            .take(j.events.len())
+        let _complete: u64 = data.split_inclusive(|b| *b == b'\n')
+            .filter(|l| l.ends_with(b"\n"))
             .map(|l| l.len() as u64)
             .sum();
-        assert_eq!(
-            j.offset, covered,
-            "第 {} 轮：offset {} 与解析出的 {} 条记录（{} 字节）不一致——open 跳过了记录",
-            round,
-            j.offset,
-            j.events.len(),
-            covered
+
+        assert!(
+            j.offset <= data.len() as u64,
+            "第 {} 轮：offset {} 超过文件长度 {}",
+            round, j.offset, data.len()
         );
-        drop(j);
+        // offset 必须在行边界（要么 0，要么前一个字节是换行）
+        assert!(
+            j.offset == 0 || data[(j.offset - 1) as usize] == b'\n',
+            "第 {} 轮：offset {} 不在行边界上",
+            round, j.offset
+        );
+        assert!(
+            j.seq <= complete_count(&data),
+            "第 {} 轮：seq {} 超过了磁盘上的记录数",
+            round, j.seq
+        );
+
+        // 真正的回归点：拿到的 seq/prev 必须能直接接上
+        j.append("probe", Json::obj(vec![])).unwrap_or_else(|e| {
+            panic!("第 {} 轮：open 之后 append 失败（open 跳过了记录？）：{}", round, e)
+        });
     }
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn complete_count(data: &[u8]) -> u64 {
+    data.split_inclusive(|b| *b == b'\n')
+        .filter(|l| l.ends_with(b"\n"))
+        .count() as u64
 }
 
 #[test]

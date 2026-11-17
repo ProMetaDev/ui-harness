@@ -7,7 +7,7 @@
 
 use crate::budget::{Budget, BudgetExceeded, Dim, Limits};
 use crate::json::Json;
-use crate::journal::{analyze_incomplete, Journal};
+use crate::journal::Journal;
 use crate::model::{Model, ToolCall};
 use crate::policy::{Decision, Effect, Policy, Rule, Verdict};
 use crate::cancel::Cancel;
@@ -909,11 +909,14 @@ pub struct ResumeReport {
 }
 
 pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, AgentError> {
-    let incomplete = analyze_incomplete(&agent.journal.events);
+    // 未完成的调用必须从**文件**里流式取，不能靠内存里的事件缓冲：
+    // 事件缓冲有 2000 条上限，大日志上的未完成调用可能早就被挤出去了。
+    let report = crate::stream_verify::verify_stream(agent.journal.path())
+        .map_err(AgentError::Journal)?;
     let mut reconciled = Vec::new();
     let mut needs_human = Vec::new();
 
-    for event in &incomplete.open_tools {
+    for event in &report.open_tool_events {
         let call_id = event.str_at("callId").unwrap_or("?").to_string();
         let tool_name = event.str_at("tool").unwrap_or("?").to_string();
         let args = event.get("args").cloned().unwrap_or(Json::Obj(Vec::new()));
@@ -1039,7 +1042,7 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
         }
     }
 
-    if let Some(turn) = &incomplete.open_turn {
+    if let Some(turn) = &report.open_turn_event {
         let n = turn.u64_at("turn").unwrap_or(0);
         agent.journal.append(
             "turn/end",

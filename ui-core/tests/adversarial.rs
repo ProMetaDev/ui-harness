@@ -230,8 +230,10 @@ fn a_torn_tail_that_splits_a_utf8_character_is_repairable() {
     assert!(corrupt.expect("必须报告尾部撕裂").torn);
 
     let repaired = Journal::open(&path).unwrap();
-    assert_eq!(repaired.events.len(), 3);
-    assert_eq!(repaired.events[2].str_at("kind"), Some("journal/torn"));
+    // open 现在只保留最后一条记录（内存与日志大小无关），修复说明由 append 追加
+    assert_eq!(repaired.events.len(), 2, "最后一条记录 + 修复说明");
+    assert_eq!(repaired.events[1].str_at("kind"), Some("journal/torn"));
+    assert_eq!(repaired.seq(), 3);
     assert!(Journal::load(&path).is_ok(), "修复后哈希链必须重新成立");
 }
 

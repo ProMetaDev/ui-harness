@@ -445,6 +445,7 @@
 <body>
 <div class="shell" id="shell">
   <nav class="activity">
+    <a class="rail-brand" href="#" title="U:I · Unleash your imagination" onclick="return false">U:I</a>
     <button class="act active" data-view="chat" title="对话 · Ctrl+1">
       <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>
@@ -468,7 +469,7 @@
 
   <aside class="sidebar">
     <div class="side-head">
-      <div class="brand"><span class="box">U:I</span><span class="brand-name" id="sideTitle">对话</span></div>
+      <div class="side-title"><span class="dot ok"></span><span class="brand-name" id="sideTitle">对话</span></div>
       <button class="icon-btn" id="rightToggle" title="账本 / 审批">
         <svg viewBox="0 0 24 24" style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
       </button>
@@ -520,6 +521,11 @@
   <main>
     <div class="tabbar">
       <div class="tab on"><span class="dotm"></span>对话 · 当前会话</div>
+      <div class="spacer"></div>
+      <button class="cmdbtn" id="cmdBtn" title="命令面板 · Ctrl K">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <span>命令、会话、文件</span><kbd>Ctrl K</kbd>
+      </button>
       <div class="crumbs" id="crumbs">—</div>
     </div>
     <div class="scroll">
@@ -566,10 +572,10 @@
         </div>
       </div>
       <div class="wrap" id="log"></div>
-      <div id="approvals"></div>
       <div id="doc" class="doc" hidden></div>
     </div>
     <div class="composer-wrap">
+      <div id="approvals"></div>
       <div class="composer">
         <svg class="dot dot-sm" data-mood="idle" viewBox="0 0 40 36" role="img" aria-label="UU"><title>UU</title>
           <rect class="body" x="2" y="1" width="36" height="29" rx="10"/>
@@ -590,17 +596,46 @@
   </main>
 
   <aside class="right" id="right">
-    <div class="right-head">本轮账本</div>
-    <div class="right-body">
-      <div class="kv"><span>模式</span><b id="rmode">standard</b></div>
-      <div class="kv"><span>模型</span><b id="rmodel">—</b></div>
-      <div class="kv"><span>上下文</span><b id="rtok">0 tok</b></div>
-      <div class="kv"><span>工具调用</span><b id="rcalls">0</b></div>
-      <div class="kv"><span>预算</span><b id="rbud">—</b></div>
-      <div class="bar2"><i id="rbar"></i></div>
-      <div class="right-sec">审批队列</div>
-      <div id="queue" style="font-size:12px;color:var(--faint)">没有待审批的动作</div>
+    <div class="insp-head">
+      <div class="stepno" id="stepNo">—</div>
+      <div class="lbl">
+        <div class="kicker">Current step</div>
+        <div class="st"><span class="dot" id="stepDot"></span><b id="stepState">空闲</b></div>
+      </div>
     </div>
+    <div class="right-body">
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Context</span><span class="v" id="ctxMeta">0 tok</span></div>
+        <div class="segbar" id="ctxBar"></div>
+        <div id="ctxSections"><div class="empty-note">发一条消息后出现</div></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Decisions</span><span class="v" id="decCount">0</span></div>
+        <div id="decisionList"><div class="empty-note">还没有工具调用</div></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk budget">
+        <div class="blk-head"><span class="kicker">Budget</span><span class="v">session</span></div>
+        <div class="brow"><span>tokens</span><b><span id="rtok">0</span> / <span id="rbud">—</span></b></div>
+        <div class="bline"><div class="bar"><i id="rbar"></i></div><span class="pct" id="rpct">0%</span></div>
+        <div class="brow"><span>tool calls</span><b><span id="rcalls">0</span> / 60</b></div>
+        <div class="brow"><span>mode</span><b id="rmode">standard</b></div>
+        <div class="brow"><span>model</span><b id="rmodel">—</b></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="blk">
+        <div class="blk-head"><span class="kicker">Approval queue</span><span class="v" id="queueCount">0</span></div>
+        <div id="queue"><div class="empty-note">没有待审批的动作</div></div>
+      </div>
+    </div>
+    <div class="insp-foot"><span class="dot ok"></span>journal verified</div>
   </aside>
 
   <footer class="statusbar">
