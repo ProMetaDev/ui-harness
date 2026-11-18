@@ -46,7 +46,7 @@ bash tools/debug.sh       # 门禁：构建 + 端到端 + 攻击场景 + 跨平�
 
 ```
 $ ui --version
-ui 1.0.1 (commit a294c30, built 2026-11-17)
+ui 0.2.0 (commit a294c30, built 2026-11-17)
 ```
 
 网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：

@@ -63,19 +63,38 @@ struct Hub {
 
 impl Hub {
     fn push(&self, mut event: Json) {
+        // log → subs 是唯一锁顺序；取号也必须在 log 临界区内。
+        // 否则并发事件可能乱序，订阅交接也可能同时收到 backlog 和 live 副本。
+        let mut log = self.log.lock().unwrap();
         let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         event.set("seq", Json::from(n));
         event.set("ts", Json::from(ui_core::time::now_ms()));
         let line = event.to_compact();
-        self.log.lock().unwrap().push((n, line.clone()));
+        log.push((n, line.clone()));
         let mut subs = self.subs.lock().unwrap();
         subs.retain(|tx| tx.send(line.clone()).is_ok());
     }
 
-    fn answer(&self, decision: Decision) {
-        if let Some(tx) = self.approval.lock().unwrap().take() {
-            let _ = tx.send(decision);
-        }
+    /// 原子地复制待补事件并注册实时订阅。调用方释放锁后再写 backlog。
+    fn subscribe(&self, since: u64) -> (Vec<String>, std::sync::mpsc::Receiver<String>) {
+        let log = self.log.lock().unwrap();
+        let backlog = log
+            .iter()
+            .filter(|(n, _)| *n > since)
+            .map(|(_, line)| line.clone())
+            .collect();
+        let (tx, rx) = channel::<String>();
+        self.subs.lock().unwrap().push(tx);
+        (backlog, rx)
+    }
+
+    fn answer(&self, decision: Decision) -> bool {
+        self.approval
+            .lock()
+            .unwrap()
+            .take()
+            .map(|tx| tx.send(decision).is_ok())
+            .unwrap_or(false)
     }
 
     /// 存一份完整工具输出，返回给页面用的 id
@@ -274,6 +293,11 @@ impl Hooks for WebHooks {
                         return Decision::Deny;
                     }
                     if started.elapsed().as_secs() > 300 {
+                        self.hub.push(Json::obj(vec![
+                            ("type", Json::from("approved")),
+                            ("verdict", Json::from("timeout")),
+                            ("callId", Json::from(req.call_id.as_str())),
+                        ]));
                         return Decision::Deny;
                     }
                 }
@@ -824,12 +848,16 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
                 "allow" | "always" => Decision::Allow,
                 _ => Decision::Deny,
             };
-            hub.answer(decision);
-            hub.push(Json::obj(vec![
-                ("type", Json::from("approved")),
-                ("verdict", Json::from(verdict)),
-            ]));
-            json_response(&mut stream, "{\"ok\":true}")
+            // WebHooks::on_approval 是唯一回执来源；这里只回答当前等待者。
+            // 重复点击或接收端已断开都不能伪装成审批成功。
+            if hub.answer(decision) {
+                json_response(&mut stream, "{\"ok\":true}")
+            } else {
+                json_response(
+                    &mut stream,
+                    "{\"ok\":false,\"reason\":\"没有待处理的审批，或审批已结束\"}",
+                )
+            }
         }
         ("GET", "/api/events") => sse(&mut stream, hub, query),
         _ => {
@@ -1095,14 +1123,13 @@ fn sse(stream: &mut TcpStream, hub: Arc<Hub>, query: &str) -> std::io::Result<()
     stream.write_all(
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
     )?;
-    let (tx, rx) = channel::<String>();
-    for (n, line) in hub.log.lock().unwrap().iter() {
-        if *n > since {
-            let _ = write!(stream, "data: {}\n\n", line);
+    let (backlog, rx) = hub.subscribe(since);
+    for line in backlog {
+        if write!(stream, "data: {}\n\n", line).is_err() {
+            return Ok(());
         }
     }
-    let _ = stream.flush();
-    hub.subs.lock().unwrap().push(tx);
+    stream.flush()?;
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(15)) {
@@ -1158,6 +1185,72 @@ mod tests {
         assert!(line.contains("memory/used"), "应当带 kind: {}", line);
         assert!(line.contains("m-abc123"), "应当带 payload: {}", line);
         assert!(!line.contains("hash"), "不该把链字段推给页面: {}", line);
+    }
+
+    #[test]
+    fn concurrent_push_keeps_sequence_and_subscription_lossless() {
+        let hub = Arc::new(Hub::default());
+        let (backlog, rx) = hub.subscribe(0);
+        assert!(backlog.is_empty());
+        const COUNT: u64 = 32;
+        let barrier = Arc::new(std::sync::Barrier::new(COUNT as usize));
+        let mut workers = Vec::new();
+        for i in 0..COUNT {
+            let hub = hub.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                hub.push(Json::obj(vec![
+                    ("type", Json::from("test")),
+                    ("value", Json::from(i)),
+                ]));
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let log = hub.log.lock().unwrap();
+        assert_eq!(log.len(), COUNT as usize);
+        for (index, (seq, line)) in log.iter().enumerate() {
+            let expected = index as u64 + 1;
+            assert_eq!(*seq, expected, "日志序号必须严格递增");
+            assert!(
+                line.contains(&format!("\"seq\":{}", expected)),
+                "事件内容与日志序号必须一致: {}",
+                line
+            );
+        }
+        drop(log);
+        let mut live = Vec::new();
+        for _ in 0..COUNT {
+            live.push(rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
+        }
+        live.sort();
+        let mut logged: Vec<_> = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect();
+        logged.sort();
+        assert_eq!(live, logged, "实时流不能丢失或重复事件");
+    }
+
+    #[test]
+    fn approval_answer_is_single_shot_and_reports_disconnect() {
+        let hub = Hub::default();
+        assert!(!hub.answer(Decision::Allow), "没有等待者时不能返回成功");
+        let (tx, rx) = channel();
+        *hub.approval.lock().unwrap() = Some(tx);
+        assert!(hub.answer(Decision::Allow));
+        assert_eq!(rx.recv().unwrap(), Decision::Allow);
+        assert!(!hub.answer(Decision::Deny), "第二次回答必须失败");
+
+        let (tx, rx) = channel();
+        *hub.approval.lock().unwrap() = Some(tx);
+        drop(rx);
+        assert!(!hub.answer(Decision::Allow), "接收端断开必须返回失败");
     }
 
     // ── 测试用的最小 HTTP 收发 ──（只处理一条连接，够验证路由与响应）
