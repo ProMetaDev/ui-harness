@@ -1225,16 +1225,14 @@ mod tests {
         for _ in 0..COUNT {
             live.push(rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
         }
-        live.sort();
-        let mut logged: Vec<_> = hub
+        let logged: Vec<_> = hub
             .log
             .lock()
             .unwrap()
             .iter()
             .map(|(_, line)| line.clone())
             .collect();
-        logged.sort();
-        assert_eq!(live, logged, "实时流不能丢失或重复事件");
+        assert_eq!(live, logged, "实时流必须与日志同序，且不能丢失或重复");
     }
 
     #[test]
@@ -1251,6 +1249,38 @@ mod tests {
         *hub.approval.lock().unwrap() = Some(tx);
         drop(rx);
         assert!(!hub.answer(Decision::Allow), "接收端断开必须返回失败");
+    }
+
+    #[test]
+    fn approval_hook_emits_one_addressed_receipt() {
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: false,
+        };
+        let req = ApprovalRequest {
+            call_id: "call-42".into(),
+            tool: "shell".into(),
+            args: Json::Null,
+            effects: Vec::new(),
+            reason: "test".into(),
+        };
+        let worker = std::thread::spawn(move || hooks.on_approval(&req));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while hub.approval.lock().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "审批等待者未及时注册");
+            std::thread::yield_now();
+        }
+        assert!(hub.answer(Decision::Allow));
+        assert_eq!(worker.join().unwrap(), Decision::Allow);
+        let log = hub.log.lock().unwrap();
+        let receipts: Vec<_> = log
+            .iter()
+            .filter(|(_, line)| line.contains("\"type\":\"approved\""))
+            .collect();
+        assert_eq!(receipts.len(), 1, "一次审批只能有一条权威回执");
+        assert!(receipts[0].1.contains("\"callId\":\"call-42\""));
+        assert!(receipts[0].1.contains("\"verdict\":\"allow\""));
     }
 
     // ── 测试用的最小 HTTP 收发 ──（只处理一条连接，够验证路由与响应）

@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "ui-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ui-core",
 ]
 
 [[package]]
 name = "ui-core"
-version = "0.2.0"
+version = "0.2.1"

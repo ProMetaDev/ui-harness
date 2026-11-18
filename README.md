@@ -7,7 +7,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 
 ---
 
-> **当前版本 0.2.0：可用，但不是生产就绪。**
+> **当前版本 0.2.1：可用，但不是生产就绪。**
 > 2026-11 的外部评审发现 2 个 P0 安全缺口与若干 P1 边界问题，**均已在 0.2.0 修复并有回归测试**
 > （逐条回应见 [docs/33](docs/33-review-response.md)）。
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
@@ -46,7 +46,7 @@ bash tools/debug.sh       # 门禁：构建 + 端到端 + 攻击场景 + 跨平�
 
 ```
 $ ui --version
-ui 0.2.0 (commit a294c30, built 2026-11-17)
+ui 0.2.1 (commit 0000000, built 2026-11-18)
 ```
 
 网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：
@@ -115,6 +115,9 @@ $ ui replay
 ## 界面
 
 终端（`ui tui`）与网页（`ui serve`）共用同一套状态：同一个内核、同一份日志、同一套策略。
+
+网页的聊天流有**离线**校验：`tools/check_chat_stream.mjs` 用假 DOM + 假 EventSource
+跑一遍 `chat.html` 的脚本，断言气泡合并、turn 状态、草稿保留与转义（不需要浏览器/网络）。
 
 ![网页端 · 对话与 step trace](docs/images/chat.png)
 
@@ -187,7 +190,7 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 
 ## 状态与许可
 
-- **0.2.0** · 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
+- **0.2.1** · 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
   Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
   但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。

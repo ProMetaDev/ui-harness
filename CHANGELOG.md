@@ -212,18 +212,32 @@
 - 工作区/能力/实验室主画布 + 文件预览 + 运行态条
 - assert the isolate manifest really uses xxh format (42 items)
 
-## v1.0.0 · 2026-11-17
+## v0.2.0 · 2026-11-18
 
 **工程**
 
+- drop scratch driver (0.2.0)
+- drop scratch driver
+- surface the failing test names in annotations (logs need auth, annotations do not)
 - lockfile 1.0.0
+
+**文档**
+
+- record the unreproducible CI flake honestly
+- theory of auditable memory/knowledge (3 impossibility results, 4 experiments, literature review)
+- README 更新到 v1.0 网页端（四工作台/step trace/能力矩阵/首开引导）
 
 **发布**
 
+- withdraw v1.0.x, adopt 0.x semver with a verified 1.0 gate (docs/34)
 - 1.0.0 (README numbers, v1 checklist closed, changelog)
 
 **其他**
 
+- close the four secrets read paths, strict tool-arg parsing, web path traversal and boundaries (external review, 2026-11-17)
+- we are a local audit log, not a transparency log
+- named journal events (memory/used, effect/observed) reach the SSE stream and the page; 1.0.1
+- step trace 时间刻度与决策/审批耗时
 - fail-closed check must not poison the shared build dir
 - 遥测状态栏、预算 sparkline、运行波形与扫描束
 - apply reports files the child deleted (never auto-deletes)
@@ -234,31 +248,4 @@
 - non-Linux Watcher stub + fail-closed Windows build (it was reporting success while failing)
 - 首开 3 步教练、活动栏标签与空状态上手提示
 - 能力矩阵（分组/effect/审批门/过滤）
-
-## v1.0.1 · 2026-11-17
-
-**文档**
-
-- README 更新到 v1.0 网页端（四工作台/step trace/能力矩阵/首开引导）
-
-**其他**
-
-- named journal events (memory/used, effect/observed) reach the SSE stream and the page; 1.0.1
-- step trace 时间刻度与决策/审批耗时
-
-## v1.0.2 · 2026-11-18
-
-**工程**
-
-- surface the failing test names in annotations (logs need auth, annotations do not)
-
-**文档**
-
-- record the unreproducible CI flake honestly
-- theory of auditable memory/knowledge (3 impossibility results, 4 experiments, literature review)
-
-**其他**
-
-- close the four secrets read paths, strict tool-arg parsing, web path traversal and boundaries (external review, 2026-11-17)
-- we are a local audit log, not a transparency log
 

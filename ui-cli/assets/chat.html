@@ -1035,7 +1035,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
 .composer-wrap{padding:14px clamp(16px,3vw,36px) 13px;background:var(--bg)}
 .composer{padding:8px 8px 8px 10px;border-radius:11px;border-color:var(--border-strong);
   box-shadow:0 4px 20px rgba(15,17,21,.045)}
-.composer textarea{font-size:14px;line-height:1.65;min-height:34px;padding:5px 2px}
+.composer textarea{font-size:14px;line-height:1.65;min-height:34px;padding:5px 2px;overflow:hidden}
 .composer .primary,.composer .stop{height:34px;min-width:56px}
 .hint{font-size:10.5px;line-height:1.5}
 .right-body{padding-inline:15px}
@@ -1111,7 +1111,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   .sidebar-toggle{display:grid;flex:none}
   .masthead{padding-inline:8px 10px;gap:8px}.mh-path{display:none}
   .cmdbtn{display:none}.mh-model{display:none}
-  .sb-optional{display:none}.statusbar{gap:10px;font-size:10px}
+  .statusbar .sb-optional{display:none}.statusbar{gap:10px;font-size:10px}
   main>.scroll{padding:20px 16px 16px}.composer-wrap{padding:10px 12px 11px}
   .empty-grid{grid-template-columns:1fr;gap:26px}.empty{padding-top:12px}
   .prep{border-left:0;border-top:1px solid var(--border);padding:18px 0 0;min-height:0}
@@ -1929,6 +1929,14 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
           setTimeout(() => box.remove(), 160);
           resolveDecision(box.dataset.callId, verdict);
           clearQueue();
+          if (window.__UI_BOOT__) {
+            // 快照没有 SSE，成功回答后由这里完成本地收尾，不能留下“待批准”。
+            if (liveStrip) { liveStrip.hidden = true; liveStrip.dataset.busy = '0'; }
+            if (stateEl) stateEl.textContent = '快照 · 已审批';
+            if (dot) dot.className = 'dot ok';
+            setStep('已审批', 'ok');
+          }
+          if (window.__uiMoodSync) window.__uiMoodSync();
         } catch (e) {
           for (const b of box.querySelectorAll('button')) b.disabled = false;
           notify('审批提交失败，请重试：' + e.message, 'error');
@@ -1956,6 +1964,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       // 请求成功前不清输入，网络失败时草稿仍在。
       input.value = '';
       input.style.height = 'auto';
+      input.style.overflowY = 'hidden';
       scrollDown();
     } catch (e) {
       notify('发送失败，草稿已保留：' + e.message, 'error');
@@ -1977,6 +1986,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+    input.style.overflowY = input.scrollHeight > 180 ? 'auto' : 'hidden';
   });
 
   const modelEl = document.getElementById('model');
@@ -3369,6 +3379,8 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   };
   function restingMood() {
     if (document.querySelector('#approvals .approval:not(.leaving)')) return 'waiting';
+    // 静态快照没有实时 worker；清掉审批卡后不能永远停在 waiting/thinking。
+    if (window.__UI_BOOT__) return 'idle';
     const live = document.getElementById('liveStrip');
     return live && live.dataset.busy === '1' ? 'thinking' : 'idle';
   }
@@ -3389,6 +3401,9 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     if (revertMs) moodTimer = setTimeout(() => setMood(restingMood()), revertMs);
   }
   window.__uiMood = setMood;
+  window.__uiMoodSync = () => setMood(restingMood());
+  // 首屏快照先于外壳脚本渲染，组件挂载后要继承真实的 busy / approval。
+  setMood(restingMood());
   const uuButton = document.getElementById('uuButton');
   if (uuButton) {
     uuButton.onclick = () => notify('UU：' + MOOD_LABELS[currentMood]);
