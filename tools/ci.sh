@@ -29,6 +29,13 @@ run_step() {
   fi
   printf '\n---- %s 失败，最后 40 行 ----\n' "$name"
   tail -40 "$STEP_LOG"
+  # 失败测试名单独打一遍：CI 日志可能要鉴权才能读，但 annotations 不用。
+  # 只打"可执行信息"（哪个测试、哪一行 panic），不打整段输出。
+  local failed_tests
+  failed_tests=$(grep -aE '^(test .* FAILED|---- .* stdout ----|thread .* panicked at)' "$STEP_LOG" | head -6 || true)
+  if [ -n "$failed_tests" ]; then
+    printf '\n[CI] 失败的测试 / panic：\n%s\n' "$failed_tests"
+  fi
   printf '\n[CI] 失败于：%s\n' "$name"
   exit 1
 }
