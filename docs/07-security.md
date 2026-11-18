@@ -34,7 +34,7 @@
 
 ## 还没解决（明确记录）
 
-1. **`ui serve` 无鉴权**：只绑 `127.0.0.1`，单人使用；不要直接暴露到局域网。
+1. **`ui serve` 只有单用户 token 鉴权**：默认只绑 `127.0.0.1`，访问页面/API 需要 `?t=<token>`（用后种 Cookie），`--token off` 可显式关闭；仍不要直接暴露到局域网或多用户环境。
 2. **策略的 `?` 会匹配 `/`**：文档只说"一个字符"，实现更宽；已记录未改（改了会影响现有规则）。
 3. **Windows 上的进程树与文件锁**：`kill_tree` 走 `taskkill /T /F`，锁走锁文件兜底（60s 过期），都只在 WSL 里验过 Linux 路径。
 4. **多 writer 的 turn 归属只到 writer 级**：同一个 writer 内部仍是串行的，跨进程的因果顺序无法从日志推出来（只有全局 seq 定序）。
@@ -42,7 +42,7 @@
 ## 怎么复查
 
 ```bash
-bash tools/test.sh                  # 117 个测试，其中 21 个是对抗性用例
+bash tools/test.sh                  # 全量测试（数量以脚本输出为准）
 bash tools/verify_escape.sh         # 路径穿越的 E2E 复现（应被拒绝）
 bash tools/verify_pending.sh        # 退出码 + 符号链接（应被拒绝）
 bash tools/verify_shell_timeout.sh  # 超时必须连后台进程一起收掉（应 < 300ms）
@@ -136,7 +136,7 @@ ui: 打不开日志（/tmp/ws/.ui/journal.jsonl）：Permission denied (os error
     日志是执行记录，写不进去就不该继续执行；请检查磁盘空间与文件权限后重试。
 ```
 
-三个已验证的场景（`tools/verify_failclosed.sh`，进了 41 项门禁）：
+三个已验证的场景（`tools/verify_failclosed.sh`，已进 `tools/debug.sh` 门禁）：
 
 | 场景 | 工具是否执行 | 退出码 |
 |---|---|---|

@@ -35,5 +35,5 @@ plugin  ：效果按声明仲裁；声明之外的行为无法拦截
 mcp_call：同上，外部 server 在进程内自主
 ```
 
-`ui doctor` 会把这段打在输出里；`tools/kit.sh` 的七个攻击场景会告诉你
+`ui doctor` 会把这段打在输出里；`tools/kit.sh` 的攻击场景（以脚本实际输出为准）会告诉你
 哪些拦得住、哪些拦不住。

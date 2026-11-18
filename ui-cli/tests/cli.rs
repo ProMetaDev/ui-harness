@@ -430,6 +430,148 @@ fn lab_claims_must_be_backed_by_artifacts() {
 }
 
 #[test]
+fn lab_verify_json_marks_unbound_claims_loose_with_a_warning() {
+    let b = lab_bundle(
+        "verify-loose",
+        &[("metrics.json", "{\"accuracy\":0.72}")],
+        "{\"claims\":[{\"name\":\"accuracy\",\"value\":0.72}]}",
+    );
+    let out = Command::new(bin())
+        .args(["lab", "verify", b.to_str().unwrap(), "--json"])
+        .output()
+        .expect("verify --json");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // stdout 只留一行 JSON；人类可读的警告走 stderr。
+    assert_eq!(stdout.trim().lines().count(), 1, "stdout: {}", stdout);
+    let v = ui_core::json::parse(stdout.trim()).unwrap();
+    assert_eq!(v.bool_at("loose"), Some(true), "{}", stdout);
+    assert_eq!(v.u64_at("claimsOk"), Some(1));
+    assert_eq!(v.u64_at("claimsTotal"), Some(1));
+    let claims = v.arr_at("claims").cloned().unwrap_or_default();
+    assert_eq!(claims[0].bool_at("loose"), Some(true));
+    assert_eq!(claims[0].str_at("bound"), None);
+    let warnings = v.arr_at("warnings").cloned().unwrap_or_default();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("⚠ 未绑定路径，按全局匹配")),
+        "warnings: {:?}",
+        warnings
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("未绑定路径"));
+}
+
+#[test]
+fn lab_verify_binds_a_claim_to_its_named_file_not_a_coincidence() {
+    // a.json 的 accuracy 是 0.901（不在 0.9 的容差内）；b.json 里有一个
+    // 0.9 的巧合值 seed。旧逻辑在全部产物里任意匹配，会拿 b.json 的 seed 放行。
+    let b = lab_bundle(
+        "verify-scoped",
+        &[
+            ("a.json", "{\"accuracy\":0.901}"),
+            ("b.json", "{\"accuracy\":0.5,\"seed\":0.9}"),
+        ],
+        "{\"claims\":[{\"name\":\"a.json#/accuracy\",\"value\":0.9}]}",
+    );
+    let out = Command::new(bin())
+        .args(["lab", "verify", b.to_str().unwrap(), "--json"])
+        .output()
+        .expect("verify --json");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "绑定到 a.json 就必须只认 a.json：{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.bool_at("loose"), Some(false));
+    assert_eq!(v.u64_at("claimsOk"), Some(0));
+    let issues = v.arr_at("issues").cloned().unwrap_or_default();
+    assert!(
+        issues.iter().any(|i| {
+            let s = i.as_str().unwrap_or("");
+            s.contains("a.json#/accuracy") && s.contains("实际是 0.901")
+        }),
+        "issues: {:?}",
+        issues
+    );
+}
+
+#[test]
+fn lab_verify_resolves_array_indices_in_claim_paths() {
+    let b = lab_bundle(
+        "verify-array",
+        &[(
+            "metrics.json",
+            "{\"history\":[{\"score\":0.42},{\"score\":0.91}]}",
+        )],
+        "{\"claims\":[{\"name\":\"metrics.json#/history/0/score\",\"value\":0.42}]}",
+    );
+    let out = Command::new(bin())
+        .args(["lab", "verify", b.to_str().unwrap(), "--json"])
+        .output()
+        .expect("verify --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "数组下标路径必须能取到：{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.u64_at("claimsOk"), Some(1));
+    assert_eq!(v.bool_at("loose"), Some(false));
+    let claims = v.arr_at("claims").cloned().unwrap_or_default();
+    assert_eq!(
+        claims[0].str_at("bound"),
+        Some("metrics.json#/history/0/score")
+    );
+}
+
+#[test]
+fn lab_verify_rejects_a_path_that_names_no_file() {
+    let b = lab_bundle(
+        "verify-no-file",
+        &[("a.json", "{\"accuracy\":0.9}")],
+        "{\"claims\":[{\"name\":\"#/accuracy\",\"value\":0.9}]}",
+    );
+    let out = Command::new(bin())
+        .args(["lab", "verify", b.to_str().unwrap(), "--json"])
+        .output()
+        .expect("verify --json");
+    assert_eq!(out.status.code(), Some(3), "没写文件名必须报错，不能降级放行");
+    let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.u64_at("claimsOk"), Some(0));
+    assert_eq!(v.bool_at("loose"), Some(false));
+    let issues = v.arr_at("issues").cloned().unwrap_or_default();
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.as_str().unwrap_or("").contains("没写产物文件名")),
+        "issues: {:?}",
+        issues
+    );
+}
+
+fn lab_bundle(name: &str, artifacts: &[(&str, &str)], claims: &str) -> PathBuf {
+    let dir = temp_ws(name).join("bundle");
+    fs::create_dir_all(dir.join("artifacts")).unwrap();
+    let mut manifest = String::new();
+    for (file, body) in artifacts {
+        fs::write(dir.join("artifacts").join(file), body).unwrap();
+        manifest.push_str(&format!(
+            "{{\"path\":\"{}\",\"sha256\":\"{}\",\"bytes\":{}}}\n",
+            file,
+            ui_core::sha256::hex(body.as_bytes()),
+            body.len()
+        ));
+    }
+    fs::write(dir.join("manifest.jsonl"), manifest).unwrap();
+    fs::write(dir.join("claims.json"), claims).unwrap();
+    dir
+}
+
+#[test]
 fn mcp_tools_are_callable_and_policy_visible() {
     let ws = temp_ws("mcp");
     let sc = ws.join("sc.json");
@@ -703,4 +845,95 @@ fn export_streams_events_and_refuses_a_tampered_journal() {
         .expect("export");
     assert_eq!(out.status.code(), Some(2), "损坏日志的导出必须退出 2");
     assert!(!bad.exists(), "损坏日志不该产出文件");
+}
+
+#[test]
+fn bool_switch_before_subcommand_does_not_swallow_it() {
+    // 回归：`ui --yes run --task hi` 曾把 `run` 当成 `--yes` 的值，
+    // 子命令丢失后只打印帮助——退出码还是 0，特别隐蔽。
+    //
+    // `Args::parse` 是二进制私有函数，且本次改动被限定在 main.rs 的那一段，
+    // 所以这里按真实命令行行为回归：run 必须真的执行（写日志），
+    // 且 --yes 必须生效（自动批准 shell 的 proc.exec）。
+    let ws = temp_ws("flag-before-cmd");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"执行","toolCalls":[{"name":"shell","args":{"command":"echo approved"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .args([
+            "--yes",
+            "run",
+            "--task",
+            "hi",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout={} stderr={}", stdout, stderr);
+    assert!(
+        ws.join(".ui").join("journal.jsonl").is_file(),
+        "--yes 把 run 吃了，子命令没有执行。stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[自动批准]"),
+        "--yes 没有被识别成布尔开关（没有自动批准）。stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn all_boolean_switches_keep_a_following_subcommand() {
+    // 汇总表：所有只作为开关使用的选项放在子命令前面时，都不能吞掉子命令。
+    // 键值选项（--task/--workspace/...）仍按“吃掉下一个词”工作，见上面的用例。
+    for (i, flag) in [
+        "--yes",
+        "--json",
+        "--strict",
+        "--all",
+        "--force",
+        "--isolate",
+        "--help",
+        "--no-tools",
+        "--no-splash",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let ws = temp_ws(&format!("flag-table-{}", i));
+        let sc = ws.join("sc.json");
+        fs::write(&sc, r#"{"model":"scripted","steps":[{"content":"ok"}]}"#).unwrap();
+        let out = Command::new(bin())
+            .args([
+                flag,
+                "run",
+                "--task",
+                "hi",
+                "--mock",
+                sc.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+            ])
+            .output()
+            .expect("run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{}: stdout={} stderr={}", flag, stdout, stderr);
+        assert!(
+            ws.join(".ui").join("journal.jsonl").is_file(),
+            "{} 吞掉了子命令 run。stdout={}",
+            flag,
+            stdout
+        );
+    }
 }

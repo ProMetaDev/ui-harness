@@ -7,6 +7,10 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 
 ---
 
+> **生产就绪：未达到。** v1.0.x 是第一个可用的稳定原型（API/契约稳定，不等于可以上生产）。
+> 2026-11 的外部评审发现 2 个 P0 安全缺口与若干 P1 边界问题，**均已在 v1.0.2 修复并有回归测试**，
+> 逐条回应见 [docs/33](docs/33-review-response.md)。
+
 ## 它解决什么问题
 
 大多数 coding agent 的日志是**调试输出**：出事之后才知道它做过什么，而且只能看它自己愿意说的部分。
@@ -34,13 +38,13 @@ bash tools/demo-audit.sh   # 跑一轮 → 回放 → 校验 → 篡改 → 发�
 
 ```bash
 bash tools/bootstrap.sh   # 先看还缺什么（需要 Rust；其余逐项说明）
-bash tools/test.sh        # 196 个测试
-bash tools/debug.sh       # 46 项门禁：构建 + 端到端 + 攻击场景 + 跨平台
+bash tools/test.sh        # 全量测试（数量以脚本输出为准）
+bash tools/debug.sh       # 门禁：构建 + 端到端 + 攻击场景 + 跨平台（项数以脚本输出为准）
 ```
 
 ```
 $ ui --version
-ui 1.0.1 (commit 0000000, built 2026-11-17)
+ui 1.0.1 (commit a294c30, built 2026-11-17)
 ```
 
 网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：
@@ -58,7 +62,7 @@ cargo build --release
 UI_MODEL_CMD="node tools/chat_compat.mjs" ui run --task "把 hello.txt 写出来" --yes
 ```
 
-## 三个不一样的地方
+## 四个不一样的地方
 
 **1. 日志是执行记录，不是调试输出。** 每行带 `prev`/`hash`，链可以**独立校验**：
 `tools/verify_journal.py` 是 60 行 Python，不依赖 Rust 实现，格式只有两条规则。
@@ -85,8 +89,10 @@ $ bash tools/kit.sh
 5 shell 间接读密钥     GAP（已知）  读到明文            GAP
 6 插件漏报效果         GAP（已知）  写了文件无记录       GAP
 7 验收失败             退出 3       code=3             BLOCKED
+8 shell 写工作区外     被拒         被拒               BLOCKED
 ```
 
+上表只是一次运行的片段；场景数以 `bash tools/kit.sh` 的实际输出为准。
 `GAP` 是**现在拦不住**的意思，我们不假装。详见 [docs/22](docs/22-verify-kit.md)。
 
 **4. 知识与记忆是证据，不是黑箱。** 知识卡绑定它描述的那份源码，记忆的每次注入都留痕：
@@ -168,7 +174,7 @@ $ ui replay
 ## 验证方式
 
 ```bash
-bash tools/kit.sh                        # 8 个攻击场景，一张结论表
+bash tools/kit.sh                        # 攻击场景，一张结论表（场景数以输出为准）
 python3 tools/verify_journal.py JOURNAL  # 0 完好 / 2 链被改 / 3 尾部残缺
 UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3 seeds 实验链路
 ```
@@ -179,7 +185,7 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 
 ## 状态与许可
 
-- **v1.0.1** · **196 个测试** · **46 项门禁** · CI 在 Linux 与 Windows 交叉编译上每推必跑。
+- **v1.0.1** · 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
   Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
   但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。

@@ -13,6 +13,10 @@ demo/.ui/
 # 导出物（轨迹、截图、验收副本）
 out/
 
+# 门禁/攻击场景的临时产物；仓库根不应出现
+/out.txt
+/sneaky.txt
+
 # 发布包（可重新生成）
 dist/
 .ci-step.log

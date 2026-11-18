@@ -665,6 +665,52 @@ fn a_symlink_cannot_smuggle_reads_out_of_the_workspace() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+#[cfg(unix)]
+#[test]
+fn fs_mv_checks_every_fs_effect_for_symlink_escape() {
+    // fs_mv 声明两个 fs.write 效果：from 和 to。只检查第一个的话，from
+    // 明明在工作区里，to 却可以经由工作区里的符号链接目录写到外面。
+    let tmp = scratch("mv-symlink");
+    let ws = tmp.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let outside = tmp.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(ws.join("a.txt"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, ws.join("linkdir")).unwrap();
+
+    let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let script = json::parse(
+        r#"{"model":"scripted","steps":[
+            {"content":"移动","toolCalls":[{"name":"fs_mv","args":{"from":"a.txt","to":"linkdir/stolen.txt"}}]},
+            {"content":"结束"}]}"#,
+    )
+    .unwrap();
+    let model = Box::new(ScriptedModel::from_json(&script).unwrap());
+    let mut agent = Agent::new(journal, model, ws.clone(), Limits::default());
+    agent.run_turn("移动", &mut NullHooks).unwrap();
+
+    assert!(
+        !outside.join("stolen.txt").exists(),
+        "to 经符号链接逃逸后，文件被移出了工作区"
+    );
+    let events = Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let request = events
+        .iter()
+        .find(|e| e.str_at("kind") == Some("tool/request"))
+        .expect("应有 tool/request");
+    assert_eq!(
+        request.str_at("decision"),
+        Some("deny"),
+        "第二个 fs 效果逃逸时必须拒绝"
+    );
+    let reason = request.str_at("reason").unwrap_or("");
+    assert!(
+        reason.contains("linkdir/stolen.txt"),
+        "拒绝原因必须点名逃逸的目标，实际：{}",
+        reason
+    );
+}
+
 #[test]
 fn shell_timeout_kills_the_whole_process_tree() {
     // 只 kill 直接子进程时，`sleep 3 & wait` 会活到自然结束，超时形同虚设。

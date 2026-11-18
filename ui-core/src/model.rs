@@ -66,35 +66,25 @@ pub trait Model {
     }
 }
 
-/// Parse a tool-call argument string, salvaging the common truncation cases.
+/// Parse a tool-call argument string. Deliberately strict.
+///
+/// The only tolerance left is for the two things that are *not* the argument
+/// payload itself: an outer markdown code fence, and the empty string meaning
+/// "no arguments". Any malformed JSON — including a truncated object from a
+/// cut-off stream — is an `Err`. The kernel turns that into a bounded
+/// `model/repair` round; see `agent::call_model`.
+///
+/// Do **not** add bracket completion or tail-dropping here again: for a
+/// truncated `fs_write`/`patch` those turn "half a file" into a successful
+/// write, and for `shell` they execute a command prefix that was never meant
+/// to run. Silent degradation is the failure mode this project refuses.
 pub fn parse_arguments(raw: &str) -> Result<Json, String> {
     let cleaned = strip_fences(raw);
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Ok(Json::Obj(Vec::new()));
     }
-    if let Ok(v) = json::parse(trimmed) {
-        return Ok(v);
-    }
-    if let Some(fixed) = close_brackets(trimmed) {
-        if let Ok(v) = json::parse(&fixed) {
-            return Ok(v);
-        }
-    }
-    // Last resort: drop the incomplete tail and retry a few times.
-    let mut candidate = trimmed.to_string();
-    for _ in 0..24 {
-        candidate.pop();
-        if candidate.trim_end().ends_with(',') {
-            candidate.pop();
-        }
-        if let Some(fixed) = close_brackets(candidate.trim_end()) {
-            if let Ok(v) = json::parse(&fixed) {
-                return Ok(v);
-            }
-        }
-    }
-    json::parse(trimmed).map_err(|e| e)
+    json::parse(trimmed)
 }
 
 fn strip_fences(s: &str) -> String {
@@ -107,46 +97,6 @@ fn strip_fences(s: &str) -> String {
             .join("\n");
     }
     out
-}
-
-/// Append the missing closers, respecting strings and escapes.
-fn close_brackets(s: &str) -> Option<String> {
-    let mut stack: Vec<char> = Vec::new();
-    let mut in_string = false;
-    let mut escaped = false;
-    for c in s.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.last() == Some(&c) {
-                    stack.pop();
-                } else {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = s.to_string();
-    if in_string {
-        out.push('"');
-    }
-    while let Some(closer) = stack.pop() {
-        out.push(closer);
-    }
-    Some(out)
 }
 
 struct ScriptStep {
@@ -675,11 +625,24 @@ mod tests {
     }
 
     #[test]
-    fn salvages_truncated_arguments() {
-        // Missing the final brace, as a cut-off stream would produce.
-        let v = parse_arguments(r#"{"path":"src/main.rs","content":"fn main() {"#).unwrap();
-        assert_eq!(v.str_at("path"), Some("src/main.rs"));
-        assert!(v.str_at("content").unwrap().contains("fn main"));
+    fn truncated_arguments_are_an_error_not_salvaged() {
+        // 模型输出被截断（长度上限 / 网络中断）时，参数就是残缺的。旧实现会
+        // 补上引号和 `}`，于是 fs_write 把半截文件当真写进去、shell 执行命令前缀。
+        // 现在必须返回 Err，由内核走 model/repair，而不是静默降级。
+        for raw in [
+            // 缺收尾的引号和两个 `}`（旧实现补 `"` + `}` 后能解析）
+            r#"{"path":"src/main.rs","content":"fn main() {"#,
+            // 只缺一个 `}`（旧实现补一个 `}` 后能解析）
+            r#"{"path":"a.txt","content":"no closing brace""#,
+            // 旧实现还会从尾部逐字删到能凑出合法 JSON
+            r#"{"path":"a.txt","content":"truncated tail"#,
+        ] {
+            assert!(
+                parse_arguments(raw).is_err(),
+                "截断的参数不能被补全成合法 JSON: {}",
+                raw
+            );
+        }
     }
 
     #[test]

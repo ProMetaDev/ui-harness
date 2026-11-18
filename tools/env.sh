@@ -25,7 +25,7 @@ export UI_TARGET_DIR="${UI_TARGET_DIR:-$HOME/ui-target}"
 # 所有 cargo 调用统一落到这里：否则有的脚本用默认 target，产物会分裂成两份
 export CARGO_TARGET_DIR="$UI_TARGET_DIR"
 export UI_BIN="$UI_TARGET_DIR/release/ui"
-# ????????,????????????(???? .git)
+# 构建副本也读主仓库的 git 元数据：版本号才反映真实提交（副本里没有 .git）
 export UI_GIT_DIR="$UI_ROOT"
 export UI_WIN_BIN="$UI_BUILD_DIR/target/x86_64-pc-windows-gnu/release/ui.exe"
 

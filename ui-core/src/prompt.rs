@@ -286,7 +286,7 @@ pub fn set_extra_tools(list: Vec<(String, String)>) {
     }
 }
 
-/// ??(MCP ???????,????)
+/// 追加外部工具（MCP 等动态注册的，不计入内置工具表）
 pub fn add_extra_tools(mut list: Vec<(String, String)>) {
     if let Ok(mut guard) = EXTRA_TOOLS.lock() {
         guard.append(&mut list);

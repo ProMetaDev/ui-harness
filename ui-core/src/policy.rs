@@ -215,23 +215,46 @@ impl Policy {
 
     pub fn defaults(workspace: &Path) -> Vec<Rule> {
         let ws = workspace.to_string_lossy().replace('\\', "/");
-        vec![
+        let mut rules = vec![
             Rule::new(FS_READ, &format!("{}/**", ws), Decision::Allow),
             Rule::new(FS_WRITE, &format!("{}/**", ws), Decision::Allow),
             // 工具可能把「整个 workspace」当作读目标（搜索就是这样），
             // 而 `<ws>/**` 匹配不到 `<ws>` 本身——不补这条，搜索永远被拒。
             Rule::new(FS_READ, ws.as_str(), Decision::Allow).with_note("workspace 根目录本身"),
-            // 密钥目录：模型侧的工具永远读不到也改不了。内核自己读，不经过工具。
-            Rule::new(FS_READ, &format!("{}/secrets/**", ws), Decision::Deny)
-                .with_note("密钥目录：工具不允许读取"),
-            Rule::new(FS_WRITE, &format!("{}/secrets/**", ws), Decision::Deny)
-                .with_note("密钥目录：工具不允许写入"),
+        ];
+        // 受保护目录：模型侧的工具永远读不到也改不了。内核自己读，不经过工具。
+        //
+        // 注意 `/**` 与目录本身是两条不同的规则：glob 的 `**` 至少要吃掉
+        // 一个字符，`<ws>/secrets/**` 匹配不到 `<ws>/secrets`，于是
+        // `tree(path="secrets")` / `grep(path="secrets")` 会落进 `<ws>/**`
+        // 的 allow。目录本身必须单独 Deny（读 + 写）。
+        for dir in crate::protected::PROTECTED_DIRS {
+            let dir = format!("{}/{}", ws, dir);
+            for effect in [FS_READ, FS_WRITE] {
+                rules.push(
+                    Rule::new(effect, &dir, Decision::Deny)
+                        .with_note("受保护目录本身：工具不允许访问"),
+                );
+                // 直接构造的 Effect 可能保留尾斜杠（工具内部会规范化，
+                // 但策略不能假设调用方一定走 Ctx::resolve）。
+                rules.push(
+                    Rule::new(effect, &format!("{}/", dir), Decision::Deny)
+                        .with_note("受保护目录本身（尾斜杠）：工具不允许访问"),
+                );
+                rules.push(
+                    Rule::new(effect, &format!("{}/**", dir), Decision::Deny)
+                        .with_note("受保护目录：工具不允许访问"),
+                );
+            }
+        }
+        rules.extend([
             Rule::new(FS_WRITE, "**", Decision::Deny).with_note("workspace 之外的写入"),
             Rule::new(FS_READ, "**", Decision::Deny).with_note("workspace 之外的读取"),
             Rule::new(PROC_EXEC, "**", Decision::Ask).with_note("执行命令"),
             Rule::new(NET_FETCH, "**", Decision::Ask).with_note("网络访问"),
             Rule::new(SECRET_READ, "**", Decision::Ask).with_note("读取密钥"),
-        ]
+        ]);
+        rules
     }
 
     pub fn explain(&self, effect: &Effect) -> (Decision, String) {
@@ -372,5 +395,53 @@ mod tests {
             policy.explain(&Effect::new(FS_WRITE, "/ws/secrets/x.toml")).0,
             Decision::Deny
         );
+    }
+
+    #[test]
+    fn secrets_directory_itself_is_denied() {
+        // `<ws>/secrets/**` 匹配不到目录本身；`grep(path="secrets")` /
+        // `tree(path="secrets")` 的效果目标正是这个目录。没有这条 Deny，
+        // 它会落进 `<ws>/**` 的 allow。
+        let policy = Policy::new(Policy::defaults(Path::new("/ws")), Path::new("/ws"));
+        for kind in [FS_READ, FS_WRITE] {
+            assert_eq!(
+                policy.explain(&Effect::new(kind, "/ws/secrets")).0,
+                Decision::Deny,
+                "{} /ws/secrets 必须被拒",
+                kind
+            );
+            assert_eq!(
+                policy.explain(&Effect::new(kind, "/ws/secrets/")).0,
+                Decision::Deny,
+                "{} /ws/secrets/ 必须被拒",
+                kind
+            );
+        }
+        // 根目录本身仍然允许：fs_search 的效果目标就是它。
+        assert_eq!(
+            policy.explain(&Effect::new(FS_READ, "/ws")).0,
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn protected_dir_rules_follow_the_shared_list() {
+        // 清单是唯一来源：往 PROTECTED_DIRS 里加目录，策略自动跟着拒。
+        // 如果策略层又写死了一份 "secrets"，这条测试不会发现；但它至少
+        // 保证清单里的每一项都同时有「目录本身」和「目录内容」的 Deny。
+        let policy = Policy::new(Policy::defaults(Path::new("/ws")), Path::new("/ws"));
+        for dir in crate::protected::PROTECTED_DIRS {
+            for path in [format!("/ws/{}", dir), format!("/ws/{}/x", dir)] {
+                for kind in [FS_READ, FS_WRITE] {
+                    assert_eq!(
+                        policy.explain(&Effect::new(kind, &path)).0,
+                        Decision::Deny,
+                        "{} {} 必须被拒",
+                        kind,
+                        path
+                    );
+                }
+            }
+        }
     }
 }

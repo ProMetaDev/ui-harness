@@ -6,6 +6,9 @@
 
 use crate::json::Json;
 use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC};
+use crate::protected::{
+    is_protected_dir, is_protected_path, is_protected_real_path, PROTECTED_DIRS,
+};
 use crate::skill::Catalog;
 use std::fs;
 use std::io::Read;
@@ -65,11 +68,16 @@ impl Ctx {
 /// 否则另一种形态的越界路径会重新匹配上工作区规则。
 fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component;
-    // 没有 `..` 就不动：`./x` 这类写法要保持原样，否则相对 workspace
-    // （库调用方可以传 "demo"、"."）构建出来的策略 pattern 会匹配不上。
-    if !path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
+    // 相对路径没有 `..` 就不动：库调用方可以传 `demo` 或 `.`，这时折掉
+    // `./` 会让按 workspace 拼出来的策略 pattern（`./**`）匹配不上。
+    //
+    // 绝对路径（CLI 的 workspace 总是 canonicalize 过的）则一律规范化：
+    // `<ws>/./secrets` 和 `<ws>/secrets` 是同一个目录，策略层按字面匹配，
+    // 不折掉 `.`/尾斜杠就等于给 Deny 规则留了一条后缀绕过。
+    if !path.is_absolute()
+        && !path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
     {
         return path.to_path_buf();
     }
@@ -339,7 +347,7 @@ fn fs_search_run(args: &Json, ctx: &Ctx) -> ToolResult {
     let glob = args.str_at("glob").unwrap_or("**/*").to_string();
     let max = args.u64_at("maxResults").unwrap_or(60).min(200) as usize;
     let mut hits: Vec<String> = Vec::new();
-    walk(&ctx.workspace, &mut |path, text| {
+    walk(&ctx.workspace, &ctx.workspace, &mut |path, text| {
         // glob 一律按「相对 workspace」匹配。真实验收里模型写 `*.rs` 时，
         // 用绝对路径去比会一个都匹配不到，于是它只好整文件通读——token 就是这么烧掉的。
         let rel = path
@@ -374,32 +382,68 @@ fn fs_search_run(args: &Json, ctx: &Ctx) -> ToolResult {
     }
 }
 
-fn walk(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
+fn walk(workspace: &Path, dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if matches!(
-            name.as_str(),
-            "node_modules" | ".git" | ".ui" | "target" | ".cargo"
-        ) {
+        // 受保护目录的清单只有 `protected::PROTECTED_DIRS` 一份；
+        // 下面其余名字是搜索噪音，不是安全边界。
+        if is_protected_dir(&name)
+            || matches!(
+                name.as_str(),
+                "node_modules" | ".git" | ".ui" | "target" | ".cargo"
+            )
+        {
             continue;
         }
         let path = entry.path();
+        // metadata() 会跟随符号链接。工作区里一个 `alias -> secrets`
+        // 就能绕过按名字的跳过表，所以在跟随之前先看真实目标。
+        let is_symlink = entry
+            .file_type()
+            .map(|t| t.is_symlink())
+            .unwrap_or(false);
+        if is_symlink && !symlink_target_is_safe(workspace, &path) {
+            continue;
+        }
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
         if meta.is_dir() {
-            walk(&path, visit);
+            walk(workspace, &path, visit);
         } else if meta.len() < 512 * 1024 {
             if let Ok(text) = fs::read_to_string(&path) {
                 visit(&path, &text);
             }
         }
     }
+}
+
+/// 符号链接的真实目标必须仍在工作区内，且不是受保护目录。
+///
+/// 这是给「搜索/列目录」这种按名字跳过的入口补的：策略层看到的效果目标
+/// 是 workspace 根或链接本身，符号链接解析后的位置不在效果里。
+fn symlink_target_is_safe(workspace: &Path, path: &Path) -> bool {
+    let real = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let ws = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    real.starts_with(&ws) && !is_protected_path(&ws, &real)
+}
+
+fn protected_error(target: &Path) -> String {
+    format!(
+        "受保护目录不可访问：{}（{}）",
+        target.display(),
+        PROTECTED_DIRS.join("、")
+    )
 }
 
 /// A tiny matcher: literal text plus `.` and `*`. Not a full regex engine —
@@ -544,6 +588,16 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     };
     #[cfg(not(any(target_os = "linux", windows)))]
     let sandbox_label = "n/a".to_string();
+
+    // 评审 P1-1g：README 承诺"拿不到沙箱时命令直接失败"，但非 Linux/Windows 平台
+    // 之前只是打 n/a 就照常执行。这里补上 fail-closed；要跑就必须显式 UI_SANDBOX=0。
+    #[cfg(not(any(target_os = "linux", windows)))]
+    if ctx.sandbox.fs {
+        return ToolResult::err(
+            "当前平台没有可用的文件系统沙箱（只有 Linux Landlock / Windows Job Object）。\
+             确认要在此平台执行命令，请显式设置 UI_SANDBOX=0。"
+        );
+    }
 
     // 密钥卫生：默认清掉「看起来是密钥」的环境变量再交给子进程。
     // 竞品里只有 dsh 做到这一条（headless-harness-bench 的 T5 实测），
@@ -1032,6 +1086,125 @@ mod tests {
         assert!(!r.ok);
         assert_eq!(r.meta.num_at("status"), Some(3.0));
     }
+
+    /// 四个读取入口共用 `protected::PROTECTED_DIRS`：fs_search 的 walk、
+    /// 系统 grep（--exclude-dir）、无 grep 时的 literal_search、tree。
+    ///
+    /// 修复前：fs_search / grep 会返回 canary；tree(path="secrets") 会成功
+    /// 列出 astra.json；literal_search 也会返回 canary。四条断言各自会失败。
+    #[test]
+    fn every_read_entry_skips_protected_dirs() {
+        let c = ctx();
+        let tools = registry();
+        // 用清单本身而不是字面量 "secrets"：清单改了，这个测试跟着走。
+        let protected = PROTECTED_DIRS[0];
+        let protected_dir = c.workspace.join(protected);
+        fs::create_dir_all(&protected_dir).unwrap();
+        fs::write(
+            protected_dir.join("astra.json"),
+            "{\"api_key\":\"sk-LEAK-CANARY-1234\"}\n",
+        )
+        .unwrap();
+        fs::write(c.workspace.join("main.rs"), "fn main() {}\n").unwrap();
+
+        // ① fs_search 的 walk
+        let r = (find(&tools, "fs_search").unwrap().run)(
+            &Json::obj(vec![("pattern", Json::from("sk-LEAK-CANARY"))]),
+            &c,
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert!(
+            !r.content.contains("sk-LEAK-CANARY"),
+            "fs_search 读到了受保护目录：{}",
+            r.content
+        );
+
+        // ② 系统 grep（--exclude-dir）与 ③ 无 grep 时的 literal_search
+        let r = (find(&tools, "grep").unwrap().run)(
+            &Json::obj(vec![
+                ("pattern", Json::from("sk-LEAK-CANARY")),
+                ("path", Json::from(".")),
+            ]),
+            &c,
+        );
+        assert!(
+            !r.content.contains("sk-LEAK-CANARY"),
+            "grep 读到了受保护目录：{}",
+            r.content
+        );
+        let r = (find(&tools, "grep").unwrap().run)(
+            &Json::obj(vec![
+                ("pattern", Json::from("api_key")),
+                ("path", Json::from(protected)),
+            ]),
+            &c,
+        );
+        assert!(!r.ok, "grep(path=受保护目录) 必须被拒绝：{}", r.content);
+        assert!(!r.content.contains("sk-LEAK-CANARY"));
+
+        let body = literal_search(
+            &c.workspace,
+            &c.workspace,
+            "sk-LEAK-CANARY",
+            None,
+            false,
+            100,
+        )
+        .unwrap();
+        assert!(
+            !body.contains("sk-LEAK-CANARY"),
+            "literal_search 读到了受保护目录：{}",
+            body
+        );
+        assert!(
+            literal_search(
+                &c.workspace,
+                &protected_dir,
+                "api_key",
+                None,
+                false,
+                100
+            )
+            .is_err(),
+            "literal_search(path=受保护目录) 必须返回错误"
+        );
+
+        // ④ tree：列工作区时不能出现受保护目录；直接指向它必须被拒。
+        let r = (find(&tools, "tree").unwrap().run)(
+            &Json::obj(vec![("path", Json::from("."))]),
+            &c,
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert!(!r.content.contains("astra.json"), "tree 列出了：{}", r.content);
+        assert!(
+            !r.content.contains(protected),
+            "tree 在根目录列出受保护目录：{}",
+            r.content
+        );
+        let r = (find(&tools, "tree").unwrap().run)(
+            &Json::obj(vec![("path", Json::from(protected))]),
+            &c,
+        );
+        assert!(!r.ok, "tree(path=受保护目录) 必须被拒绝：{}", r.content);
+        assert!(!r.content.contains("astra.json"));
+
+        // 符号链接别名：按名字的跳过表挡不住，真实路径检查必须挡住。
+        #[cfg(unix)]
+        {
+            let alias = c.workspace.join("alias");
+            let _ = std::fs::remove_file(&alias);
+            std::os::unix::fs::symlink(&protected_dir, &alias).unwrap();
+            let r = (find(&tools, "fs_search").unwrap().run)(
+                &Json::obj(vec![("pattern", Json::from("sk-LEAK-CANARY"))]),
+                &c,
+            );
+            assert!(
+                !r.content.contains("sk-LEAK-CANARY"),
+                "fs_search 经符号链接别名读到了受保护目录：{}",
+                r.content
+            );
+        }
+    }
 }
 // ── 新增工具的实现 ──────────────────────────────────────────────
 
@@ -1041,12 +1214,26 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
         return ToolResult::err("grep 需要 pattern");
     }
     let path = args.str_at("path").unwrap_or(".");
+    let root = ctx.resolve(path);
+    // `grep(path="secrets")` 的效果目标是 `<ws>/secrets` 目录本身；策略层
+    // 现在也会拒，但工具自身再挡一次：直接调用 run 的代码不经过策略层。
+    // 真实路径检查挡住 `alias -> secrets` 这类符号链接别名。
+    if is_protected_path(&ctx.workspace, &root) || is_protected_real_path(&ctx.workspace, &root) {
+        return ToolResult::err(protected_error(&root));
+    }
     let include = args.str_at("include");
     let max_hits = args.u64_at("maxHits").unwrap_or(200).min(1000);
 
     // 用系统 GNU grep：支持 POSIX ERE 正则，零依赖。找不到就退化成字面匹配。
     let mut cmd = std::process::Command::new("grep");
     cmd.arg("-rEn").arg("--binary-files=without-match");
+    // 受保护目录的清单只有一份；`--exclude-dir` 只对递归发现的目录生效，
+    // 所以上面还要单独检查 path 指向目录本身的调用。
+    for dir in PROTECTED_DIRS {
+        cmd.arg(format!("--exclude-dir={}", dir));
+    }
+    // 这两个不是安全边界，只是别把 .git 对象和 .ui 运行态扫进结果。
+    cmd.arg("--exclude-dir=.git").arg("--exclude-dir=.ui");
     if args.bool_at("ignoreCase") == Some(true) {
         cmd.arg("-i");
     }
@@ -1081,7 +1268,7 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
             String::from_utf8_lossy(&out.stderr).trim()
         )),
         // Windows 上没有 GNU grep：退化成内置的字面匹配，并明确告诉调用方
-        Err(_) => match literal_search(&ctx.workspace, path, pattern, include, args.bool_at("ignoreCase") == Some(true), max_hits as usize) {
+        Err(_) => match literal_search(&ctx.workspace, &root, pattern, include, args.bool_at("ignoreCase") == Some(true), max_hits as usize) {
             Ok(body) => ToolResult::ok(format!("（本机没有 grep，已退化为字面匹配）\n{}", body)),
             Err(e) => ToolResult::err(e),
         },
@@ -1091,20 +1278,30 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
 /// 没有 grep 时的兜底：逐文件做字面匹配（不是正则，结果里会注明）。
 fn literal_search(
     workspace: &Path,
-    path: &str,
+    root: &Path,
     pattern: &str,
     include: Option<&str>,
     ignore_case: bool,
     max_hits: usize,
 ) -> Result<String, String> {
-    let root = workspace.join(path);
+    if is_protected_path(workspace, root) || is_protected_real_path(workspace, root) {
+        return Err(protected_error(root));
+    }
     let needle = if ignore_case {
         pattern.to_lowercase()
     } else {
         pattern.to_string()
     };
     let mut hits: Vec<String> = Vec::new();
-    fn walk(dir: &Path, needle: &str, ignore_case: bool, include: Option<&str>, hits: &mut Vec<String>, max: usize) {
+    fn walk(
+        workspace: &Path,
+        dir: &Path,
+        needle: &str,
+        ignore_case: bool,
+        include: Option<&str>,
+        hits: &mut Vec<String>,
+        max: usize,
+    ) {
         if hits.len() >= max {
             return;
         }
@@ -1118,11 +1315,18 @@ fn literal_search(
             }
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
-            if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui") {
+            if is_protected_dir(&name)
+                || matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui")
+            {
+                continue;
+            }
+            // 和 fs_search 的 walk 一样：跟随链接之前先看真实目标。
+            let is_symlink = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+            if is_symlink && !symlink_target_is_safe(workspace, &p) {
                 continue;
             }
             if p.is_dir() {
-                walk(&p, needle, ignore_case, include, hits, max);
+                walk(workspace, &p, needle, ignore_case, include, hits, max);
                 continue;
             }
             if let Some(glob) = include {
@@ -1153,7 +1357,7 @@ fn literal_search(
             }
         }
     }
-    walk(&root, &needle, ignore_case, include, &mut hits, max_hits);
+    walk(workspace, root, &needle, ignore_case, include, &mut hits, max_hits);
     if hits.is_empty() {
         Ok("（无匹配）".to_string())
     } else {
@@ -1338,11 +1542,22 @@ fn run_todo(args: &Json, ctx: &Ctx) -> ToolResult {
 fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
     let rel = args.str_at("path").unwrap_or(".");
     let root = ctx.resolve(rel);
+    if is_protected_path(&ctx.workspace, &root) || is_protected_real_path(&ctx.workspace, &root) {
+        return ToolResult::err(protected_error(&root));
+    }
     let depth = args.u64_at("depth").unwrap_or(2).min(6) as usize;
     let max_entries = args.u64_at("maxEntries").unwrap_or(200).min(2000) as usize;
     let mut lines: Vec<String> = Vec::new();
 
-    fn walk(dir: &Path, prefix: &str, level: usize, depth: usize, max: usize, out: &mut Vec<String>) {
+    fn walk(
+        workspace: &Path,
+        dir: &Path,
+        prefix: &str,
+        level: usize,
+        depth: usize,
+        max: usize,
+        out: &mut Vec<String>,
+    ) {
         if level > depth || out.len() >= max {
             return;
         }
@@ -1358,18 +1573,35 @@ fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
                 return;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui" | "dist") {
+            if is_protected_dir(&name)
+                || matches!(
+                    name.as_str(),
+                    ".git" | "target" | "node_modules" | ".ui" | "dist"
+                )
+            {
                 continue;
             }
             let p = e.path();
+            let is_symlink = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
             let is_dir = p.is_dir();
             out.push(format!("{}{}{}", prefix, name, if is_dir { "/" } else { "" }));
             if is_dir {
-                walk(&p, &format!("{}  ", prefix), level + 1, depth, max, out);
+                // 符号链接指向工作区外/受保护目录时只列名字，不进去。
+                if !is_symlink || symlink_target_is_safe(workspace, &p) {
+                    walk(
+                        workspace,
+                        &p,
+                        &format!("{}  ", prefix),
+                        level + 1,
+                        depth,
+                        max,
+                        out,
+                    );
+                }
             }
         }
     }
-    walk(&root, "", 0, depth, max_entries, &mut lines);
+    walk(&ctx.workspace, &root, "", 0, depth, max_entries, &mut lines);
     if lines.is_empty() {
         return ToolResult::ok("（空目录）");
     }

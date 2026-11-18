@@ -211,6 +211,14 @@ impl Agent {
                         }
                     }
                 }
+                // 评审 P1-1f：切换会话时工具结果也要还原，否则模型"忘了"上一条会话里
+                // 工具返回过什么。旧日志没有这个事件，只能退化成"没有工具输出"。
+                Some("tool/output") => {
+                    if let (Some(tool), Some(text)) = (e.str_at("tool"), e.str_at("text")) {
+                        let ok = e.bool_at("ok").unwrap_or(true);
+                        history.push(crate::prompt::Message::tool(tool, ok, text));
+                    }
+                }
                 _ => {}
             }
         }
@@ -619,6 +627,18 @@ impl Agent {
                 // 每个工具结果会在后面每一步被重发一次，这里是成本的主要来源。
                 let full = result.error.as_deref().unwrap_or(&result.content);
                 let kept = self.retain_tool_output(&name, full)?;
+                // 把「模型实际看到的工具输出」也写进日志：
+                // `switch_journal` 重建历史时才有东西可还原（评审 P1-1f）。
+                // 注意 kept 已按 tool_chars 截断并带落盘指针，不会让日志暴涨。
+                self.journal.append(
+                    "tool/output",
+                    Json::obj(vec![
+                        ("callId", Json::from(call.id.as_str())),
+                        ("tool", Json::from(name.as_str())),
+                        ("ok", Json::Bool(result.ok)),
+                        ("text", Json::from(kept.as_str())),
+                    ]),
+                )?;
                 self.history.push(Message::tool(&name, result.ok, &kept));
             }
 
@@ -776,18 +796,40 @@ impl Agent {
             };
         }
         if verdict.decision == Decision::Allow {
-            if let Some(target) = effects.iter().find(|e| e.kind.starts_with("fs.")) {
-                if self.escapes_workspace(&target.target) {
+            // 一个工具可能声明多个 fs.* 效果（fs_mv 的 from / to 就是两个）。
+            // 只检查第一个等于默认相信第二个：`to` 经符号链接指向工作区外时
+            // 会被 `escapes_workspace` 漏掉，而 `run_mv` 自己的字面检查看不出来。
+            let escapes: Vec<(Effect, Decision, String)> = effects
+                .iter()
+                .filter(|e| e.kind.starts_with("fs."))
+                .filter(|e| self.escapes_workspace(&e.target))
+                .map(|e| {
                     let reason = format!(
                         "{} 解析后的真实路径在工作区之外（符号链接）",
-                        target.target
+                        e.target
                     );
-                    verdict = Verdict {
-                        decision: Decision::Deny,
-                        reasons: vec![(target.clone(), Decision::Deny, reason.clone())],
-                        reason,
-                    };
-                }
+                    (e.clone(), Decision::Deny, reason)
+                })
+                .collect();
+            if !escapes.is_empty() {
+                let reason = if escapes.len() == 1 {
+                    escapes[0].2.clone()
+                } else {
+                    format!(
+                        "{} 个文件效果解析后的真实路径在工作区之外（符号链接）：{}",
+                        escapes.len(),
+                        escapes
+                            .iter()
+                            .map(|(e, _, _)| e.target.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                };
+                verdict = Verdict {
+                    decision: Decision::Deny,
+                    reasons: escapes,
+                    reason,
+                };
             }
         }
         self.journal.append(

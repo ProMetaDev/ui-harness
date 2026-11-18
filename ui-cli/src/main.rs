@@ -87,6 +87,32 @@ struct Args {
 
 impl Args {
     fn parse(list: &[String]) -> (Option<String>, Args) {
+        // 显式布尔开关表：这些选项**不吞**后面的词。
+        //
+        // 以前一律「`--x` 后面跟一个非 `--` 词就当它的值」，于是
+        // `ui --yes run --task hi` 把 `run` 吃成 `yes=run`，子命令整个丢失。
+        // 只列真正的布尔开关；键值选项（--task/--workspace/--mock ...）语义不变。
+        const BOOL_FLAGS: &[&str] = &[
+            "all",
+            "ansi",
+            "apply",
+            "dry-run",
+            "force",
+            "full",
+            "help",
+            "isolate",
+            "json",
+            "no-approval",
+            "no-env-scrub",
+            "no-isolate",
+            "no-memory",
+            "no-splash",
+            "no-tools",
+            "strict",
+            "version",
+            "watch-parent",
+            "yes",
+        ];
         let mut values = HashMap::new();
         let mut flags = Vec::new();
         let mut rest: Vec<String> = Vec::new();
@@ -95,7 +121,11 @@ impl Args {
         while i < list.len() {
             let item = &list[i];
             if let Some(key) = item.strip_prefix("--") {
-                if i + 1 < list.len() && !list[i + 1].starts_with("--") {
+                if BOOL_FLAGS.contains(&key) {
+                    // 布尔开关：永远不吃下一个词，子命令/位置参数原样留在原地
+                    flags.push(key.to_string());
+                    i += 1;
+                } else if i + 1 < list.len() && !list[i + 1].starts_with("--") {
                     values.insert(key.to_string(), list[i + 1].clone());
                     i += 2;
                 } else {
@@ -1820,25 +1850,63 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
         _ => input_skipped = true,
     }
 
-    // 结论对账：声明的每个数字都必须能在产物里找到
-    let mut claims_ok = 0usize;
-    let mut claims_total = 0usize;
-    if let Ok(text) = std::fs::read_to_string(bundle.join("claims.json")) {
-        if let Ok(doc) = json::parse(&text) {
-            let leaves = numeric_leaves(&bundle.join("artifacts"));
-            for c in doc.arr_at("claims").cloned().unwrap_or_default() {
-                claims_total += 1;
-                let name = c.str_at("name").unwrap_or("");
-                let want = c.get("value").and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
-                let tol = (want.abs() * 1e-3).max(1e-9);
-                let hit = want.is_finite() && leaves.values().any(|v| (v - want).abs() <= tol);
-                if hit {
-                    claims_ok += 1;
-                } else {
-                    bad.push(format!("结论 {} = {} 在产物里找不到对应数值", name, want));
-                }
-            }
+    // 结论对账：声明的每个数字都必须能在产物里找到。
+    // 绑定语法是 `文件.json#/字段/数组下标`（解析与核验都在 lab.rs）；旧格式
+    // （只写名字）仍能过，但会被标成 loose 并打印警告——那正是「别的字段数值
+    // 接近 → 巧合通过」的来源。
+    let claim_report = std::fs::read_to_string(bundle.join("claims.json"))
+        .ok()
+        .and_then(|text| json::parse(&text).ok())
+        .map(|doc| lab::verify_claims(&bundle.join("artifacts"), &doc))
+        .unwrap_or_default();
+    bad.extend(claim_report.issues.iter().cloned());
+
+    if args.flag("json") {
+        let doc = Json::obj(vec![
+            ("ok", Json::Bool(bad.is_empty())),
+            ("bundle", Json::from(bundle.to_string_lossy().to_string())),
+            ("artifacts", Json::from(checked)),
+            ("inputs", Json::from(input_checked)),
+            ("inputsSkipped", Json::Bool(input_skipped)),
+            ("journalOk", Json::Bool(journal_ok)),
+            ("claimsOk", Json::from(claim_report.ok)),
+            ("claimsTotal", Json::from(claim_report.total)),
+            ("loose", Json::Bool(claim_report.loose)),
+            (
+                "warnings",
+                Json::Arr(
+                    claim_report
+                        .warnings
+                        .iter()
+                        .map(|w| Json::from(w.as_str()))
+                        .collect(),
+                ),
+            ),
+            (
+                "issues",
+                Json::Arr(bad.iter().map(|b| Json::from(b.as_str())).collect()),
+            ),
+            ("claims", claim_report.claims_json()),
+        ]);
+        // stdout 只留一行 JSON；人能读的摘要、警告与问题走 stderr。
+        println!("{}", doc.to_compact());
+        eprintln!(
+            "实验包 {} · 产物 {} · 输入 {} · 结论 {}/{} 对得上 · 日志链 {}{}",
+            bundle.display(),
+            checked,
+            input_checked,
+            claim_report.ok,
+            claim_report.total,
+            if journal_ok { "完整" } else { "有问题" },
+            if input_skipped { "（工作区不在本机，跳过输入校验）" } else { "" }
+        );
+        for w in &claim_report.warnings {
+            eprintln!("{}", w);
         }
+        for b in &bad {
+            eprintln!("  - {}", b);
+        }
+        return Ok(if bad.is_empty() { 0 } else { 3 });
     }
 
     println!("实验包 {}", bundle.display());
@@ -1846,11 +1914,14 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
         "产物 {} 个校验通过 · 输入 {} 个仍一致 · 结论 {}/{} 对得上 · 日志链 {}{}",
         checked,
         input_checked,
-        claims_ok,
-        claims_total,
+        claim_report.ok,
+        claim_report.total,
         if journal_ok { "完整" } else { "有问题" },
         if input_skipped { "（工作区不在本机，跳过输入校验）" } else { "" }
     );
+    for w in &claim_report.warnings {
+        println!("{}", w);
+    }
     if bad.is_empty() {
         println!("\n结论：包是自洽的——产物哈希、日志链、无未完成调用都对得上。");
         Ok(0)
@@ -2178,38 +2249,6 @@ fn lab_claim(args: &Args) -> Result<i32, String> {
         println!("  {} = {}", c.str_at("name").unwrap_or(""), c.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0));
     }
     Ok(0)
-}
-
-/// 产物里的所有数值叶子（用于结论对账）
-fn numeric_leaves(dir: &Path) -> std::collections::BTreeMap<String, f64> {
-    fn walk(value: &Json, prefix: &str, out: &mut std::collections::BTreeMap<String, f64>) {
-        match value {
-            Json::Num(n) => {
-                out.insert(prefix.to_string(), *n);
-            }
-            Json::Obj(items) => {
-                for (k, v) in items {
-                    let key = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
-                    walk(v, &key, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = std::collections::BTreeMap::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if let Ok(v) = json::parse(&text) {
-                        walk(&v, "", &mut out);
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 /// `ui prompt`：打印当前会发给模型的快照（调试提示词用，也用来验收 A3）。

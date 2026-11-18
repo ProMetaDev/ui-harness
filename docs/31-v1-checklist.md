@@ -14,9 +14,9 @@
 
 | # | 门槛 | 验证命令 | 现状 |
 |---|---|---|---|
-| R1 | 全量测试通过 | `bash tools/test.sh` | ✅ 178 个（含 1 个 ignored 的吞吐探针） |
-| R2 | 门禁通过 | `bash tools/debug.sh` | ✅ 46 项 |
-| R3 | **干净检出的 HEAD 可构建** | 门禁第 43 项（临时 worktree + 独立 target） | ✅ |
+| R1 | 全量测试通过 | `bash tools/test.sh` | ✅ 通过（数量以 `tools/count_tests.sh` 输出为准；另有 ignored 的吞吐探针） |
+| R2 | 门禁通过 | `bash tools/debug.sh` | ✅ 全部通过（项数以脚本输出为准） |
+| R3 | **干净检出的 HEAD 可构建** | `debug.sh` 的「干净检出的 HEAD 可构建」项（临时 worktree + 独立 target） | ✅ |
 | R4 | CI 在 Linux 与 Windows 交叉编译上通过 | `tools/ci.yml` 两个 job | ✅ |
 | R5 | 日志链可校验、可回放 | `ui verify` / `ui replay` | ✅ 30 万条 549 ms / 3.4 MB |
 | R6 | 七类契约事件齐全且各有测试 | 见 `docs/02-design.md` §契约 | ✅ |
@@ -35,14 +35,14 @@
 | C3 | 权限下高自由度 | 策略（allow/ask/deny）+ `--accept` 门 | ✅ |
 | C4 | 并行与隔离 | `ui team` / `workflow --isolate` + 漂移检测 | ✅ |
 | C5 | **可审计的知识** | 卡片绑定源码 + `knowledge/use` 进链 | ✅ v0.1.15 |
-| C6 | **记忆** | `ui remember` → 检索注入 → `memory/used` 可审计 | 🚧 P1 进行中 |
+| C6 | **记忆** | `ui remember` → 检索注入 → `memory/used` 可审计 | ✅ v1.0.0（P1 人工写入） |
 | C7 | 可复现实验 | `ui lab new/pack/verify/table/claim` | ✅ |
 
 ## 四、已知限制（v1 允许带着发布，但必须写明）
 
 | # | 限制 | 影响 | 为什么可以接受 |
 |---|---|---|---|
-| U1 | **子代理删除的文件不会被合并** | 父工作区保留旧文件 | 删除是不可逆操作，宁可不做；v1 会在 `apply` 的提示里明说，并把删除列进报告（见待办 D1） |
+| U1 | **子代理删除的文件不会被合并** | 父工作区保留旧文件 | 删除是不可逆操作，宁可不做；`apply` 报告会列出删除但不自动执行（D1 已完成） |
 | U2 | 知识卡 `source_sha` 为空 = UNBOUND，默认不算 STALE | 清空 sha 可绕过默认审计 | `--strict` 会红；UNBOUND 在输出里明示 |
 | U3 | 知识预取只在 `ui run` | `chat/workflow/team` 的子任务不预取 | 子任务上下文由父决定，v1 不做 |
 | U4 | 命中不打分（score 恒 null） | 多于 3 张卡时按 id 取，不是按相关性 | 确定性优先：宁可可复现，不要不可解释的相似度 |
@@ -51,7 +51,7 @@
 | U7 | `memory/used` **双写**（主日志 + 记忆链） | 两处各自可校验，但不是唯一事实源 | 主日志给 replay/verify，记忆链给 hits 派生；P2 再决定是否收敛成单链 |
 | U8 | 记忆只有 P1（人工写入） | 模型不能自己写记忆、没有候选/确认机制 | 这是**有意**的：自动写记忆最容易污染审计，P2 才做且必须人工确认 |
 
-## 五、待办（v1 之前要做的）
+## 五、v1.0.0 发布前待办（已全部完成）
 
 | # | 事项 | 负责人 | 状态 |
 |---|---|---|---|
@@ -60,13 +60,16 @@
 | D3 | Windows 原生冒烟（exe 实跑 + 中文路径 + Job Object） | 并行 agent | ✅ 三项全过；顺带修掉"Windows 编不过 + 构建脚本假绿" |
 | D4 | README / docs/23 的数字与版本统一（195 个测试、46 项门禁） | 文档 | ✅ |
 | D5 | `docs/29` K1 措辞修正（卡源校验是 `ui knowledge check`，不是 `verify`） | 文档 | ✅ |
-| D6 | 发布：`Cargo.toml` → 1.0.0、CHANGELOG、tag `v1.0.0`、release 产物 | 发布 | 待做 |
+| D6 | 发布：`Cargo.toml` → 1.0.0、CHANGELOG、tag `v1.0.0`、release 产物 | 发布 | ✅ v1.0.0 / v1.0.1 已发布 |
 
-## 六、发布动作（D1–D5 全绿之后）
+> V1（外部锚定：`ui verify --expect-head` + 打包时记录头部哈希）**不在 v1 范围内**，
+> 保留为 **v1.1 待办**，设计说明见 [32-auditable-memory-theory.md](32-auditable-memory-theory.md) §2.4。
+
+## 六、发布动作（D1–D6 全绿之后）
 
 ```bash
 bash tools/test.sh          # 必须 == 测试通过 ==
-bash tools/debug.sh         # 必须 == 43 passed ==
+bash tools/debug.sh         # 必须 0 failed（项数以输出为准）
 bash tools/changelog.sh     # 重新生成
 bash tools/release.sh       # 产出 tar.gz + sha256 + 自校验
 bash tools/tag.sh v1.0.0 <sha> "ui 1.0.0"
@@ -91,13 +94,13 @@ v1 之前出现过两次**同一个错误**：提交时把并发 agent 正在改
 
 ### 现在的规则（已落成门禁）
 
-1. **推送前必须跑 `bash tools/debug.sh`**，其中第 43 项会从 `HEAD` 建临时 worktree
+1. **推送前必须跑 `bash tools/debug.sh`**，其中「干净检出的 HEAD 可构建」一项会从 `HEAD` 建临时 worktree
    重新构建——这是唯一能发现"提交不完整"的检查。
 2. 提交时**只 `git add` 自己完整负责的文件集合**；如果某个文件里有别人的改动，
    要么等对方提交，要么把它的依赖一起提交（保证自洽）。
 3. 并发 agent 的场景下，**不要**用 `git add -A` / `commit -a`。
 
-新增的三项门禁（43→46）：
+新增的四项门禁（加入时的编号 43→46；之后门禁继续增加，编号会变）：
 
 | # | 检查 | 为什么需要 |
 |---|---|---|

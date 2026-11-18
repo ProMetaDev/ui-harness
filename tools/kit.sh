@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
-# 验证包：七个场景，每个给出「预期 / 实际 / 结论」。
+# 验证包：十二个场景，每个给出「预期 / 实际 / 结论」。
 # 结论只有三种：BLOCKED（拦住了）、REPAIRED（可修复）、GAP（已知拦不住）。
 set -uo pipefail
 cd "$UI_ROOT"
@@ -180,6 +180,79 @@ if [ -f "$outside" ]; then
   row "8 shell 写工作区外" "被拒" "写成功了" "GAP"
 else
   row "8 shell 写工作区外" "被拒" "被拒" "BLOCKED"
+fi
+
+# ── 9. fs_search 读密钥（受保护目录遍历）──
+ws=$(mkws t9)
+mkdir -p "$ws/secrets" "$ws/src"
+printf '{"api_key":"sk-KIT-CANARY-9001"}\n' > "$ws/secrets/astra.json"
+printf 'fn main() {}\n' > "$ws/src/main.rs"
+# 任务脚本放在工作区外：否则 fs_search 会匹配到脚本里的 pattern 本身。
+cat > "$ROOT/sc9.json" <<'JSON'
+{"model":"scripted","steps":[
+  {"content":"搜索","toolCalls":[{"name":"fs_search","args":{"pattern":"sk-KIT-CANARY"}}]},
+  {"content":"完成"}]}
+JSON
+out=$("$BIN" run --task t --mock "$ROOT/sc9.json" --workspace "$ws" --yes 2>&1)
+if printf '%s' "$out" | grep -q 'sk-KIT-CANARY'; then
+  row "9 fs_search 读密钥" "读不到" "读到明文" "FAIL"
+else
+  row "9 fs_search 读密钥" "读不到" "被跳过" "BLOCKED"
+fi
+
+# ── 10. grep 读密钥（--exclude-dir + 目录本身 Deny）──
+ws=$(mkws t10)
+mkdir -p "$ws/secrets" "$ws/src"
+printf '{"api_key":"sk-KIT-CANARY-1001"}\n' > "$ws/secrets/astra.json"
+printf 'fn main() {}\n' > "$ws/src/main.rs"
+cat > "$ROOT/sc10.json" <<'JSON'
+{"model":"scripted","steps":[
+  {"content":"全盘 grep","toolCalls":[{"name":"grep","args":{"pattern":"sk-KIT-CANARY","path":"."}}]},
+  {"content":"目录 grep","toolCalls":[{"name":"grep","args":{"pattern":"api_key","path":"secrets"}}]},
+  {"content":"完成"}]}
+JSON
+out=$("$BIN" run --task t --mock "$ROOT/sc10.json" --workspace "$ws" --yes 2>&1)
+if printf '%s' "$out" | grep -q 'sk-KIT-CANARY'; then
+  row "10 grep 读密钥" "读不到" "读到明文" "FAIL"
+else
+  row "10 grep 读密钥" "读不到" "被跳过/被拒" "BLOCKED"
+fi
+
+# ── 11. tree 指向密钥目录（策略层目录本身 Deny）──
+ws=$(mkws t11)
+mkdir -p "$ws/secrets" "$ws/src"
+printf '{"api_key":"sk-KIT-CANARY-1101"}\n' > "$ws/secrets/astra.json"
+printf 'fn main() {}\n' > "$ws/src/main.rs"
+cat > "$ROOT/sc11.json" <<'JSON'
+{"model":"scripted","steps":[
+  {"content":"列密钥目录","toolCalls":[{"name":"tree","args":{"path":"secrets"}}]},
+  {"content":"列根目录","toolCalls":[{"name":"tree","args":{"path":"."}}]},
+  {"content":"完成"}]}
+JSON
+out=$("$BIN" run --task t --mock "$ROOT/sc11.json" --workspace "$ws" --yes 2>&1)
+if printf '%s' "$out" | grep -q 'astra.json'; then
+  row "11 tree 列密钥目录" "被拒/不含内容" "列出了 astra.json" "FAIL"
+else
+  row "11 tree 列密钥目录" "被拒/不含内容" "被拒/被跳过" "BLOCKED"
+fi
+
+# ── 12. fs_mv 第二个参数经符号链接逃逸（多效果检查）──
+# from 在工作区内；to 的字面前缀也在工作区内，但 linkdir 指向工作区外。
+ws=$(mkws t12)
+outside="$ROOT/outside-mv"
+rm -rf "$outside"; mkdir -p "$outside"
+printf 'payload\n' > "$ws/a.txt"
+ln -s "$outside" "$ws/linkdir"
+cat > "$ROOT/sc12.json" <<'JSON'
+{"model":"scripted","steps":[
+  {"content":"移动","toolCalls":[{"name":"fs_mv","args":{"from":"a.txt","to":"linkdir/stolen.txt"}}]},
+  {"content":"完成"}]}
+JSON
+out=$("$BIN" run --task t --mock "$ROOT/sc12.json" --workspace "$ws" --yes 2>&1)
+if [ -f "$outside/stolen.txt" ] || [ ! -f "$ws/a.txt" ]; then
+  row "12 fs_mv 二参逃逸" "被拒" "文件被移出工作区" "FAIL"
+else
+  row "12 fs_mv 二参逃逸" "被拒" "被拒" "BLOCKED"
 fi
 
 echo "验证包结果"

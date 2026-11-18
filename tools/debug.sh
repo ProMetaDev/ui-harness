@@ -127,7 +127,9 @@ run "契约自检（T1-T7，本地实跑）" bash tools/bench_self.sh
 run "CRLF+BOM 文件打补丁（Windows 回归）" bash tools/verify_crlf_patch.sh
 run "会话（新建/列表/互不干扰）" bash tools/verify_sessions.sh
 run "会话 Web（列表/切换/历史不串）" bash tools/verify_web_sessions.sh
-run "验证包（7 个攻击场景）" bash tools/kit.sh
+run "验证包（12 个攻击场景）" bash tools/kit.sh
+run "密钥隔离（评审 P0-1 回归）" bash tools/verify_secrets_isolation.sh
+run "Web /api/tree 无路径穿越（评审 P1-1a）" bash tools/verify_api_traversal.sh
 run "版本接口（--version/-V/version 一致）" bash tools/verify_version.sh
 run "密钥扫描（工作树里不能有密钥形状）" bash tools/scan_secrets.sh
 run "观测式效果（shell 实际改动入日志）" bash tools/verify_observe.sh

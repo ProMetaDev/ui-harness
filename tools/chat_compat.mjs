@@ -226,16 +226,29 @@ function extractEnvelope(s) {
 
 const envelope = extractEnvelope(text);
 if (!envelope) {
-  // 没按协议输出：把原文当 content 交回去（内核会提示它改正），不要静默丢弃
-  process.stdout.write(JSON.stringify({ content: text, toolCalls: [], usageTokens }) + '\n');
+  // 没按协议输出：把原文交回去，但**必须**标记协议错误。
+  // 内核看到 protocolError 会要求重写（有上限），而不是把散文当成最终答案——
+  // 否则一次截断/跑偏的模型输出看起来就像「任务已完成」。
+  process.stdout.write(
+    JSON.stringify({
+      content: text,
+      toolCalls: [],
+      protocolError: '模型没有按 JSON 协议输出',
+      usageTokens,
+    }) + '\n'
+  );
   process.exit(0);
 }
 
 const calls = Array.isArray(envelope.toolCalls) ? envelope.toolCalls : [];
-const out = calls.map((c) => ({
-  name: String((c && c.name) || ''),
-  args: c && typeof c.args === 'object' && c.args !== null ? c.args : {},
-}));
+const out = calls.map((c) => {
+  const name = String((c && c.name) || '');
+  const args = c && c.args;
+  // 字符串形式的 args 原样交给内核：由内核严格解析，坏了走 model/repair。
+  // 不能在这里换成 {}——那等于把「参数丢了」伪装成「工具不需要参数」。
+  if (typeof args === 'string') return { name, argsRaw: args };
+  return { name, args: args && typeof args === 'object' ? args : {} };
+});
 
 if (!usageTokens) usageTokens = Math.round((prompt.length + text.length) / 4);
 process.stdout.write(

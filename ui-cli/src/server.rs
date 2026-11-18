@@ -20,6 +20,11 @@ const CHAT_HTML: &str = include_str!("../assets/chat.html");
 const BG_DARK: &[u8] = include_bytes!("../assets/bg-dark.jpg");
 const BG_LIGHT: &[u8] = include_bytes!("../assets/bg-light.jpg");
 
+/// 请求体上限：本地页面只会发一小段 JSON。
+/// 不设限时 `Content-Length: 9999999999` 会直接按声明值分配内存，本机任意程序
+/// 都能把 Web 进程打爆；超过这个值一律 413，并且不读正文。
+const MAX_BODY: usize = 4 * 1024 * 1024;
+
 #[derive(Default)]
 struct Hub {
     /// 已广播的事件（序号 + JSON 行），新连接用 `?since=` 补齐，重连不重复
@@ -294,7 +299,7 @@ pub fn serve(
         // `--token off` 明确表示不校验（本地脚本/截图用）
         Some("off") | Some("none") => String::new(),
         Some(t) => t.to_string(),
-        None => make_token(),
+        None => make_token()?,
     };
     hub0.bundles = match bundles {
         Some(p) => std::path::PathBuf::from(p),
@@ -398,6 +403,41 @@ fn agent_workspace_hint() -> &'static str {
     "(见启动参数 --workspace)"
 }
 
+/// `/api/file` 与 `/api/tree` 共用的路径校验：URL 解码 → 拒绝绝对路径与危险目录段 →
+/// canonicalize → 结果必须仍在工作区内。返回（解码后的相对路径，绝对路径）。
+///
+/// 只过滤 `..` 不够：`/etc` 是绝对路径（`Path::join` 遇到绝对路径会整个替换根），
+/// 符号链接还能把工作区里的名字指到外面；这两类都靠 canonicalize + `starts_with` 兜住。
+fn resolve_in_workspace(
+    workspace: &std::path::Path,
+    raw: &str,
+) -> Result<(String, std::path::PathBuf), String> {
+    let rel = pct_decode(raw);
+    let blocked = rel
+        .split(|c| c == '/' || c == '\\')
+        .any(is_blocked_component);
+    if rel.starts_with('/') || rel.starts_with('\\') || blocked {
+        return Err("路径不允许".to_string());
+    }
+    let root = std::fs::canonicalize(workspace).map_err(|_| "工作区不可读".to_string())?;
+    let path = std::fs::canonicalize(root.join(&rel)).map_err(|_| "路径不存在".to_string())?;
+    if !path.starts_with(&root) {
+        return Err("路径越界".to_string());
+    }
+    Ok((rel, path))
+}
+
+/// 不展示、也不允许直达的目录名。大小写不敏感：Windows 文件系统本身不区分大小写，
+/// 只挡小写 `secrets` 等于没挡（`Secrets/` 照样能读）。
+fn is_blocked_component(name: &str) -> bool {
+    name == ".."
+        || name.eq_ignore_ascii_case(".ui")
+        || name.eq_ignore_ascii_case(".git")
+        || name.eq_ignore_ascii_case("secrets")
+        || name.eq_ignore_ascii_case("target")
+        || name.eq_ignore_ascii_case("node_modules")
+}
+
 fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -427,6 +467,19 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
         if let Some(rest) = h.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = rest.trim().parse().unwrap_or(0);
         }
+    }
+
+    if content_length > MAX_BODY {
+        // 超限就直接拒绝：既不分配 content_length 大小的 Vec，也不把正文读进来。
+        // 连接随后关闭（Connection: close + drop），客户端不会把余下正文灌进来。
+        let body = "payload too large\n";
+        let head = format!(
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(body.as_bytes())?;
+        return stream.flush();
     }
 
     let mut body = vec![0u8; content_length];
@@ -469,22 +522,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
         ("GET", "/bg/light.jpg") => image(&mut stream, BG_LIGHT, "image/jpeg"),
         // 静态快照：事件内嵌，不开 SSE。可分享、可截图、可离线打开。
         ("GET", "/snapshot") => {
-            let boot = hub
-                .log
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(_, line)| line.clone())
-                .collect::<Vec<_>>()
-                .join(",");
-            let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
-            let inject = format!(
-                "<script>window.__UI_BOOT__=[{}];window.__UI_BUSY__={};window.__UI_READY__={};</script>\n</head>",
-                boot,
-                hub.busy.load(Ordering::SeqCst),
-                ready.to_compact()
-            );
-            let page = CHAT_HTML.replace("</head>", &inject);
+            let page = snapshot_page(&hub);
             html(&mut stream, &page)
         }
         ("GET", "/api/ready") => {
@@ -530,28 +568,25 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             ]);
             json_response(&mut stream, &meta.to_compact())
         }
-        // 工作区文件树（只读、限深限宽，拒绝越界路径）
+        // 工作区文件树（只读）：与 /api/file 共用同一套路径校验。
+        // 以前只挡 `..`，于是 `?path=/etc` 能列宿主机目录、`?path=secrets` 能列密钥目录。
         ("GET", "/api/tree") => {
             let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
             let root = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or(""));
-            let rel = query
+            let raw = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("path="))
-                .unwrap_or("")
-                .replace("%2F", "/");
-            if rel.contains("..") {
-                return json_response(&mut stream, "{\"entries\":[],\"error\":\"路径越界\"}");
-            }
-            let dir = if rel.is_empty() {
-                root.clone()
-            } else {
-                root.join(&rel)
+                .unwrap_or("");
+            let (rel, dir) = match resolve_in_workspace(&root, raw) {
+                Ok(v) => v,
+                Err(e) => return tree_error(&mut stream, &e),
             };
             let mut entries: Vec<Json> = Vec::new();
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 for e in rd.flatten().take(300) {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if name == ".git" || name == "target" || name == "node_modules" || name == ".ui" {
+                    // 不展示 .git/target/node_modules/.ui/secrets（名字本身也是信息）
+                    if is_blocked_component(&name) {
                         continue;
                     }
                     let meta = e.metadata().ok();
@@ -583,36 +618,19 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             ]);
             json_response(&mut stream, &out.to_compact())
         }
-        // 工作区文件预览：只读、限 512 KB、拒绝 .ui/.git/secrets 与越界路径。
+        // 工作区文件预览：只读、限 512 KB；路径校验与 /api/tree 完全共用。
         ("GET", "/api/file") => {
             let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
             let root = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or(""));
-            let rel = query
+            let raw = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("path="))
-                .map(pct_decode)
-                .unwrap_or_default();
-            let blocked = rel
-                .split('/')
-                .any(|p| p == ".." || p == ".ui" || p == ".git" || p == "secrets" || p == "target" || p == "node_modules");
-            if rel.is_empty() || rel.starts_with('/') || blocked {
-                return json_response(&mut stream, "{\"ok\":false,\"error\":\"路径不允许\"}");
-            }
-            let root = match std::fs::canonicalize(&root) {
-                Ok(p) => p,
-                Err(e) => {
-                    return json_response(&mut stream, &format!("{{\"ok\":false,\"error\":\"工作区不可读: {}\"}}", e))
-                }
+                .unwrap_or("");
+            let (rel, path) = match resolve_in_workspace(&root, raw) {
+                Ok((rel, path)) if !rel.is_empty() && path.is_file() => (rel, path),
+                Ok(_) => return file_error(&mut stream, "路径越界或不是文件"),
+                Err(e) => return file_error(&mut stream, &e),
             };
-            let path = match std::fs::canonicalize(root.join(&rel)) {
-                Ok(p) => p,
-                Err(e) => {
-                    return json_response(&mut stream, &format!("{{\"ok\":false,\"error\":\"文件不存在: {}\"}}", e))
-                }
-            };
-            if !path.starts_with(&root) || !path.is_file() {
-                return json_response(&mut stream, "{\"ok\":false,\"error\":\"路径越界或不是文件\"}");
-            }
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let truncated = size > 512 * 1024;
             let mut bytes = Vec::new();
@@ -845,15 +863,65 @@ fn unauthorized(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {
     stream.write_all(body.as_bytes())
 }
 
-/// 令牌：时间 + pid 派生的 12 位十六进制，够用且不引入依赖。
-fn make_token() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let digest = ui_core::sha256::hex(format!("{}-{}", nanos, pid).as_bytes());
-    digest[..12].to_string()
+/// 令牌：16 字节系统密码学随机源的十六进制（128 位）。
+///
+/// 旧实现用「时间纳秒 + pid」做 sha256：这些量本机其它程序都能猜到或枚举，
+/// 猜到 token 就等于鉴权形同虚设。随机源失败时**硬失败**（返回 Err，让 serve
+/// 直接退出），绝不退回时间戳派生——那会把「安全失败」变成「静默降级」。
+fn make_token() -> Result<String, String> {
+    make_token_with(fill_random)
+}
+
+fn make_token_with(mut fill: impl FnMut(&mut [u8]) -> Result<(), String>) -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    fill(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+#[cfg(unix)]
+fn fill_random(buf: &mut [u8]) -> Result<(), String> {
+    fill_random_from(std::path::Path::new("/dev/urandom"), buf)
+}
+
+#[cfg(unix)]
+fn fill_random_from(path: &std::path::Path, buf: &mut [u8]) -> Result<(), String> {
+    let mut f = std::fs::File::open(path).map_err(|e| format!("打开随机源失败: {}", e))?;
+    f.read_exact(buf).map_err(|e| format!("读取随机源失败: {}", e))
+}
+
+#[cfg(windows)]
+fn fill_random(buf: &mut [u8]) -> Result<(), String> {
+    // BCryptGenRandom(NULL, buf, len, BCRYPT_USE_SYSTEM_PREFERRED_RNG)：
+    // 系统首选 CSPRNG，零依赖（bcrypt.dll 是 Windows 自带组件）。返回 0 才算成功。
+    #[link(name = "bcrypt")]
+    extern "system" {
+        fn BCryptGenRandom(
+            algorithm: *mut core::ffi::c_void,
+            buffer: *mut u8,
+            len: u32,
+            flags: u32,
+        ) -> i32;
+    }
+    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+    let len = u32::try_from(buf.len()).map_err(|_| "随机数长度超限".to_string())?;
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            buf.as_mut_ptr(),
+            len,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!("BCryptGenRandom 失败: 0x{:08x}", status))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn fill_random(_buf: &mut [u8]) -> Result<(), String> {
+    Err("当前平台没有可用的系统随机源".to_string())
 }
 
 /// 会话名 → 日志文件。default 保持老路径（历史日志继续可读）。
@@ -915,6 +983,35 @@ fn session_list(ws: &std::path::Path, current: &str) -> Json {
     ])
 }
 
+/// 把要嵌进 `<script>` 的 JSON 变安全：`<` 一律写成 `\u003c`。
+///
+/// 日志内容里出现 `</script>` 会提前闭合脚本：快照打不开，而且是一枚存储型 XSS。
+/// JSON 里 `<` 只可能出现在字符串内部，`\u003c` 仍是合法的 JSON 转义，
+/// 页面读到的值不变，但 HTML 解析器再也看不到标签边界。
+fn script_safe_json(json: &str) -> String {
+    json.replace('<', "\\u003c")
+}
+
+/// `/snapshot` 的完整页面：把事件日志与启动信息注入静态 HTML。
+fn snapshot_page(hub: &Hub) -> String {
+    let boot = hub
+        .log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, line)| line.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
+    let inject = format!(
+        "<script>window.__UI_BOOT__=[{}];window.__UI_BUSY__={};window.__UI_READY__={};</script>\n</head>",
+        script_safe_json(&boot),
+        hub.busy.load(Ordering::SeqCst),
+        script_safe_json(&ready.to_compact())
+    );
+    CHAT_HTML.replace("</head>", &inject)
+}
+
 fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
@@ -956,6 +1053,25 @@ fn image(stream: &mut TcpStream, body: &[u8], mime: &str) -> std::io::Result<()>
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+/// 目录列表的错误形状保持 `{"entries":[],"error":...}`：页面只读 `entries`，
+/// 旧版本也返回同样的键，避免前端因为字段缺失而报错。
+fn tree_error(stream: &mut TcpStream, message: &str) -> std::io::Result<()> {
+    let out = Json::obj(vec![
+        ("path", Json::from("")),
+        ("entries", Json::Arr(Vec::new())),
+        ("error", Json::from(message)),
+    ]);
+    json_response(stream, &out.to_compact())
+}
+
+fn file_error(stream: &mut TcpStream, message: &str) -> std::io::Result<()> {
+    let out = Json::obj(vec![
+        ("ok", Json::Bool(false)),
+        ("error", Json::from(message)),
+    ]);
+    json_response(stream, &out.to_compact())
 }
 
 fn json_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
@@ -1042,5 +1158,253 @@ mod tests {
         assert!(line.contains("memory/used"), "应当带 kind: {}", line);
         assert!(line.contains("m-abc123"), "应当带 payload: {}", line);
         assert!(!line.contains("hash"), "不该把链字段推给页面: {}", line);
+    }
+
+    // ── 测试用的最小 HTTP 收发 ──（只处理一条连接，够验证路由与响应）
+    fn temp_workspace(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "ui-server-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn hub_for(ws: &std::path::Path) -> Arc<Hub> {
+        let hub = Arc::new(Hub::default());
+        *hub.ready.lock().unwrap() = Some(Json::obj(vec![
+            ("workspace", Json::from(ws.to_string_lossy().to_string())),
+            ("model", Json::from("test")),
+        ]));
+        hub
+    }
+
+    /// 起一个只处理一条连接的“服务器”，把原始请求发过去，返回（响应头, 响应体）。
+    fn http_request(hub: Arc<Hub>, raw: &str) -> (String, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (task_tx, task_rx) = channel::<String>();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _ = handle(stream, hub, task_tx);
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        client.write_all(raw.as_bytes()).unwrap();
+        let mut out = Vec::new();
+        let _ = client.read_to_end(&mut out);
+        // 旧代码在超大 Content-Length 上会卡在 read_exact；先关客户端，让服务线程拿到 EOF 退出。
+        drop(client);
+        drop(task_rx);
+        server.join().unwrap();
+        let text = String::from_utf8_lossy(&out).to_string();
+        match text.split_once("\r\n\r\n") {
+            Some((head, body)) => (head.to_string(), body.to_string()),
+            None => (text, String::new()),
+        }
+    }
+
+    fn http_get(hub: Arc<Hub>, target: &str) -> (String, String) {
+        http_request(
+            hub,
+            &format!(
+                "GET {} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n",
+                target
+            ),
+        )
+    }
+
+    #[test]
+    fn tree_rejects_absolute_and_secret_paths() {
+        // 回归：`/api/tree` 曾只过滤 `..`，于是 ?path=/etc 能列宿主机目录、
+        // ?path=secrets 能列密钥目录。修法是与 /api/file 共用 resolve_in_workspace。
+        let ws = temp_workspace("tree");
+        std::fs::create_dir_all(ws.join("secrets")).unwrap();
+        std::fs::write(ws.join("secrets").join("token.txt"), "s3cr3t").unwrap();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src").join("a.js"), "export const a = 1;\n").unwrap();
+
+        // 正常子目录仍然能列（别把功能修坏）
+        let (head, body) = http_get(hub_for(&ws), "/api/tree?path=src");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(body.contains("\"a.js\""), "正常目录应能列出: {}", body);
+
+        for target in [
+            "/api/tree?path=/etc",
+            "/api/tree?path=%2Fetc",
+            "/api/tree?path=secrets",
+            "/api/tree?path=..%2F..%2Fetc",
+        ] {
+            let (_head, body) = http_get(hub_for(&ws), target);
+            assert!(body.contains("\"error\""), "{} 应当被拒绝: {}", target, body);
+            assert!(
+                !body.contains("token.txt"),
+                "{} 泄露了 secrets: {}",
+                target,
+                body
+            );
+            assert!(
+                !body.contains("\"passwd\""),
+                "{} 泄露了宿主机目录: {}",
+                target,
+                body
+            );
+        }
+
+        // 根目录列表也不该出现 secrets 这个名字（名字本身也是信息）
+        let (_head, root_body) = http_get(hub_for(&ws), "/api/tree");
+        assert!(
+            !root_body.contains("secrets"),
+            "根列表不应出现 secrets: {}",
+            root_body
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_rejects_symlink_escape() {
+        // canonicalize 必须解掉符号链接：工作区里一个指向 /etc 的链接不能变成后门。
+        let ws = temp_workspace("symlink");
+        std::os::unix::fs::symlink("/etc", ws.join("escape")).unwrap();
+        let (_head, body) = http_get(hub_for(&ws), "/api/tree?path=escape");
+        assert!(body.contains("\"error\""), "符号链接越界应被拒绝: {}", body);
+        assert!(!body.contains("\"passwd\""), "泄露了 /etc: {}", body);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn file_preview_uses_the_same_path_guard() {
+        // /api/file 换用共享校验后不能把正常预览修坏，也不能放过 secrets。
+        let ws = temp_workspace("file");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src").join("a.js"), "export const a = 1;\n").unwrap();
+        std::fs::create_dir_all(ws.join("secrets")).unwrap();
+        std::fs::write(ws.join("secrets").join("token.txt"), "s3cr3t").unwrap();
+
+        let (_head, ok) = http_get(hub_for(&ws), "/api/file?path=src%2Fa.js");
+        assert!(ok.contains("\"ok\":true"), "正常文件应能预览: {}", ok);
+        assert!(ok.contains("export const a = 1"), "{}", ok);
+
+        for target in [
+            "/api/file?path=/etc/passwd",
+            "/api/file?path=%2Fetc%2Fpasswd",
+            "/api/file?path=secrets%2Ftoken.txt",
+            "/api/file?path=..%2Fetc%2Fpasswd",
+        ] {
+            let (_head, body) = http_get(hub_for(&ws), target);
+            assert!(body.contains("\"ok\":false"), "{} 应被拒绝: {}", target, body);
+            assert!(!body.contains("s3cr3t"), "{} 泄露了 secrets: {}", target, body);
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn snapshot_escapes_script_close_in_events() {
+        // 回归：日志 JSON 直接插进 <script>，内容里的 </script> 会截断脚本
+        //（快照打不开 + 存储型 XSS）。输出时必须转义成 \u003c/。
+        let ws = temp_workspace("snapshot");
+        let hub = hub_for(&ws);
+        let evil = "</script><script>alert(1)</script>";
+        // ready 里的 workspace/model 同样来自外部输入（启动参数、模型名）
+        *hub.ready.lock().unwrap() = Some(Json::obj(vec![
+            ("workspace", Json::from(evil)),
+            ("model", Json::from(evil)),
+        ]));
+        hub.push(Json::obj(vec![
+            ("type", Json::from("user")),
+            ("text", Json::from(evil)),
+        ]));
+
+        let (head, page) = http_get(hub, "/snapshot");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(page.contains("window.__UI_BOOT__"), "快照应包含引导数据");
+        assert!(
+            page.contains("\\u003c/script>"),
+            "事件里的 </script> 必须被转义"
+        );
+        assert!(
+            !page.contains("<script>alert(1)"),
+            "不应留下可执行的注入标签"
+        );
+
+        // 标签数量：只允许注入点自己那一个 <script>，日志内容不能新增标签。
+        assert_eq!(
+            page.matches("<script").count(),
+            CHAT_HTML.matches("<script").count() + 1,
+            "script 开标签只应多出注入点的那一个"
+        );
+        assert_eq!(
+            page.matches("</script>").count(),
+            CHAT_HTML.matches("</script>").count() + 1,
+            "script 闭标签只应多出注入点的那一个"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn oversized_body_is_rejected_with_413() {
+        // 回归：按 Content-Length 直接分配 Vec，超大请求能打爆内存。
+        // 现在超限立即 413 + Connection: close，且不读正文。
+        let ws = temp_workspace("body");
+        let raw = format!(
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        let (head, _body) = http_request(hub_for(&ws), &raw);
+        assert!(head.starts_with("HTTP/1.1 413"), "应当返回 413: {}", head);
+        assert!(
+            head.to_ascii_lowercase().contains("connection: close"),
+            "413 后必须关闭连接: {}",
+            head
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn make_token_is_hex_from_os_randomness() {
+        let a = make_token().expect("系统随机源必须可用");
+        let b = make_token().expect("系统随机源必须可用");
+        assert_eq!(a.len(), 32, "16 字节应当编码成 32 位十六进制: {}", a);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()), "{}", a);
+        assert_ne!(a, b, "两次令牌不能相同");
+    }
+
+    #[test]
+    fn token_entropy_failure_is_hard() {
+        // 随机源失败不能退回“时间 + pid”派生，必须把错误往上抛（serve 因此退出）。
+        let mut asked = 0;
+        let out = make_token_with(|_| {
+            asked += 1;
+            Err("no entropy".to_string())
+        });
+        assert_eq!(asked, 1, "必须真的去取随机数");
+        assert!(out.is_err(), "随机源失败时必须硬失败");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn urandom_is_the_entropy_source() {
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        fill_random(&mut a).expect("/dev/urandom 应可读");
+        fill_random(&mut b).expect("/dev/urandom 应可读");
+        assert_ne!(a, b, "两次随机数不应相同");
+        assert!(
+            fill_random_from(
+                std::path::Path::new("/definitely/not/a/random/source"),
+                &mut a
+            )
+            .is_err(),
+            "打不开随机源必须返回错误，而不是静默降级"
+        );
     }
 }
