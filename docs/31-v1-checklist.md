@@ -35,7 +35,7 @@
 | C3 | 权限下高自由度 | 策略（allow/ask/deny）+ `--accept` 门 | ✅ |
 | C4 | 并行与隔离 | `ui team` / `workflow --isolate` + 漂移检测 | ✅ |
 | C5 | **可审计的知识** | 卡片绑定源码 + `knowledge/use` 进链 | ✅ v0.1.15 |
-| C6 | **记忆** | `ui remember` → 检索注入 → `memory/used` 可审计 | ✅ v1.0.0（P1 人工写入） |
+| C6 | **记忆** | `ui remember` → 检索注入 → `memory/used` 可审计 | ✅ 0.2.0（P1 人工写入） |
 | C7 | 可复现实验 | `ui lab new/pack/verify/table/claim` | ✅ |
 
 ## 四、已知限制（v1 允许带着发布，但必须写明）
@@ -51,7 +51,7 @@
 | U7 | `memory/used` **双写**（主日志 + 记忆链） | 两处各自可校验，但不是唯一事实源 | 主日志给 replay/verify，记忆链给 hits 派生；P2 再决定是否收敛成单链 |
 | U8 | 记忆只有 P1（人工写入） | 模型不能自己写记忆、没有候选/确认机制 | 这是**有意**的：自动写记忆最容易污染审计，P2 才做且必须人工确认 |
 
-## 五、v1.0.0 发布前待办（已全部完成）
+## 五、发布前待办（D1–D6 已在 0.2.0 完成）
 
 | # | 事项 | 负责人 | 状态 |
 |---|---|---|---|
@@ -60,7 +60,7 @@
 | D3 | Windows 原生冒烟（exe 实跑 + 中文路径 + Job Object） | 并行 agent | ✅ 三项全过；顺带修掉"Windows 编不过 + 构建脚本假绿" |
 | D4 | README / docs/23 的数字与版本统一（195 个测试、46 项门禁） | 文档 | ✅ |
 | D5 | `docs/29` K1 措辞修正（卡源校验是 `ui knowledge check`，不是 `verify`） | 文档 | ✅ |
-| D6 | 发布：`Cargo.toml` → 1.0.0、CHANGELOG、tag `v1.0.0`、release 产物 | 发布 | ✅ v1.0.0 / v1.0.1 已发布 |
+| D6 | 发布：`Cargo.toml`、CHANGELOG、tag、release 产物 | 发布 | ✅ 已发布 `0.2.0`（`v1.0.x` 已撤回，见 docs/34） |
 
 > V1（外部锚定：`ui verify --expect-head` + 打包时记录头部哈希）**不在 v1 范围内**，
 > 保留为 **v1.1 待办**，设计说明见 [32-auditable-memory-theory.md](32-auditable-memory-theory.md) §2.4。
@@ -72,10 +72,10 @@ bash tools/test.sh          # 必须 == 测试通过 ==
 bash tools/debug.sh         # 必须 0 failed（项数以输出为准）
 bash tools/changelog.sh     # 重新生成
 bash tools/release.sh       # 产出 tar.gz + sha256 + 自校验
-bash tools/tag.sh v1.0.0 <sha> "ui 1.0.0"
+bash tools/tag.sh v0.2.1 <sha> "ui 0.2.1"   # 1.0 需先满足 docs/34 的 G1–G8
 ```
 
-发布后必须验证：`shields.io` 的 CI 徽章为 passing，且 `git ls-remote --tags` 里 `v1.0.0`
+发布后必须验证：`shields.io` 的 CI 徽章为 passing，且 `git ls-remote --tags` 里目标 tag
 指向的提交 == 远端 main == 本次 CI 通过的提交。
 
 ## 七、事故记录：半成品提交（两次）

@@ -19,6 +19,17 @@ if [ -z "$TAG" ] || [ -z "$SHA" ]; then
   exit 1
 fi
 
+# 1.0 的门槛由 docs/34 定义，且必须写进文件才算数——规则要被工具执行，否则只是口号。
+case "$TAG" in
+  v1.*|1.*)
+    if ! grep -q '^1.0-就绪: 是' docs/34-versioning.md 2>/dev/null; then
+      echo "拒绝打 1.0 级 tag：docs/34-versioning.md 里没有 '1.0-就绪: 是'" >&2
+      echo "1.0 的准入条件（G1–G8）见该文件；未满足前请用 0.x。" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 FULL=$(git rev-parse --verify "$SHA^{commit}" 2>/dev/null) || {
   echo "找不到提交: $SHA" >&2
   exit 1

@@ -246,3 +246,19 @@
 - named journal events (memory/used, effect/observed) reach the SSE stream and the page; 1.0.1
 - step trace 时间刻度与决策/审批耗时
 
+## v1.0.2 · 2026-11-18
+
+**工程**
+
+- surface the failing test names in annotations (logs need auth, annotations do not)
+
+**文档**
+
+- record the unreproducible CI flake honestly
+- theory of auditable memory/knowledge (3 impossibility results, 4 experiments, literature review)
+
+**其他**
+
+- close the four secrets read paths, strict tool-arg parsing, web path traversal and boundaries (external review, 2026-11-17)
+- we are a local audit log, not a transparency log
+
