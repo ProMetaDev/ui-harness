@@ -94,6 +94,8 @@ jobs:
 
   windows:
     runs-on: ubuntu-latest
+    # 28 分钟的 apt 安装会把整个 job 拖到 40 分钟；给个上限，卡住就快速失败。
+    timeout-minutes: 25
     env:
       UI_BUILD_DIR: ${{ github.workspace }}
       UI_TARGET_DIR: ${{ github.workspace }}/target
@@ -103,8 +105,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装 mingw 链接器
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      # 工具链解包到 ~/mingw64（build_windows.sh 直接认这个路径），
+      # 这样才能整体缓存；否则每次 CI 都要重下一次 100MB+ 的交叉工具链。
+      - name: 缓存 mingw 工具链
+        id: mingw
+        uses: actions/cache@v4
+        with:
+          path: ~/mingw64
+          key: mingw-${{ runner.os }}-${{ hashFiles('tools/ci_mingw.sh') }}
+
+      - name: 安装 mingw 链接器（缓存未命中时）
+        if: steps.mingw.outputs.cache-hit != 'true'
+        timeout-minutes: 12
+        run: bash tools/ci_mingw.sh
 
       - name: 安装 Rust + windows-gnu target
         uses: dtolnay/rust-toolchain@stable
