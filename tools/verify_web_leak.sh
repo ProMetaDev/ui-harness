@@ -12,7 +12,7 @@ cd "$UI_ROOT"
 WS=/tmp/ui-web-leak
 PORT=$(ui_free_port)
 rm -rf "$WS"; mkdir -p "$WS"
-CANARY="AKIAWEBLEAKCANARY123456"
+CANARY="AKIAWEBLEAKCANARY123456"  # allowlist secret（故意写成密钥形状的测试夹具）
 
 cat > "$WS/sc.json" <<JSON
 {"model":"scripted","steps":[
