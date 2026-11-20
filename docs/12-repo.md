@@ -38,4 +38,5 @@ git add -A && git commit -m "..."
 ```
 
 `.gitignore` 已排除 `secrets/`、`out/`、`target/`、`.ui/`、`.env*`、`*.key`。
-提交前 `tools/git_init.sh` 会检查暂存区里有没有密钥路径，命中就中止。
+仓库**没有**安装 pre-commit 钩子：密钥形状由 CI 的 `tools/scan_secrets.sh` 在推送后拦（
+本地想先查一遍就手动跑它）。这里曾经写着"提交前会检查"，但那个脚本从来没有存在过。

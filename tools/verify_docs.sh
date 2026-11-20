@@ -176,6 +176,42 @@ for c in $used; do
   fi
 done
 
+# ---------- 6. 门禁脚本自己不能依赖被 gitignore 的目录 ----------
+# 这条是被 CI 红了两轮换回来的：verify_privacy.sh 从 out/ 搬进 tools/ 时，
+# 脚本里 9 处 `>out/xxx.log` 没跟着搬。开发树里 out/ 永远在，89/89 全绿；
+# 干净检出里没有这个目录，重定向直接失败 -> 第一轮 run 没跑 -> 51 条连着红。
+# 「本地全绿」不等于「别人 clone 下来全绿」，差的就是这一类引用。
+# 只看代码行：注释里举例说明"不要这么写"是合理的，不能算违规
+# （这条检查第一版就栽在自己的注释上）。
+viol=$(git ls-files 'tools/*.sh' | while IFS= read -r f; do
+  hit=$(grep -nE '2?>[[:space:]]*"?out/' "$f" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+  [ -n "$hit" ] && printf '%s\n' "$f: $hit"
+done)
+if [ -z "$viol" ]; then
+  ok "tools/ 里没有脚本往 gitignored 的 out/ 写东西"
+else
+  bad "门禁脚本往 out/ 写日志（干净检出里没有这个目录）" "$viol"
+fi
+
+# 顺带钉住反向依赖：docs 里引用的 tools/ 脚本必须真在版本库里
+refs=$(grep -rhoE 'tools/[a-zA-Z0-9_.-]+\.sh' "${DOC_ALL[@]}" 2>/dev/null | sort -u)
+missing=""
+for r in $refs; do
+  git ls-files --error-unmatch "$r" >/dev/null 2>&1 && continue
+  # 设计文档里"计划中"的脚本本来就还没入库；要求引用行显式写明，
+  # 否则等于允许文档永远领先于代码（那是另一种失步）。
+  if grep -qE "${r}[^A-Za-z0-9_]*.{0,12}(计划中|未实现|not implemented)" "${DOC_ALL[@]}" 2>/dev/null; then
+    continue
+  fi
+  missing="$missing $r"
+done
+if [ -z "$missing" ]; then
+  ok "文档引用的 tools 脚本都在库里"
+else
+  bad "文档引用了不入库的脚本" "$missing"
+fi
+
 echo
 echo "通过 $PASS / 失败 $FAIL"
 [ "$FAIL" -eq 0 ]

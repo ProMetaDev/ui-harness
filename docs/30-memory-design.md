@@ -551,7 +551,7 @@ volatility），所以"这一步为记忆花了多少 token"是可计价的。�
 | 建 df/avgdl | O(N × avgdl) | 500 × 40 = 2 万次哈希查找 |
 | 打分 | O(N × len(q)) | 5 万次 |
 | top-k | O(N log k)（k=5） | 可忽略 |
-| 总计 | O(E + N×(len(q)+avgdl)) | 单轮 < 5 ms（目标；Phase 3 用 `tools/bench_memory.sh` 钉住） |
+| 总计 | O(E + N×(len(q)+avgdl)) | 单轮 < 5 ms（目标；Phase 3 计划用 `tools/bench_memory.sh` 钉住 —— 该脚本**计划中**，未实现） |
 
 没有倒排索引持久化：500 条规模下全量扫比维护索引更简单，也更不容易出现"索引和日志不一致"。
 如果将来超过 500 条，正确做法是拒绝写入/让人清理，而不是偷偷加索引。
@@ -845,7 +845,7 @@ Rule::new(FS_WRITE, &format!("{}/.ui/memory.jsonl", ws), Decision::Deny)
 |---|---|---|
 | `ui-core/src/memory.rs` | `learn_mode = off / candidate / auto`；自动提升白名单（只 `pitfall`/`build`）与阈值（confidence ≥ 0.70、证据 ≥ 2 个 turn）；`memory/accept {by:"policy"}`；`stats`；`why`；mtime/len 缓存 | 220 + 120 = 340 |
 | `ui-cli/src/main.rs` | `memory why / stats`、`--learn=auto`、`verify --json`（可选）、`doctor` 细化 | 120 |
-| `tools/bench_memory.sh`（新） | 500 条记忆、100 次检索的耗时中位数；A/B 注入 tokens | 70 |
+| `tools/bench_memory.sh`（新，**计划中**） | 500 条记忆、100 次检索的耗时中位数；A/B 注入 tokens | 70 |
 | `ui-cli/tests/memory_audit.rs`（新） | 策略、重放、质量 | 150 |
 | **合计** | | **≈ 680** |
 
@@ -861,7 +861,7 @@ Rule::new(FS_WRITE, &format!("{}/.ui/memory.jsonl", ws), Decision::Deny)
 | `verify_detects_forged_used_snapshot` | 改 `memory/used.snapshotId` → exit 2 |
 | `switch_journal_keeps_memory_but_clears_history` | 切 session 后 memory 仍可检索，history 为空 |
 
-**验收：** `tools/bench_memory.sh` 记录中位数（检索 < 5 ms）；fixture 质量达标；CI 绿。
+**验收：** `tools/bench_memory.sh`（**计划中**）记录中位数（检索 < 5 ms）；fixture 质量达标；CI 绿。
 
 ### 8.4 总账与顺序
 

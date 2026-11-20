@@ -20,3 +20,5 @@ out/
 # 发布包（可重新生成）
 dist/
 .ci-step.log
+
+serve.log

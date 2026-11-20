@@ -31,6 +31,11 @@ PRIVATE=OPAQUE-CONFIG-88231-not-a-key-shape
 
 rm -rf "$WS"
 mkdir -p "$WS/secrets" "$WS/notes"
+# 日志一律写进 $WS/logs，不写 out/：开发树里 out/ 一直在（而且被 gitignore），
+# 干净检出里根本没有这个目录——重定向一失败，第一轮 run 就没跑，后面几十条连着红，
+# 而这个脚本自己在有 out/ 的机器上是 89/89。CI 是唯一看见的那双眼睛。
+LOGD="$WS/logs"
+mkdir -p "$LOGD"
 printf '备份用 %s 结束\n' "$K1" > "$WS/notes.txt"
 printf '%s\n' "$PRIVATE" > "$WS/secrets/api.txt"
 printf '# p1a\n' > "$WS/README.md"
@@ -47,7 +52,7 @@ JSON
 J() { cat "$WS/.ui/journal.jsonl" 2>/dev/null; }
 
 echo "═══ 1. 默认这一档：日志里没有原文，但有「抹过几处」的记号 ═══"
-$BIN --workspace "$WS" run --task "把三份东西过一遍" --mock "$WS/mock.json" --yes >out/p1a-run1.log 2>&1
+$BIN --workspace "$WS" run --task "把三份东西过一遍" --mock "$WS/mock.json" --yes >"$LOGD"/p1a-run1.log 2>&1
 rc=$?; yesno "run 正常结束" $rc
 nock "AKIA 不进日志"      "$K1"      "$(J)"
 nock "ghp 不进日志"       "$K2"      "$(J)"
@@ -78,7 +83,7 @@ cat > "$WS/mock-grab.json" <<JSON
   "toolCalls":[{"name":"fs_read","args":{"path":".ui/tool-private/$SPILL"}}]},
  {"content":"读完了。"}]}
 JSON
-$BIN --workspace "$WS" run --task "把那份全文读回来" --mock "$WS/mock-grab.json" --yes >out/p1a-grab.log 2>&1
+$BIN --workspace "$WS" run --task "把那份全文读回来" --mock "$WS/mock-grab.json" --yes >"$LOGD"/p1a-grab.log 2>&1
 R=$($BIN --workspace "$WS" replay 2>&1)
 ck   "模型去读指针：明确被告知被挡" "受保护目录" "$R"
 nock "被挡就是被挡，不许报「文件不存在」误导" "文件不存在" "$R"
@@ -99,7 +104,7 @@ ck "报告说干净" "未发现疑似密钥" "$out"
 
 echo "═══ 5. --no-redact：原文回来，代价也留档 ═══"
 rm -rf "$WS/.ui" "$WS/out"
-$BIN --workspace "$WS" --no-redact run --task "同上" --mock "$WS/mock.json" --yes >out/p1a-run2.log 2>&1
+$BIN --workspace "$WS" --no-redact run --task "同上" --mock "$WS/mock.json" --yes >"$LOGD"/p1a-run2.log 2>&1
 rc=$?; yesno "run 正常结束" $rc
 ck   "日志里有 AKIA 原文" "$K1" "$(J)"
 ck   "日志里有 ghp 原文"  "$K2" "$(J)"
@@ -163,7 +168,7 @@ out=$($BIN --workspace "$WS" remember "部署 token 是 $K2" 2>&1); rc=$?
 [ $rc -ne 0 ] && { pass=$((pass+1)); echo "  ✓ 凭据形状写不进记忆库"; } \
                || { fail=$((fail+1)); echo "  ✗ 居然收下了：$out"; }
 ck "拒绝时说清命中哪一类" "ghp_" "$out"
-$BIN --workspace "$WS" remember "上线前先跑门禁 bash tools/ci.sh" >out/p1a-mem.log 2>&1
+$BIN --workspace "$WS" remember "上线前先跑门禁 bash tools/ci.sh" >"$LOGD"/p1a-mem.log 2>&1
 yesno "普通记忆照旧写得进" $?
 ck "记忆库存的就是原文" "tools/ci.sh" "$(cat "$WS/.ui/memory.jsonl" 2>/dev/null)"
 # 手工补一条"上一版没拦住的"记录：扫描器要能把它指出来
@@ -187,7 +192,7 @@ cat > "$WS/mock-both.json" <<JSON
  {"content":"两件都办了。"}]}
 JSON
 rel() { grep -o "\"file\":\"$1[^\"]*\"" "$WS/.ui/journal.jsonl" | tail -1 | sed 's/^"file":"//; s/"$//'; }
-$BIN --workspace "$WS" run --task "两种原文各来一份" --mock "$WS/mock-both.json" --tool-chars 300 --yes >out/p1a-r7.log 2>&1
+$BIN --workspace "$WS" run --task "两种原文各来一份" --mock "$WS/mock-both.json" --tool-chars 300 --yes >"$LOGD"/p1a-r7.log 2>&1
 yesno "run 正常结束" $?
 TRIM=$(rel '.ui/tool-output/'); HELD=$(rel '.ui/tool-private/')
 [ -n "$TRIM" ] && [ -f "$WS/$TRIM" ]; yesno "截断缓存落了盘（${TRIM##*/}）" $?
@@ -233,7 +238,7 @@ cat > "$WS/mock-read.json" <<JSON
   "toolCalls":[{"name":"fs_read","args":{"path":"$TRIM"}}]},
  {"content":"读完了。"}]}
 JSON
-$BIN --workspace "$WS" run --task "读回来" --mock "$WS/mock-read.json" --yes >out/p1a-r7b.log 2>&1
+$BIN --workspace "$WS" run --task "读回来" --mock "$WS/mock-read.json" --yes >"$LOGD"/p1a-r7b.log 2>&1
 # 这句诊断落在**日志**里（replay 给的是摘要行），所以断言打在 journal 上
 ck "fs_read 说的是「已清理」不是「不存在」" "已按保留策略清理" "$(J)"
 nock "而且它没被当成隐私来源扣留" '"withheld"'          "$(grep '已按保留策略清理' "$WS/.ui/journal.jsonl")"
@@ -244,20 +249,20 @@ nock "replay 不把它误报成全量落盘" "全量落盘" "$LINE"
 ck   "replay 仍报得出模型看了多少字" "模型看到" "$LINE"
 
 echo "--- 自动清：run 边界自己动，不用人记着 ---"
-$BIN --workspace "$WS" run --task "再来一次" --mock "$WS/mock-both.json" --tool-chars 300 --yes >out/p1a-r7c.log 2>&1
+$BIN --workspace "$WS" run --task "再来一次" --mock "$WS/mock-both.json" --tool-chars 300 --yes >"$LOGD"/p1a-r7c.log 2>&1
 TRIM2=$(rel '.ui/tool-output/'); HELD2=$(rel '.ui/tool-private/')
 [ -f "$WS/$TRIM2" ] && [ -f "$WS/$HELD2" ]; yesno "这一轮两个目录各落一份" $?
 touch -d '30 days ago' "$WS/$TRIM2" "$WS/$HELD2"
 cat > "$WS/mock-idle.json" <<JSON
 {"model":"scripted","steps":[{"content":"这轮什么都不做。"}]}
 JSON
-$BIN --workspace "$WS" run --task "空转一轮" --mock "$WS/mock-idle.json" --yes >out/p1a-r7d.log 2>&1
+$BIN --workspace "$WS" run --task "空转一轮" --mock "$WS/mock-idle.json" --yes >"$LOGD"/p1a-r7d.log 2>&1
 ck "清理这件事本身留了账" '"kind":"privacy/spill-pruned"' "$(J)"
 ck "账上把两个目录合起来记" '"removed":2' "$(J)"
 [ ! -f "$WS/$TRIM2" ] && [ ! -f "$WS/$HELD2" ]; yesno "没跑 ui spill 也清掉了两个目录" $?
 
 echo "--- 两个档位：全留 与 一个不留 ---"
-$BIN --workspace "$WS" run --task "第三种" --mock "$WS/mock-both.json" --tool-chars 300 --yes >out/p1a-r7e.log 2>&1
+$BIN --workspace "$WS" run --task "第三种" --mock "$WS/mock-both.json" --tool-chars 300 --yes >"$LOGD"/p1a-r7e.log 2>&1
 TRIM3=$(rel '.ui/tool-output/'); HELD3=$(rel '.ui/tool-private/')
 touch -d '30 days ago' "$WS/$TRIM3" "$WS/$HELD3"
 out=$(UI_SPILL_KEEP=all $BIN --workspace "$WS" spill clean 2>&1)

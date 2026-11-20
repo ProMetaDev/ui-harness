@@ -68,8 +68,8 @@ history 每步 +610，最后一步占 95%。
 ## 工具
 
 ```bash
-bash tools/_node.sh tools/cost_report.mjs <journal.jsonl>              # 单次：每步分段 token
-bash tools/_node.sh tools/cost_report.mjs --compare A B                 # 两次：指标差异 + 第一次分叉
+node tools/cost_report.mjs <journal.jsonl>              # 单次：每步分段 token
+node tools/cost_report.mjs --compare A B                 # 两次：指标差异 + 第一次分叉
 ```
 
 `--compare` 会指出两次运行**从第几次工具调用开始走岔**。用它对比 A/B 两臂：
