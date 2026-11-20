@@ -108,6 +108,7 @@ run "skills 列表" check_skills
 run "workflow --json" check_workflow_json
 run "web 端（HTTP + SSE）" bash tools/serve_smoke.sh 7802
 run "网页聊天流（离线校验）" bash tools/verify_chat_stream.sh
+run "网页端也不带明文（SSE + /snapshot）" bash tools/verify_web_leak.sh
 run "web 端能力（停止/展开/重连）" bash tools/probe_web_features.sh 7803
 run "gate 未批准则停" check_gate_blocking
 run "隔离 + apply + 漂移" check_isolate_apply

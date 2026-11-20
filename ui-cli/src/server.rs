@@ -90,9 +90,25 @@ struct Hub {
 }
 
 impl Hub {
+    /// 网页端**唯一**的脱敏点。
+    ///
+    /// 为什么在这里而不是前端：`/snapshot` 会把整个 `hub.log` 原样嵌进一份
+    /// **可分享**的 HTML。前端打码只保护屏幕，保护不了"另存为 / 转发"。
+    /// 判据与 `Journal` 落账门共用 `secrets`（单一来源），所以两边不会漂。
+    ///
+    /// 返回值写进事件的 `redacted` 字段：页面能说"这里抹过几处"，
+    /// 而不是让人以为原本就是这样。
+    fn redact(&self, event: &mut Json) -> usize {
+        ui_core::secrets::redact_json(event)
+    }
+
     fn push(&self, mut event: Json) {
         // log → subs 是唯一锁顺序；取号也必须在 log 临界区内。
         // 否则并发事件可能乱序，订阅交接也可能同时收到 backlog 和 live 副本。
+        let hits = self.redact(&mut event);
+        if hits > 0 {
+            event.set("redacted", Json::from(hits as u64));
+        }
         let mut log = self.log.lock().unwrap();
         let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         event.set("seq", Json::from(n));
@@ -296,17 +312,18 @@ impl Hub {
     /// 存一份完整工具输出，返回给页面用的 id
     fn store_tool(&self, name: &str, result: &ToolResult) -> u64 {
         let mut tools = self.tools.lock().unwrap();
+        // 同一条判据：点开「展开」看到的是完整输出，它比摘要更容易带出凭据。
+        let mut text = Json::from(match &result.error {
+            Some(e) if result.content.trim().is_empty() => e.clone(),
+            Some(e) => format!("{}\n\n[错误] {}", result.content, e),
+            None => result.content.clone(),
+        });
+        let hits = ui_core::secrets::redact_json(&mut text);
         tools.push(Json::obj(vec![
             ("name", Json::from(name)),
             ("ok", Json::Bool(result.ok)),
-            (
-                "text",
-                Json::from(match &result.error {
-                    Some(e) if result.content.trim().is_empty() => e.clone(),
-                    Some(e) => format!("{}\n\n[错误] {}", result.content, e),
-                    None => result.content.clone(),
-                }),
-            ),
+            ("text", text),
+            ("redacted", Json::from(hits as u64)),
         ]));
         tools.len() as u64
     }
@@ -1750,6 +1767,35 @@ mod tests {
             matches!(hub.answer("ap-3-0", "call-3", ApprovalResponse::allow_once()), Answer::Gone),
             "接收端断开必须返回失败"
         );
+    }
+
+    #[test]
+    fn web_surface_redacts_before_it_leaves_the_process() {
+        // 回归（2026-11-20 发现）：journal 已经脱敏，但 SSE 与 /snapshot 原样带出凭据。
+        // /snapshot 是**可分享**的 HTML，所以"屏幕上看得到"和"文件里存着"是两件事。
+        // 夹具：AWS 形状，故意写成假值（allowlist secret）。
+        const CANARY: &str = "AKIAWEBREDACTTESTCANARY"; // allowlist secret（测试夹具，非真凭据）
+        let hub = Arc::new(Hub::default());
+        hub.push(Json::obj(vec![
+            ("type", Json::from("tool")),
+            ("name", Json::from("shell")),
+            ("detail", Json::from(format!("export KEY={}", CANARY))),
+        ]));
+
+        {
+            let log = hub.log.lock().unwrap();
+            assert_eq!(log.len(), 1);
+            let line = &log[0].1;
+            assert!(!line.contains(CANARY), "SSE 事件不能带明文：{}", line);
+            assert!(line.contains("redacted"), "应当标出抹过几处：{}", line);
+        }
+
+        // 点开「展开」看到的全文是第二处，同样要抹
+        let id = hub.store_tool("shell", &ToolResult::ok(format!("cat .env\nKEY={}", CANARY)));
+        let tools = hub.tools.lock().unwrap();
+        let text = tools[(id - 1) as usize].str_at("text").unwrap_or("");
+        assert!(!text.contains(CANARY), "工具全文库不能带明文：{}", text);
+        assert!(text.contains("[REDACTED"), "应当替换成标记：{}", text);
     }
 
     #[test]

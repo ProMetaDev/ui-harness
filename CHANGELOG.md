@@ -249,3 +249,15 @@
 - 首开 3 步教练、活动栏标签与空状态上手提示
 - 能力矩阵（分组/effect/审批门/过滤）
 
+## v0.2.1 · 2026-11-18
+
+**工程**
+
+- drop scratch driver
+- cache the mingw toolchain instead of apt-installing it every run (28min -> seconds)
+
+**其他**
+
+- chat stream offline checks, snapshot approval cleanup, stricter SSE ordering test; 0.2.1
+- index ci_mingw.sh
+

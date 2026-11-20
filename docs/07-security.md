@@ -38,7 +38,7 @@
 2. **策略的 `?` 会匹配 `/`**：文档只说"一个字符"，实现更宽；已记录未改（改了会影响现有规则）。
 3. **Windows 上的进程树与文件锁**：`kill_tree` 走 `taskkill /T /F`，锁走锁文件兜底（60s 过期），都只在 WSL 里验过 Linux 路径。
 4. **多 writer 的 turn 归属只到 writer 级**：同一个 writer 内部仍是串行的，跨进程的因果顺序无法从日志推出来（只有全局 seq 定序）。
-5. **网页端不脱敏**：`ui serve` 推给页面的工具输出是原文（`server.rs:425` 第一行、`server.rs:1246` 全量）。单用户 token 之后没再脱一层，转发端口或录屏就等于公开工具输出。
+5. **网页端已脱敏（2026-11-20 修）**：`Hub::push` 与 `store_tool` 两处都过 `secrets::redact_json`，事件带 `redacted: N` 标出抹过几处。判据与 `Journal` 落账门共用一份，所以两边不会漂。回归由 `tools/verify_web_leak.sh`（门禁）与 `server::tests::web_surface_redacts_before_it_leaves_the_process` 守着。~~此前是原文~~：`/snapshot` 会把整份 `hub.log` 嵌进**可分享**的 HTML，那一版等于转发文件就公开工具输出。
 6. **脱敏门只管日志、只管模式匹配**：无密钥形状的机密会照原样进日志，上下文里更是明文。它是"日志别变成密钥库"，不是 DLP。
 7. **策略的 deny 挡不住 shell 的读**：`secrets/**` 对 `fs_read` 有效，对 `cat` 无效（沙箱只限写）；`tools/kit.sh` 场景 5 至今仍是 GAP。
 
@@ -214,8 +214,9 @@ knob **写错会打 ⚠ 并给出正确写法**（`UI_SPILL_KEEP=0` 会提示你
   第二档只在来源命中清单时拦，第一档只管日志。
 - **第一档是模式匹配，不是 DLP**。没有密钥形状的机密照原样进日志。想知道有没有漏：
   `ui secrets`（扫 journal、两个落盘目录与 `.ui/memory.jsonl`）。
-- **网页端没过这两档**。`on_tool` 推的是未脱敏的第一行，`/api/tool/<id>` 给全量原文
-  （`server.rs:425`、`server.rs:1246`）。浏览器里看到的就是原文。
+- **网页端已过这两档**（2026-11-20）：`Hub::push` 与 `store_tool` 是仅有的两个出口，
+  都过同一个 `redact_json`；`/snapshot` 因此不会再嵌进明文。
+  注意这仍**不是 DLP**：没有密钥形状的机密照旧看得见（和日志同一档判据）。
 - **同机 root、整个工作区打包外发**不在防护范围内。
 - **读隐私路径不拦**（Phase 1-B）：靠工具层与策略，不靠沙箱。
 

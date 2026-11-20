@@ -138,9 +138,24 @@ cite() {
 cite "agent.rs:824" "append_raw"
 cite "agent.rs:478" "append_raw"
 cite "memory.rs:325" "append_raw"
-cite "server.rs:425" "fn on_tool"
-cite "server.rs:1246" "/api/tool/"
 cite "tools.rs:848" "pub fn registry"
+
+# 行号锚点的脆弱性：往文件里插 14 行，三个"证据"全红——而代码其实没错。
+# 所以对**动得频繁**的函数/路由改用符号存在性：行号会漂，符号不会。
+symbol() {
+  local file="$1" needle="$2"
+  local p
+  p=$(find ui-core/src ui-cli/src -name "$file" -print -quit 2>/dev/null)
+  if [ -n "$p" ] && grep -qF -- "$needle" "$p"; then
+    ok "$file 里仍有「$needle」"
+  else
+    bad "$file 里找不到「$needle」" "代码里被改名/删掉了"
+  fi
+}
+symbol "server.rs" "fn on_tool"
+symbol "server.rs" "/api/tool/"
+# 网页端脱敏的两个出口（2026-11-20 修）：少了任何一个，/snapshot 就会重新带明文
+symbol "server.rs" "ui_core::secrets::redact_json"
 
 echo "=== 4. 已被证伪的说法 ==="
 for phrase in "没有 OS 级沙箱" "挡在门口" "日志里没有密钥明文" "写了文件无记录" "日志里也没有对应记录" "记忆未做" "解法分别是" ; do
