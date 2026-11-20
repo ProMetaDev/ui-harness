@@ -37,6 +37,9 @@ python3 <skill>/scripts/docx_safe.py copy report.docx
 - 原件只读；交付前必须校验原件 sha256 不变；
 - 不要用 `fs_write` 重建 `.docx`，不要用 Pandoc 往返。
 
+`replace` / `table-fill` / `table-fill-map` 默认拒绝修改文件名不含 `.edit` 的文件；  
+只有明确恢复场景才用 `--force`，不要用它绕过复制步骤。
+
 ## 2. 先查，不要直接改
 
 ```bash

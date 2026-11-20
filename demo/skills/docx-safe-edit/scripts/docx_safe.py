@@ -425,15 +425,18 @@ def table_fill(doc, index, row, col, value, overwrite, style_cell=None):
     return info
 
 
+def require_edit_copy(target, force):
+    if ".edit" not in target.name and not force:
+        die("拒绝直接修改原件：目标文件名没有 .edit 标记；先 copy，或显式加 --force")
+
+
 def cmd_replace(args):
     target = Path(args.file)
     if not target.is_file():
         die(f"文件不存在: {target}")
     if args.find == "":
         die("--find 不能为空")
-    # Refuse to edit an obvious original if a sibling edit copy exists.
-    if ".edit" not in target.name:
-        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
+    require_edit_copy(target, args.force)
     if args.dry_run:
         with zipfile.ZipFile(target) as zf:
             doc = parse_part(zf, "word/document.xml")
@@ -457,8 +460,7 @@ def cmd_table_fill(args):
         die(f"文件不存在: {target}")
     if args.value is None:
         die("--value 不能为空")
-    if ".edit" not in target.name:
-        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
+    require_edit_copy(target, args.force)
 
     def mutate(doc):
         row = args.row
@@ -482,8 +484,7 @@ def cmd_table_fill_map(args):
     target = Path(args.file)
     if not target.is_file():
         die(f"文件不存在: {target}")
-    if ".edit" not in target.name:
-        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
+    require_edit_copy(target, args.force)
     try:
         plan = json.loads(Path(args.map).read_text(encoding="utf-8"))
     except Exception as e:
@@ -592,6 +593,7 @@ def main():
     p.add_argument("--replace", required=True)
     p.add_argument("--all", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_replace)
 
     p = sub.add_parser("table-fill")
@@ -602,11 +604,13 @@ def main():
     p.add_argument("--key", help="按标签文本找行，默认填标签右边一格；可用 --col 覆盖目标列")
     p.add_argument("--value", required=True)
     p.add_argument("--overwrite", action="store_true", help="允许覆盖已有内容；默认只填空/占位符")
+    p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_table_fill)
 
     p = sub.add_parser("table-fill-map")
     p.add_argument("file")
     p.add_argument("--map", required=True, help="JSON：{table, fills:[{row,col,value}]}")
+    p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_table_fill_map)
 
     p = sub.add_parser("validate")

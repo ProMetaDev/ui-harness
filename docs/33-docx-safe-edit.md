@@ -144,6 +144,16 @@ python3 docx_safe.py table-fill-map config.edit.docx --map fill-plan.json
 - `styleFrom` 后：4 段、宋体、两端对齐，与真实提交案例一致；
 - 表格行/列/合并/宽度/高度不变；`validate` 只报告 `paragraphs 42→45` 这一处预期增长。
 
+### 4.3 硬保护
+
+`replace` / `table-fill` / `table-fill-map` 默认拒绝目标文件名不含 `.edit` 的文件：
+
+```
+ERROR: 拒绝直接修改原件：目标文件名没有 .edit 标记；先 copy，或显式加 --force
+```
+
+`--force` 只用于恢复/特殊场景，不是日常捷径。这样 agent 即使误把原件路径传进来，也会在写盘前停住。
+
 ## 5. 验证脚本
 
 ```bash
