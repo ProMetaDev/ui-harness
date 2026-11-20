@@ -411,6 +411,43 @@ def cmd_table_fill(args):
     return 0
 
 
+def cmd_table_fill_map(args):
+    target = Path(args.file)
+    if not target.is_file():
+        die(f"文件不存在: {target}")
+    if ".edit" not in target.name:
+        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
+    try:
+        plan = json.loads(Path(args.map).read_text(encoding="utf-8"))
+    except Exception as e:
+        die(f"读不懂 --map JSON: {e}")
+    table = int(plan.get("table", 1))
+    fills = plan.get("fills") or plan.get("fields") or []
+    if not fills:
+        die("--map 里没有 fills")
+
+    def mutate(doc):
+        results = []
+        for f in fills:
+            try:
+                row = int(f["row"])
+                col = int(f["col"])
+                value = str(f["value"])
+            except (KeyError, TypeError, ValueError):
+                die(f"fill 条目缺少 row/col/value: {f!r}")
+            info = table_fill(doc, table, row, col, value, bool(f.get("overwrite")))
+            results.append(info)
+        return results
+
+    results = edit_atomic(target, mutate)
+    print(json.dumps({
+        "table": table,
+        "fills": results,
+        "file": str(target.resolve()),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_validate(args):
     a = inspect(args.original)
     b = inspect(args.copy)
@@ -462,6 +499,11 @@ def main():
     p.add_argument("--value", required=True)
     p.add_argument("--overwrite", action="store_true", help="允许覆盖已有内容；默认只填空/占位符")
     p.set_defaults(fn=cmd_table_fill)
+
+    p = sub.add_parser("table-fill-map")
+    p.add_argument("file")
+    p.add_argument("--map", required=True, help="JSON：{table, fills:[{row,col,value}]}")
+    p.set_defaults(fn=cmd_table_fill_map)
 
     p = sub.add_parser("validate")
     p.add_argument("original")

@@ -94,6 +94,25 @@ python3 <skill>/scripts/docx_safe.py table-fill report.edit-....docx \
 
 当前还不支持“按表头名/行名语义定位”，先用 `--row/--col`。这是下一步，不是假装已经支持。
 
+多条填写用一份 map，一次复制、一次写入、一次校验：
+
+```bash
+python3 <skill>/scripts/docx_safe.py table-fill-map report.edit-....docx \
+  --map fill-plan.json
+```
+
+```json
+{
+  "table": 1,
+  "fills": [
+    {"row": 1, "col": 2, "value": "活动名称"},
+    {"row": 2, "col": 2, "value": "举办单位"}
+  ]
+}
+```
+
+任意一条目标格非空/非占位符，整批拒绝，不写半成品。
+
 ### 格式损失必须说清楚
 
 跨 run 替换会把整段替换文本归到**起始 run 的格式**。

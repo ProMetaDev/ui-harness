@@ -93,6 +93,14 @@ python3 docx_safe.py table-fill report.edit-....docx \
 
 当前只支持坐标定位；按表头名/行名语义定位是下一步，不在本版假装支持。
 
+批量填写：
+
+```bash
+python3 docx_safe.py table-fill-map config.edit.docx --map fill-plan.json
+```
+
+一份 JSON 里列出所有 `row/col/value`，一次复制、一次写入、一次校验；任意一格非空/非占位符，整批拒绝，不写半成品。
+
 ## 5. 验证脚本
 
 ```bash
