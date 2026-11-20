@@ -291,6 +291,43 @@ def find_table(doc, index):
     return tables[index - 1]
 
 
+def row_cells(tr):
+    """[(logical_start, grid_span, tc)]；跨列按 gridSpan 展开。"""
+    out = []
+    col = 1
+    for tc in tr.findall(W + "tc"):
+        span = cell_grid(tc)
+        out.append((col, span, tc))
+        col += span
+    return out
+
+
+def find_key(tbl, key):
+    """按可见文本找标签格；返回 (row, key_col, span, tc)。"""
+    key = key.strip()
+    matches = []
+    for ri, tr in enumerate(table_rows(tbl), 1):
+        for col, span, tc in row_cells(tr):
+            if cell_text(tc).strip() == key:
+                matches.append((ri, col, span, tc))
+    if not matches:
+        die(f"找不到行标签 {key!r}")
+    if len(matches) > 1:
+        where = ", ".join(f"R{r}C{c}" for r, c, _, _ in matches)
+        die(f"行标签 {key!r} 不唯一：{where}")
+    return matches[0]
+
+
+def resolve_key_target(tbl, key, target_col=None):
+    """标签格右边一格默认为目标；也可显式 target_col。"""
+    row, col, span, _ = find_key(tbl, key)
+    target = int(target_col) if target_col is not None else col + span
+    if target <= col + span - 1:
+        die(f"目标列 {target} 落在标签格 {key!r} 内部")
+    find_cell(tbl, row, target)  # 越界/合并校验
+    return row, target
+
+
 def find_cell(tbl, row, col):
     rows = table_rows(tbl)
     if row < 1 or row > len(rows):
@@ -424,7 +461,16 @@ def cmd_table_fill(args):
         print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
 
     def mutate(doc):
-        return table_fill(doc, args.table, args.row, args.col, args.value, args.overwrite)
+        row = args.row
+        col = args.col
+        if args.key:
+            row, col = resolve_key_target(find_table(doc, args.table), args.key, col)
+        if row is None or col is None:
+            die("需要 --row/--col，或 --key")
+        info = table_fill(doc, args.table, row, col, args.value, args.overwrite)
+        if args.key:
+            info["key"] = args.key
+        return info
 
     info = edit_atomic(target, mutate)
     info["file"] = str(target.resolve())
@@ -461,11 +507,15 @@ def cmd_table_fill_map(args):
     def mutate(doc):
         results = []
         for f in fills:
-            try:
-                row = int(f["row"])
-                col = int(f["col"])
-            except (KeyError, TypeError, ValueError):
-                die(f"fill 条目缺少 row/col: {f!r}")
+            key = f.get("key")
+            if key:
+                row, col = resolve_key_target(find_table(doc, table), key, f.get("col"))
+            else:
+                try:
+                    row = int(f["row"])
+                    col = int(f["col"])
+                except (KeyError, TypeError, ValueError):
+                    die(f"fill 条目缺少 row/col 或 key: {f!r}")
             if "paragraphs" in f:
                 value = f["paragraphs"]
                 if not isinstance(value, list):
@@ -477,10 +527,17 @@ def cmd_table_fill_map(args):
             style_cell = None
             if ref_doc is not None:
                 ref_table = find_table(ref_doc, table)
-                sr = int(f.get("templateRow", row))
-                sc = int(f.get("templateCol", col))
+                if f.get("templateRow") is not None and f.get("templateCol") is not None:
+                    sr = int(f["templateRow"])
+                    sc = int(f["templateCol"])
+                elif key:
+                    sr, sc = resolve_key_target(ref_table, key, f.get("col"))
+                else:
+                    sr, sc = row, col
                 style_cell = find_cell(ref_table, sr, sc)
             info = table_fill(doc, table, row, col, value, bool(f.get("overwrite")), style_cell)
+            if key:
+                info["key"] = key
             results.append(info)
         return results
 
@@ -540,8 +597,9 @@ def main():
     p = sub.add_parser("table-fill")
     p.add_argument("file")
     p.add_argument("--table", type=int, default=1, help="第几个表格（1 起）")
-    p.add_argument("--row", type=int, required=True, help="第几行（1 起，含表头）")
-    p.add_argument("--col", type=int, required=True, help="第几个逻辑列（1 起，跨列表格按逻辑列）")
+    p.add_argument("--row", type=int, help="第几行（1 起，含表头）")
+    p.add_argument("--col", type=int, help="第几个逻辑列（1 起，跨列表格按逻辑列）")
+    p.add_argument("--key", help="按标签文本找行，默认填标签右边一格；可用 --col 覆盖目标列")
     p.add_argument("--value", required=True)
     p.add_argument("--overwrite", action="store_true", help="允许覆盖已有内容；默认只填空/占位符")
     p.set_defaults(fn=cmd_table_fill)
