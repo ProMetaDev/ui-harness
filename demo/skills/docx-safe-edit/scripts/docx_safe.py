@@ -312,57 +312,78 @@ def first_run(tc):
     return None
 
 
-def fill_cell(tc, value, overwrite, template_run=None):
+def fill_cell(tc, value, overwrite, template_run=None, template_paras=None):
     ps = tc.findall(W + "p")
-    if not ps:
-        etree = load_lxml()
-        p = etree.SubElement(tc, W + "p")
-        ps = [p]
-    p = ps[0]
     old = cell_text(tc).strip()
     placeholder = bool(re.fullmatch(r"\s*(\{\{.*?\}\}|\$\{.*?\}|_{2,}|待填|TODO)\s*", old))
     if old and not placeholder and not overwrite:
         die(f"目标单元格已有内容（{old!r}）；默认不覆盖，确需覆盖请加 --overwrite")
-    if len(ps) > 1 and old:
-        die("目标单元格是多段落内容；脚本不支持，避免只改第一段造成半覆盖")
-    # 保留段落属性；清掉旧 run/hyperlink，避免 text 叠加。
+    if len(ps) > 1 and old and not overwrite:
+        die("目标单元格是多段落内容；默认不覆盖")
+
+    values = value if isinstance(value, list) else [str(value)]
+    values = [str(v) for v in values]
+    if not values:
+        die("没有要填写的段落")
+
+    # 保留目标格的 pPr/rPr 作为兜底；模板格存在时优先用模板格的 pPr/rPr。
+    existing_ppr = ps[0].find(W + "pPr") if ps else None
     existing_run = first_run(tc)
-    for child in list(p):
-        if child.tag in (W + "r", W + "hyperlink"):
-            p.remove(child)
+    existing_rpr = existing_run.find(W + "rPr") if existing_run is not None else None
+    for p in list(ps):
+        tc.remove(p)
+
     etree = load_lxml()
-    r = etree.SubElement(p, W + "r")
-    src_run = existing_run if (existing_run is not None and existing_run.find(W + "rPr") is not None) else template_run
-    if src_run is not None and src_run.find(W + "rPr") is not None:
-        from copy import deepcopy
-        r.append(deepcopy(src_run.find(W + "rPr")))
-    parts = str(value).split("\n")
-    t = etree.SubElement(r, W + "t")
-    t.text = parts[0]
-    if parts[0][:1].isspace() or parts[0][-1:].isspace():
-        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    for part in parts[1:]:
-        etree.SubElement(r, W + "br")
+    from copy import deepcopy
+    for i, text in enumerate(values):
+        p = etree.SubElement(tc, W + "p")
+        tp = template_paras[min(i, len(template_paras) - 1)] if template_paras else None
+        ppr = tp.find(W + "pPr") if tp is not None else existing_ppr
+        if ppr is not None:
+            p.append(deepcopy(ppr))
+        r = etree.SubElement(p, W + "r")
+        trun = first_run(tp) if tp is not None else None
+        rpr = trun.find(W + "rPr") if trun is not None else None
+        if rpr is None:
+            rpr = existing_rpr
+        if rpr is None and template_run is not None:
+            rpr = template_run.find(W + "rPr")
+        if rpr is not None:
+            r.append(deepcopy(rpr))
+        parts = text.split("\n")
         t = etree.SubElement(r, W + "t")
-        t.text = part
-    return {"old": old, "new": str(value), "placeholder": placeholder}
+        t.text = parts[0]
+        if parts[0][:1].isspace() or parts[0][-1:].isspace():
+            t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        for part in parts[1:]:
+            etree.SubElement(r, W + "br")
+            t = etree.SubElement(r, W + "t")
+            t.text = part
+    return {
+        "old": old,
+        "new": "\n".join(values),
+        "placeholder": placeholder,
+        "paragraphs": len(values),
+        "formattedFrom": "template" if template_paras else "target",
+    }
 
 
-def table_fill(doc, index, row, col, value, overwrite):
+def table_fill(doc, index, row, col, value, overwrite, style_cell=None):
     tbl = find_table(doc, index)
     tc = find_cell(tbl, row, col)
-    # 空单元格没有 run，格式模板按优先级取：
-    # 同行标签格 → 同列表头 → 无。
-    template = None
-    for tr, tcol in ((row, 1), (1, col)):
-        try:
-            candidate = first_run(find_cell(tbl, tr, tcol))
-        except SystemExit:
-            candidate = None
-        if candidate is not None:
-            template = candidate
-            break
-    info = fill_cell(tc, value, overwrite, template)
+    template = first_run(style_cell) if style_cell is not None else None
+    template_paras = style_cell.findall(W + "p") if style_cell is not None else None
+    if template is None:
+        # 空单元格没有 run，格式模板按优先级取：同行标签格 → 同列表头。
+        for tr, tcol in ((row, 1), (1, col)):
+            try:
+                candidate = first_run(find_cell(tbl, tr, tcol))
+            except SystemExit:
+                candidate = None
+            if candidate is not None:
+                template = candidate
+                break
+    info = fill_cell(tc, value, overwrite, template, template_paras)
     info.update({"table": index, "row": row, "col": col})
     return info
 
@@ -426,22 +447,47 @@ def cmd_table_fill_map(args):
     if not fills:
         die("--map 里没有 fills")
 
+    ref_doc = None
+    style_from = plan.get("styleFrom")
+    if style_from:
+        ref_path = Path(style_from)
+        if not ref_path.is_absolute():
+            ref_path = target.parent / ref_path
+        if not ref_path.is_file():
+            die(f"styleFrom 不存在: {ref_path}")
+        with zipfile.ZipFile(ref_path) as zf:
+            ref_doc = parse_part(zf, "word/document.xml")
+
     def mutate(doc):
         results = []
         for f in fills:
             try:
                 row = int(f["row"])
                 col = int(f["col"])
-                value = str(f["value"])
             except (KeyError, TypeError, ValueError):
-                die(f"fill 条目缺少 row/col/value: {f!r}")
-            info = table_fill(doc, table, row, col, value, bool(f.get("overwrite")))
+                die(f"fill 条目缺少 row/col: {f!r}")
+            if "paragraphs" in f:
+                value = f["paragraphs"]
+                if not isinstance(value, list):
+                    die("paragraphs 必须是字符串数组")
+            elif "value" in f:
+                value = str(f["value"])
+            else:
+                die(f"fill 条目缺少 value 或 paragraphs: {f!r}")
+            style_cell = None
+            if ref_doc is not None:
+                ref_table = find_table(ref_doc, table)
+                sr = int(f.get("templateRow", row))
+                sc = int(f.get("templateCol", col))
+                style_cell = find_cell(ref_table, sr, sc)
+            info = table_fill(doc, table, row, col, value, bool(f.get("overwrite")), style_cell)
             results.append(info)
         return results
 
     results = edit_atomic(target, mutate)
     print(json.dumps({
         "table": table,
+        "styleFrom": style_from,
         "fills": results,
         "file": str(target.resolve()),
     }, ensure_ascii=False, indent=2))

@@ -113,6 +113,29 @@ python3 <skill>/scripts/docx_safe.py table-fill-map report.edit-....docx \
 
 任意一条目标格非空/非占位符，整批拒绝，不写半成品。
 
+长文本格要跟“已提交样例”的排版一致时，加 `styleFrom` 和 `paragraphs`：
+
+```json
+{
+  "table": 1,
+  "styleFrom": "submitted.docx",
+  "fills": [
+    {
+      "row": 9,
+      "col": 2,
+      "templateRow": 9,
+      "templateCol": 2,
+      "paragraphs": ["第一段", "第二段", "第三段"]
+    }
+  ]
+}
+```
+
+- 只从参考格复制 `w:pPr` / `w:rPr`（段落对齐/样式、字体/字号），**不复制正文**；
+- `paragraphs` 是多个真实 `<w:p>`，不是 `\n` 的 `<w:br/>`；
+- 参考文件应与目标模板同源；如果样式 ID 在目标里不存在，Word 会回退，需人工确认；
+- 没有 `styleFrom` 时保持原来的保守策略：同行标签格 → 同列表头。
+
 ### 格式损失必须说清楚
 
 跨 run 替换会把整段替换文本归到**起始 run 的格式**。
