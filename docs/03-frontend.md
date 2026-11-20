@@ -101,10 +101,11 @@ ui serve --port 7788 --workspace demo
 | `GET /` | 对话页（单文件，内嵌 CSS/JS） |
 | `GET /api/events?since=N` | SSE：只补 `seq > N` 的事件（断线重连不重放历史），15s 心跳 |
 | `POST /api/say` | `{"text": "..."}` → 交给工作线程跑一轮 |
-| `POST /api/approve` | `{"verdict": "allow"\|"always"\|"deny"}` |
-| `POST /api/cancel` | 停止正在跑的轮次（令牌直达模型适配器与 shell 进程组） |
+| `POST /api/approve` | `{"verdict": "allow"\|"always"\|"deny", "approvalId": "ap-…", "callId": "…"}`：**必须点名**。`approvalId`+`callId` 与当前那张卡不符就返回 `{"ok":false,"reason":"stale"}` 并把期望值告诉你，卡继续等——旧页面／双击／两个标签页都投不动别人的审批。`allow`（含 `y`/`yes`/`once`/`allow-once`）只放这一次，`always`（含 `a`/`session`/`allow-always`）才写进本会话规则，且会话规则**不跨 run**；认不出的词一律按拒绝，并在回执里加 `note` 说明"这个词我不认识"——静默把 `yes-pls` 变成拒绝，和静默把拒绝变成批准一样不可解释。回执：`{"ok":true,"approvalId","callId","verdict","scope"}`。日志里的 `approval/answered` 和 SSE 的 `approved` 还多带一个 `via`（`timeout`/`cancelled`/`stale`/`no-channel`/`unknown-word`/`auto`/`no-input`），写清**这笔决定不是人当场做的**；人明确表态时该字段不存在——页面与 `ui replay` 都据此把"没人回答"和"有人说不"分开显示 |
+| `POST /api/cancel` | 停止正在跑的轮次（令牌直达模型适配器与 shell 进程组）。`{"taskId": "t3"}` 只动点名那条：撤排队中的 → `outcome:"queued:<id>"`，那条**一轮都不会开始**（记 `turn/skipped`，不烧预算）；不带 taskId 或点名的正在跑 → `outcome:"running:<id>"`；都没得停 → `ok:false`、`outcome:"idle"` |
 | `GET /api/tool/<id>` | 某次工具调用的**完整输出**（列表里只发一行摘要） |
-| `GET /api/state` | `{"busy": bool, "seq": N}` |
+| `GET /api/state` | `{"busy": bool, "seq": N, "taskId": id\|null, "queued": [id…], "approvalId": id\|null, "approvalCallId": id\|null}`：刷新后靠它把按钮和审批卡恢复成真相 |
+| `POST /api/mode` | `{"mode": "quiet"\|"standard"\|"strict"}` → 改的是**下一轮起**的仲裁强度，当前这轮不受影响 |
 | `GET /snapshot` | 静态快照：事件内嵌、不开 SSE，可分享/离线/截图 |
 
 界面上的四件事：
@@ -121,7 +122,13 @@ ui serve --port 7788 --workspace demo
 - **快照页只读**：用于发给别人看"这一轮怎么跑的"；
 - **页面状态全部来自事件流**，没有前端状态机；刷新靠服务端补发历史。
 
-已知边界：单用户、无鉴权、只绑 `127.0.0.1`。
+已知边界：单用户、只绑 `127.0.0.1`。默认带**访问令牌**：`?t=<token>` 只在**首次进入页面**
+时被接受并种下 Cookie（响应是 303，不是内容），之后一律靠 Cookie；`--token off` 才是明文本机。
+因此脚本/curl 直接带 `?t=` 打 API 会拿到 303 空响应——要么 `-c/-b` 存 Cookie，要么明确关 token。
+无论有没有 token，`/api/file` 与 `/api/tree` 都挡下 `.ui`、`.git`、`secrets`（隐私边界，判据与
+工具侧共用 `ui_core::protected::PROTECTED_DIRS`，大小写不敏感，符号链接在 canonicalize 之后按
+真实路径再判一次）以及 `target`、`node_modules`（噪音而非边界，但同样不给路径）——
+判据在 `is_blocked_component`，一个函数同时管着树、预览和 `..` 越界。
 
 ## 开机界面
 

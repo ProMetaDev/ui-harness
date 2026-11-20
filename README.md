@@ -88,14 +88,19 @@ $ bash tools/kit.sh
 2 截短尾部             py=3 ui=0    py=3 ui=0          REPAIRED
 3 并发强杀             链完整/可修复 py=0               REPAIRED
 4 符号链接逃逸         拒绝读取     被拒               BLOCKED
-5 shell 间接读密钥     GAP（已知）  读到明文            GAP
-6 插件漏报效果         GAP（已知）  写了文件无记录       GAP
+5 shell 间接读密钥     GAP（拦不住） 读到明文（日志已抹）  GAP
+6 插件漏报效果         GAP（拦不住） 写了·观测已入日志     GAP
 7 验收失败             退出 3       code=3             BLOCKED
 8 shell 写工作区外     被拒         被拒               BLOCKED
 ```
 
-上表只是一次运行的片段；场景数以 `bash tools/kit.sh` 的实际输出为准。
+上表只是一次运行的片段（当前是 12 个场景）；场景数以 `bash tools/kit.sh` 的实际输出为准。
 `GAP` 是**现在拦不住**的意思，我们不假装。详见 [docs/22](docs/22-verify-kit.md)。
+
+两行 GAP 的**范围**要读准，别把它们读成"什么都没做"：
+场景 5 测的是**上下文里仍然是明文**（沙箱不限读，这一半没补）。
+日志那一半现在由落账前的脱敏门兜着——同一条命令的输出进日志时会是
+`[REDACTED:api_key]`，命中隐私清单时整段不进日志、只留字数与指纹。
 
 **4. 知识与记忆是证据，不是黑箱。** 知识卡绑定它描述的那份源码，记忆的每次注入都留痕：
 
@@ -156,6 +161,8 @@ $ ui replay
 | `ui team --task "..."` | 拆解 → 并行隔离 → 验收（默认不自动合并） |
 | `ui lab pack/verify/table/claim` | 实验包：产物哈希、输入血统、多 seed 对照、结论对账 |
 | `ui policy --effect K --target T` | 解释一条效果为什么被放行或拒绝 |
+| `ui spill [clean]` | 看/清落在磁盘上的工具输出原文（两个目录、一份保留预算） |
+| `ui secrets` | 扫留在 `.ui` 里的明文：日志、两个落盘目录、记忆库 |
 
 其余：`chat` / `workflow` / `apply` / `export` / `skills` / `preview` / `providers` / `sessions`。
 
@@ -168,6 +175,10 @@ $ ui replay
   命令正常结束时也会连同后台子进程一起收掉（`start /b` 留下的孤儿不会活过命令）。
 - **插件声明不是强制约束。** `effects: []` 只表示"声称没有副作用"，内核不验证。
 - **MCP 同理。** 外部 server 在自己的进程里自主运行。
+- **隐私两档管的是日志，不是上下文。** 落账前默认脱敏（`--no-redact` 可关，会留
+  `privacy/redact-off` 记录）；`--private PATH` 让命中来源的输出整段不进上下文、不进日志，
+  原文落在模型**读不到**的 `.ui/tool-private/`。落盘原文按保留期自动清（`ui spill`）。
+  但脱敏是模式匹配、不是 DLP，而且**网页端看到的是原文**——见 [SECURITY.md](SECURITY.md)。
 - `effect/observed` 只看工作区内、只看元数据；大仓库可 `UI_OBSERVE=0` 关掉。
 
 `ui doctor` 会把上面这段打在输出里，不让它藏在文档里。完整清单见 [SECURITY.md](SECURITY.md)。
