@@ -346,15 +346,17 @@ await test('排队时首个 turn 保持运行，第二个 turn 才空闲', {
   afterSecond: { state: '空闲', dot: 'dot', busy: '0' },
 }, () => {
   const app = createApp();
-  app.emit({ type: 'user', text: '第一条' });
-  app.emit({ type: 'user', text: '第二条' });
-  app.emit({ type: 'turn', reason: 'done', steps: 0, calls: 0 });
+  // 排队以服务端的 taskId 为准（chat.html: queuedTaskIds 只认带 taskId 的 user 事件）。
+  // 之前这里没带 taskId，本地跳到这条断言时正好是"早就不排队了"的实现，CI 上才暴露。
+  app.emit({ type: 'user', text: '第一条', taskId: 't1' });
+  app.emit({ type: 'user', text: '第二条', taskId: 't2' });
+  app.emit({ type: 'turn', reason: 'done', steps: 0, calls: 0, taskId: 't1' });
   const afterFirst = {
     state: app.ids.state.textContent,
     dot: app.ids.dot.className,
     busy: app.ids.liveStrip.dataset.busy,
   };
-  app.emit({ type: 'turn', reason: 'done', steps: 0, calls: 0 });
+  app.emit({ type: 'turn', reason: 'done', steps: 0, calls: 0, taskId: 't2' });
   const afterSecond = {
     state: app.ids.state.textContent,
     dot: app.ids.dot.className,

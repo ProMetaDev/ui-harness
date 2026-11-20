@@ -10,6 +10,8 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     env:
+      # 本地没有 node 时那条检查会 SKIP；CI 上必须真跑。
+      UI_REQUIRE_NODE: "1"
       UI_BUILD_DIR: ${{ github.workspace }}
       UI_TARGET_DIR: ${{ github.workspace }}/target
       UI_GIT_DIR: ${{ github.workspace }}
