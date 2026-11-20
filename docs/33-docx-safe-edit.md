@@ -176,7 +176,44 @@ ui run --task test --mock scenario.json --yes
 3. 用 LibreOffice 转 PDF/PNG 做视觉抽查；
 4. 把“原件未变/结构守恒”写进 `ui verify` 的审计事件。
 
-## 10. 参考
+## 10. 真实申报表对比（2026-11-21）
+
+拿同一张《南昌大学第二课堂活动申报表》做了对比：
+
+- 模板结构：12 行、32 个物理单元格、8 个 gridSpan、0 个 vMerge；两边一致；
+- 列宽、行高、表格边框/底纹/合并关系：未改；
+- 原件 sha256 `3655de7a…` 未变；
+- 差异主要在**内容与长文本排版**。
+
+| 项 | 真实提交 | 我们的示例填写 |
+|---|---|---|
+| 活动时间 | `2026年10月16日 19:00—20:00` | `2026-12-05 14:00` |
+| 报名时间 | `2026年10月14日 —2026年10月16日` | `2026-11-28 09:00` |
+| 参与对象 | 具体班级全体同学 | 软件学院本科生 |
+| 参与人数 | 16 | 80 |
+| 活动内容 | 4 段、约 300 字、宋体、两端对齐 | 1 段、约 40 字、黑体、默认对齐 |
+
+结论：
+
+- **结构层面**已经对齐：表格没有重建，行/列/合并/宽度/高度都保留；
+- **语义排版**还差一层：空单元格没有可继承的 run 时，当前实现取“同行标签格”的格式；  
+  真实文档的“活动内容”格用的是正文风格（宋体、两端对齐、多段），不是标签风格（黑体、居中）。
+- 日期格式是内容问题，不是 fill 引擎问题；需要由填写清单提供目标格式。
+- 真实案例的“活动内容”是 4 个 `<w:p>`，当前 `\n` 只生成 `<w:br/>`，不会新增段落。
+
+因此下一步需要的是 **style profile / 模板单元格**，而不是继续改表格结构：
+
+```json
+{
+  "row": 9,
+  "col": 2,
+  "value": "……",
+  "paragraphs": ["第一段", "第二段"],
+  "template": {"from": "submitted.docx", "row": 9, "col": 2}
+}
+```
+
+## 11. 参考
 
 - [Editing existing DOCX via OOXML](https://github.com/openkursar/hello-halo/blob/a1b6d395e9c3609d33cefa0fd2fb99d280bfb4e0/resources/builtin-skills/docx/references/editing.md)
 - [docx-official/edit.md](https://github.com/xiaomimimo/mimo-code/blob/5a538cb4f97b9c4c8eb09a845ec06c1e5f1f3e8f/packages/cli/src/skill/builtin/.bundle/docx-official/edit.md)
