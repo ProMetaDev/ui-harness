@@ -149,9 +149,12 @@ list_files() {
 # ---------- 扫描 ----------
 HITS=0
 FILES_SCANNED=0
+# 行级允许清单放过几条：必须打出来。放过本身不是问题，
+# 悄悄放过 40 条才是问题。
+ALLOWLISTED=0
 
 scan_file() {
-  local rel="$1" f="$UI_ROOT/$1" i name re rec lineno snippet
+  local rel="$1" f="$UI_ROOT/$1" i name re rec lineno snippet line
   for i in "${!RULE_NAMES[@]}"; do
     name="${RULE_NAMES[$i]}"
     re="${RULE_RES[$i]}"
@@ -163,6 +166,13 @@ scan_file() {
       lineno="${rec%%:*}"
       snippet="${rec#*:}"
       [[ "$lineno" =~ ^[0-9]+$ ]] || continue
+      # 行级允许清单：同一行写着 `allowlist secret` 才生效（detect-secrets 的老约定）。
+      # 为什么不走 .secretsignore：那是**整文件**忽略，而测试夹具所在的文件正是
+      # 真泄露最该被看见的地方；一行一行标注，代价是显式的、可见的。
+      line=$(sed -n "${lineno}p" "$f" 2>/dev/null)
+      case "$line" in
+        *"allowlist secret"*) ALLOWLISTED=$((ALLOWLISTED + 1)); continue ;;
+      esac
       printf '%s:%s: %s: %s\n' "$rel" "$lineno" "$name" "$(mask "$snippet")"
       HITS=$((HITS + 1))
     done < <(grep -n -o -I -E -- "$re" "$f" 2>/dev/null)
@@ -187,10 +197,12 @@ done < <(list_files)
 
 # ---------- 结论 ----------
 if [ "$HITS" -eq 0 ]; then
-  echo "scan_secrets: 扫描 $FILES_SCANNED 个文件，未发现疑似密钥 → PASS（退出码 0）" >&2
+  echo "scan_secrets: 扫描 $FILES_SCANNED 个文件，未发现疑似密钥 → PASS（退出码 0；"
+  echo "              另有 $ALLOWLISTED 行标了 allowlist secret，逐条见 grep）" >&2
   exit 0
 fi
 
-echo "scan_secrets: 扫描 $FILES_SCANNED 个文件，发现 $HITS 处疑似密钥 → FAIL（退出码 1）" >&2
+echo "scan_secrets: 扫描 $FILES_SCANNED 个文件，发现 $HITS 处疑似密钥 → FAIL（退出码 1；"
+echo "              另有 $ALLOWLISTED 行被 allowlist secret 放过）" >&2
 echo "scan_secrets: 确认后把这些路径加进 .secretsignore，或直接换成占位符" >&2
 exit 1

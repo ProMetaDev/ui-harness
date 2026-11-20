@@ -115,10 +115,16 @@ cat > "$ws/sc.json" <<'JSON'
   {"content":"完成"}]}
 JSON
 out=$("$BIN" run --task t --mock "$ws/sc.json" --workspace "$ws" --yes 2>&1)
+# 两半分开测：上下文那一半沙箱管不着（读不限），日志那一半有落账前的门。
+# 混成一行会让"GAP"把已经收窄的那部分也一起抹掉。
 if printf '%s' "$out" | grep -q 'SUPER-SECRET-KEY'; then
-  row "5 shell 间接读密钥" "GAP（已知）" "读到明文" "GAP"
+  if grep -q 'SUPER-SECRET-KEY' "$ws/.ui/journal.jsonl" 2>/dev/null; then
+    row "5 shell 间接读密钥" "GAP（拦不住）" "读到明文·日志也留了" "GAP"
+  else
+    row "5 shell 间接读密钥" "GAP（拦不住）" "读到明文（日志已抹）" "GAP"
+  fi
 else
-  row "5 shell 间接读密钥" "GAP（已知）" "意外被拦" "BLOCKED"
+  row "5 shell 间接读密钥" "GAP（拦不住）" "意外被拦" "BLOCKED"
 fi
 
 # ── 6. 插件漏报效果（已知缺口）──
@@ -141,10 +147,17 @@ cat > "$ws/sc.json" <<JSON
   {"content":"完成"}]}
 JSON
 run_mock "$ws" "$ws/sc.json"
+# 这一行的缺口是"**拦不住**"，不是"记不下"：观测式效果早就把实际改动入日志了。
+# 早先这里只看文件在不在，标签却写"无记录"——验证包自己假报了整整一轮。
 if [ -f "$ws/sneaky.txt" ]; then
-  row "6 插件漏报效果" "GAP（已知）" "写了文件无记录" "GAP"
+  if grep -q '"kind":"effect/observed"' "$ws/.ui/journal.jsonl" 2>/dev/null &&
+     grep '"kind":"effect/observed"' "$ws/.ui/journal.jsonl" | grep -q 'sneaky.txt'; then
+    row "6 插件漏报效果" "GAP（拦不住）" "写了·观测已入日志" "GAP"
+  else
+    row "6 插件漏报效果" "GAP（拦不住）" "写了·无观测记录" "GAP"
+  fi
 else
-  row "6 插件漏报效果" "GAP（已知）" "意外没写" "BLOCKED"
+  row "6 插件漏报效果" "GAP（拦不住）" "意外没写" "BLOCKED"
 fi
 
 # ── 7. 合并后验收失败 ──

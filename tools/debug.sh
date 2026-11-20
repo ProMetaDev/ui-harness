@@ -137,6 +137,8 @@ run "观测式效果（shell 实际改动入日志）" bash tools/verify_observe
 run "OS 沙箱（Landlock：区外写入被拒）" bash tools/verify_sandbox.sh
 run "日志不可写（必须 fail closed）" bash tools/verify_failclosed.sh
 run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scrub.sh
+run "隐私两档实跑（脱敏门 + 来源扣留 + 落盘生命周期）" bash tools/verify_privacy.sh
+run "文档与代码一致（目录常量/开关名/行号锚点/口径）" bash tools/verify_docs.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
 run "隔离副本 manifest（xxh 格式）" bash tools/verify_manifest.sh
