@@ -99,6 +99,7 @@ def structure(path):
         headers = [n for n in names if re.match(r"word/header\d+\.xml$", n)]
         footers = [n for n in names if re.match(r"word/footer\d+\.xml$", n)]
         media = [n for n in names if n.startswith("word/media/")]
+        shapes = [table_shape(t) for t in tables]
         return {
             "ok": bad is None and not missing_targets,
             "zip_error": bad,
@@ -106,6 +107,10 @@ def structure(path):
             "parts": len(names),
             "paragraphs": len(paras),
             "tables": len(tables),
+            "table_rows": sum(s["rows"] for s in shapes),
+            "table_cells": sum(s["cells"] for s in shapes),
+            "table_grid_spans": sum(s["grid_spans"] for s in shapes),
+            "table_vmerge": sum(s["vmerge"] for s in shapes),
             "images": len(images),
             "sections": len(sections),
             "headers": len(headers),
@@ -199,15 +204,13 @@ def replace_in_paragraph(p, find, repl, do_all):
     return len(positions)
 
 
-def rewrite_document(src, dst, find, repl, do_all):
+def rewrite_doc(src, dst, mutate):
     etree = load_lxml()
     with zipfile.ZipFile(src) as zin:
         doc = parse_part(zin, "word/document.xml")
-        total = 0
-        for p in doc.iter(W + "p"):
-            total += replace_in_paragraph(p, find, repl, do_all)
-        if total == 0:
-            die("没有找到要替换的文本；未写入任何文件")
+        result = mutate(doc)
+        if not result:
+            die("没有发生任何改动；未写入任何文件")
         data = etree.tostring(doc, xml_declaration=True, encoding="UTF-8", standalone=None)
         with zipfile.ZipFile(dst, "w") as zout:
             for info in zin.infolist():
@@ -218,7 +221,150 @@ def rewrite_document(src, dst, find, repl, do_all):
                     zout.writestr(zi, data)
                 else:
                     zout.writestr(info, zin.read(info.filename))
-    return total
+    return result
+
+
+def rewrite_document(src, dst, find, repl, do_all):
+    def mutate(doc):
+        total = 0
+        for p in doc.iter(W + "p"):
+            total += replace_in_paragraph(p, find, repl, do_all)
+        return total
+    return rewrite_doc(src, dst, mutate)
+
+
+def edit_atomic(target, mutate):
+    tmpdir = target.parent / ".ui" / "tmp"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="docx-safe-", suffix=".docx", dir=str(tmpdir))
+    os.close(fd)
+    try:
+        result = rewrite_doc(target, tmp, mutate)
+        os.replace(tmp, target)
+        return result
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def table_rows(tbl):
+    return tbl.findall(W + "tr")
+
+
+def cell_text(tc):
+    return "".join(t.text or "" for t in tc.iter(W + "t"))
+
+
+def cell_grid(tc):
+    span = 1
+    tcpr = tc.find(W + "tcPr")
+    if tcpr is not None:
+        gs = tcpr.find(W + "gridSpan")
+        if gs is not None:
+            try:
+                span = max(1, int(gs.get(W + "val") or "1"))
+            except ValueError:
+                span = 1
+    return span
+
+
+def cell_is_vmerge_continue(tc):
+    tcpr = tc.find(W + "tcPr")
+    if tcpr is None:
+        return False
+    vm = tcpr.find(W + "vMerge")
+    return vm is not None and (vm.get(W + "val") or "continue") == "continue"
+
+
+def table_shape(tbl):
+    rows = table_rows(tbl)
+    cells = sum(len(r.findall(W + "tc")) for r in rows)
+    spans = sum(1 for r in rows for tc in r.findall(W + "tc") if cell_grid(tc) > 1)
+    merges = sum(1 for r in rows for tc in r.findall(W + "tc") if cell_is_vmerge_continue(tc))
+    return {"rows": len(rows), "cells": cells, "grid_spans": spans, "vmerge": merges}
+
+
+def find_table(doc, index):
+    tables = list(doc.iter(W + "tbl"))
+    if index < 1 or index > len(tables):
+        die(f"表格序号 {index} 不存在（共 {len(tables)} 个）")
+    return tables[index - 1]
+
+
+def find_cell(tbl, row, col):
+    rows = table_rows(tbl)
+    if row < 1 or row > len(rows):
+        die(f"行 {row} 越界（共 {len(rows)} 行）")
+    logical = 0
+    for tc in rows[row - 1].findall(W + "tc"):
+        span = cell_grid(tc)
+        if logical + 1 <= col <= logical + span:
+            if cell_is_vmerge_continue(tc):
+                die(f"单元格 ({row},{col}) 是纵向合并的延续格；请填合并首格")
+            return tc
+        logical += span
+    die(f"列 {col} 越界（第 {row} 行逻辑列数 {logical}）")
+
+
+def first_run(tc):
+    for r in tc.iter(W + "r"):
+        return r
+    return None
+
+
+def fill_cell(tc, value, overwrite, template_run=None):
+    ps = tc.findall(W + "p")
+    if not ps:
+        etree = load_lxml()
+        p = etree.SubElement(tc, W + "p")
+        ps = [p]
+    p = ps[0]
+    old = cell_text(tc).strip()
+    placeholder = bool(re.fullmatch(r"\s*(\{\{.*?\}\}|\$\{.*?\}|_{2,}|待填|TODO)\s*", old))
+    if old and not placeholder and not overwrite:
+        die(f"目标单元格已有内容（{old!r}）；默认不覆盖，确需覆盖请加 --overwrite")
+    if len(ps) > 1 and old:
+        die("目标单元格是多段落内容；脚本不支持，避免只改第一段造成半覆盖")
+    # 保留段落属性；清掉旧 run/hyperlink，避免 text 叠加。
+    existing_run = first_run(tc)
+    for child in list(p):
+        if child.tag in (W + "r", W + "hyperlink"):
+            p.remove(child)
+    etree = load_lxml()
+    r = etree.SubElement(p, W + "r")
+    src_run = existing_run if (existing_run is not None and existing_run.find(W + "rPr") is not None) else template_run
+    if src_run is not None and src_run.find(W + "rPr") is not None:
+        from copy import deepcopy
+        r.append(deepcopy(src_run.find(W + "rPr")))
+    parts = str(value).split("\n")
+    t = etree.SubElement(r, W + "t")
+    t.text = parts[0]
+    if parts[0][:1].isspace() or parts[0][-1:].isspace():
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    for part in parts[1:]:
+        etree.SubElement(r, W + "br")
+        t = etree.SubElement(r, W + "t")
+        t.text = part
+    return {"old": old, "new": str(value), "placeholder": placeholder}
+
+
+def table_fill(doc, index, row, col, value, overwrite):
+    tbl = find_table(doc, index)
+    tc = find_cell(tbl, row, col)
+    # 空单元格没有 run，格式模板按优先级取：
+    # 同行标签格 → 同列表头 → 无。
+    template = None
+    for tr, tcol in ((row, 1), (1, col)):
+        try:
+            candidate = first_run(find_cell(tbl, tr, tcol))
+        except SystemExit:
+            candidate = None
+        if candidate is not None:
+            template = candidate
+            break
+    info = fill_cell(tc, value, overwrite, template)
+    info.update({"table": index, "row": row, "col": col})
+    return info
 
 
 def cmd_replace(args):
@@ -228,34 +374,48 @@ def cmd_replace(args):
     if args.find == "":
         die("--find 不能为空")
     # Refuse to edit an obvious original if a sibling edit copy exists.
-    if ".edit-" not in target.name:
-        print("WARN: 目标文件名没有 .edit- 标记；确认这是副本，不是原件", file=sys.stderr)
+    if ".edit" not in target.name:
+        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
     if args.dry_run:
         with zipfile.ZipFile(target) as zf:
             doc = parse_part(zf, "word/document.xml")
             hits = sum(paragraph_text(p).count(args.find) for p in doc.iter(W + "p"))
         print(json.dumps({"dryRun": True, "matches": hits, "find": args.find}, ensure_ascii=False))
         return 0 if hits else 1
-    # 临时文件放进 .ui/tmp：同文件系统可原子 rename，且 observe 默认跳过 .ui，
-    # 不会在审计日志里留下一个"创建又消失"的临时文件。
-    tmpdir = target.parent / ".ui" / "tmp"
-    tmpdir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="docx-safe-", suffix=".docx", dir=str(tmpdir))
-    os.close(fd)
-    try:
-        count = rewrite_document(target, tmp, args.find, args.replace, args.all)
-        os.replace(tmp, target)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    def mutate(doc):
+        total = 0
+        for p in doc.iter(W + "p"):
+            total += replace_in_paragraph(p, args.find, args.replace, args.all)
+        return total
+
+    count = edit_atomic(target, mutate)
     print(json.dumps({"replaced": count, "file": str(target.resolve())}, ensure_ascii=False))
+    return 0
+
+
+def cmd_table_fill(args):
+    target = Path(args.file)
+    if not target.is_file():
+        die(f"文件不存在: {target}")
+    if args.value is None:
+        die("--value 不能为空")
+    if ".edit" not in target.name:
+        print("WARN: 目标文件名没有 .edit 标记；确认这是副本，不是原件", file=sys.stderr)
+
+    def mutate(doc):
+        return table_fill(doc, args.table, args.row, args.col, args.value, args.overwrite)
+
+    info = edit_atomic(target, mutate)
+    info["file"] = str(target.resolve())
+    print(json.dumps(info, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_validate(args):
     a = inspect(args.original)
     b = inspect(args.copy)
-    keys = ["paragraphs", "tables", "images", "sections", "headers", "footers",
+    keys = ["paragraphs", "tables", "table_rows", "table_cells", "table_grid_spans",
+            "table_vmerge", "images", "sections", "headers", "footers",
             "media", "relationships", "has_styles", "has_numbering"]
     lost = [k for k in keys if isinstance(a[k], int) and b[k] < a[k]]
     changed = {k: [a[k], b[k]] for k in keys if a[k] != b[k]}
@@ -293,6 +453,15 @@ def main():
     p.add_argument("--all", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_replace)
+
+    p = sub.add_parser("table-fill")
+    p.add_argument("file")
+    p.add_argument("--table", type=int, default=1, help="第几个表格（1 起）")
+    p.add_argument("--row", type=int, required=True, help="第几行（1 起，含表头）")
+    p.add_argument("--col", type=int, required=True, help="第几个逻辑列（1 起，跨列表格按逻辑列）")
+    p.add_argument("--value", required=True)
+    p.add_argument("--overwrite", action="store_true", help="允许覆盖已有内容；默认只填空/占位符")
+    p.set_defaults(fn=cmd_table_fill)
 
     p = sub.add_parser("validate")
     p.add_argument("original")

@@ -75,6 +75,25 @@ python3 <skill>/scripts/docx_safe.py replace report.edit-....docx \
 - 支持跨 `<w:r>` 的短语：替换文本落在起始 run，后续 run 清空；
 - 不处理跨段落短语；找不到就退出，不写文件。
 
+## 3.5 表格：只填值，不重建单元格
+
+默认是 **fill**，不是 overwrite：目标单元格为空或占位符才写；已有内容直接拒绝。
+
+```bash
+python3 <skill>/scripts/docx_safe.py table-fill report.edit-....docx \
+  --table 1 --row 2 --col 2 --value "8080"
+```
+
+- `--table` 从 1 起；`--row` 从 1 起（含表头）；`--col` 是**逻辑列**（跨列按 gridSpan 计算）；
+- 目标格是纵向合并的延续格时拒绝，要求填合并首格；
+- 多段落单元格拒绝，避免只改第一段造成半覆盖；
+- 空单元格的格式模板按：同行标签格 → 同列表头 → 无；
+- 只替换单元格第一个段落的 run；`w:tcPr`（边框/底纹/边距/宽度）、`w:trPr`、`w:tblPr` 完全不动；
+- 已有内容必须显式 `--overwrite`，否则退出 1；
+- 值里的 `\n` 变成 `<w:br/>`，不新增段落。
+
+当前还不支持“按表头名/行名语义定位”，先用 `--row/--col`。这是下一步，不是假装已经支持。
+
 ### 格式损失必须说清楚
 
 跨 run 替换会把整段替换文本归到**起始 run 的格式**。
