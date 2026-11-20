@@ -108,14 +108,38 @@ python3 docx_safe.py validate report.docx report.edit-....docx
 
 这些不是“以后再说”的模糊项，是 skill 的停止条件。
 
-## 7. 下一步
+## 7. Agent 端到端实测（scripted model）
+
+用一个真实的 `ui run`，但模型用 `--mock` 脚本，验证的是**协议与工具链**，不是模型理解能力：
+
+```bash
+ui run --task test --mock scenario.json --yes
+```
+
+场景：
+
+1. `skill(name=docx-safe-edit)` 加载正文；
+2. `shell` 跑 `inspect report.docx`；
+3. `shell` 跑 `copy report.docx --out report.edit.docx`；
+4. `shell` 跑 `replace report.edit.docx --find "Hello world" --replace "Hi world"`；
+5. `shell` 跑 `validate report.docx report.edit.docx`。
+
+结果：
+
+- journal 中有 **1 条 `skill/load`**、5 条 `tool/end`、2 条 `effect/observed`；
+- `effect/observed` 没有临时文件（temp 放进 `.ui/tmp`，被 observe 跳过）；
+- `validate`：`ok=true`、`original_untouched=true`、`lost_structure=[]`、`text_chars 51→48`；
+- 原件 sha256 未变，表格仍 1 个；
+- 已知代价：跨 run 的 `world` 粗体折叠到起始 run。
+
+## 8. 下一步
 
 1. 给脚本加 `--part word/header1.xml`，覆盖页眉页脚；
 2. 加 `--run-wise` 模式：按 run 分段替换，保留内部格式；
 3. 用 LibreOffice 转 PDF/PNG 做视觉抽查；
 4. 把“原件未变/结构守恒”写进 `ui verify` 的审计事件。
 
-## 8. 参考
+## 9. 参考
 
 - [Editing existing DOCX via OOXML](https://github.com/openkursar/hello-halo/blob/a1b6d395e9c3609d33cefa0fd2fb99d280bfb4e0/resources/builtin-skills/docx/references/editing.md)
 - [docx-official/edit.md](https://github.com/xiaomimimo/mimo-code/blob/5a538cb4f97b9c4c8eb09a845ec06c1e5f1f3e8f/packages/cli/src/skill/builtin/.bundle/docx-official/edit.md)

@@ -236,7 +236,11 @@ def cmd_replace(args):
             hits = sum(paragraph_text(p).count(args.find) for p in doc.iter(W + "p"))
         print(json.dumps({"dryRun": True, "matches": hits, "find": args.find}, ensure_ascii=False))
         return 0 if hits else 1
-    fd, tmp = tempfile.mkstemp(prefix="docx-safe-", suffix=".docx", dir=str(target.parent))
+    # 临时文件放进 .ui/tmp：同文件系统可原子 rename，且 observe 默认跳过 .ui，
+    # 不会在审计日志里留下一个"创建又消失"的临时文件。
+    tmpdir = target.parent / ".ui" / "tmp"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="docx-safe-", suffix=".docx", dir=str(tmpdir))
     os.close(fd)
     try:
         count = rewrite_document(target, tmp, args.find, args.replace, args.all)
