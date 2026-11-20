@@ -143,6 +143,8 @@ $ ui replay
 ![首开引导](docs/images/onboarding.png)
 
 设计约束（配色、树结构、动效、背景板）在 [docs/03-frontend.md](docs/03-frontend.md)；
+文档安全编辑 skill 在 [demo/skills/doc-safe-edit/SKILL.md](demo/skills/doc-safe-edit/SKILL.md)，
+技术调研在 [docs/32-doc-safe-edit-skill.md](docs/32-doc-safe-edit-skill.md)；
 实验室血缘 DAG 的独立原型在 [design/lab-lineage.html](design/lab-lineage.html)，目前是静态样例，未接生产数据：
 
 ![实验室血缘原型](docs/images/lineage.png)
