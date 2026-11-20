@@ -7,7 +7,8 @@
 use crate::json::Json;
 use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC};
 use crate::protected::{
-    is_protected_dir, is_protected_path, is_protected_real_path, PROTECTED_DIRS,
+    has_declarations, is_allowed_read, is_private_dir_name, is_private_path, is_private_real_path,
+    private_dir_names, private_entries,
 };
 use crate::skill::Catalog;
 use std::fs;
@@ -24,9 +25,9 @@ pub struct Ctx {
     pub cancel: crate::cancel::Cancel,
     /// 外部 MCP 工具（没配置就是 None，`mcp_call` 会明确报错）
     pub mcp: Option<std::sync::Arc<std::sync::Mutex<crate::mcp::Hub>>>,
-    /// ?????????????????(???)
+    /// 子进程环境卫生：默认把名字看起来像密钥的环境变量从 shell 子进程里剔掉
     pub env_scrub: bool,
-    /// ????(??)
+    /// 插件集（提供 plugin_call 能调的工具；None 表示没装）
     pub plugins: Option<std::sync::Arc<crate::plugin::Set>>,
     /// 观测式效果：shell/插件/MCP 执行前后扫工作区，把实际改动记进日志
     pub env_observe: bool,
@@ -198,9 +199,51 @@ fn arg_str(args: &Json, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("缺少参数 `{}` (string)", key))
 }
 
+/// 读入口的统一判定：隐私清单挡住，`.ui/tool-output/` 是唯一例外。
+///
+/// 例外存在的理由很具体：长工具输出会落盘到那里，上下文里只留一小片，
+/// 模型必须能把全文读回来（`agent::retain_tool_output`）。日志、会话、
+/// 配置不在例外里，按隐私清单扣留的原文（`.ui/tool-private/`）也不在——
+/// 那份是"日志里连片段都不留"的一档，开读例外等于让它从旁门回到上下文。
+///
+/// 策略层也按同一份清单生成 Deny 规则，这里不是重复劳动而是补第二个入口：
+/// `Agent::run` 之外的调用方（工作流的直接调用、测试、将来的 SDK 面）
+/// 不经过策略层，边界不能只在策略层。
+fn blocked_read(ctx: &Ctx, path: &Path) -> bool {
+    (is_private_path(&ctx.workspace, path) || is_private_real_path(&ctx.workspace, path))
+        && !is_allowed_read(&ctx.workspace, path)
+}
+
+/// 写入口：没有例外。
+///
+/// `is_allowed_read` 只放宽读——往截断缓存里写文件，就是往模型下一轮的
+/// "原文"里塞伪造内容，它自己会被骗。
+fn blocked_write(ctx: &Ctx, path: &Path) -> bool {
+    is_private_path(&ctx.workspace, path) || is_private_real_path(&ctx.workspace, path)
+}
+
 fn fs_read_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
     let p = args.str_at("path").unwrap_or("");
     vec![Effect::new(FS_READ, ctx.resolve(p).to_string_lossy().to_string())]
+}
+
+/// 「文件不存在」在 `.ui/tool-output/` 上有第二种解释：原文被保留策略清掉了。
+///
+/// 两种情况要分开说。这个目录是内核自己写、自己按策略删的（`spill::prune`），
+/// 上下文里那句"完整内容在 …"可能就是删之前留下的。指过去的人如果只看到
+/// "不存在"，最自然的下一步是重跑那条隐私命令——刚花力气扣留的内容又被读回上下文。
+fn missing_file_note(ctx: &Ctx, path: &Path, rel: &str) -> String {
+    if crate::spill::dirs(&ctx.workspace)
+        .iter()
+        .any(|d| path.starts_with(d))
+    {
+        return format!(
+            "落盘原文已按保留策略清理，不在了: {}（当前策略 {}；`ui spill` 查看与清理）",
+            rel,
+            crate::spill::Policy::from_env().describe()
+        );
+    }
+    format!("文件不存在: {}", rel)
 }
 
 fn fs_read_run(args: &Json, ctx: &Ctx) -> ToolResult {
@@ -209,9 +252,14 @@ fn fs_read_run(args: &Json, ctx: &Ctx) -> ToolResult {
         Err(e) => return ToolResult::err(e),
     };
     let p = ctx.resolve(&rel);
+    // 清单判定在「文件不存在」之前：反过来的话，试一个隐私路径会得到
+    // "不存在"，模型就学着相信那里真的没有东西。
+    if blocked_read(ctx, &p) {
+        return ToolResult::err(protected_error(&p));
+    }
     let meta = match fs::metadata(&p) {
         Ok(m) => m,
-        Err(_) => return ToolResult::err(format!("文件不存在: {}", rel)),
+        Err(_) => return ToolResult::err(missing_file_note(ctx, &p, &rel)),
     };
     if meta.is_dir() {
         return ToolResult::err(format!("这是一个目录: {}", rel));
@@ -270,6 +318,9 @@ fn fs_write_run(args: &Json, ctx: &Ctx) -> ToolResult {
         Err(e) => return ToolResult::err(e),
     };
     let p = ctx.resolve(&rel);
+    if blocked_write(ctx, &p) {
+        return ToolResult::err(protected_error(&p));
+    }
     if let Some(parent) = p.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             return ToolResult::err(format!("创建目录失败: {}", e));
@@ -306,6 +357,11 @@ fn fs_edit_run(args: &Json, ctx: &Ctx) -> ToolResult {
     };
     let replace_all = args.bool_at("replaceAll").unwrap_or(false);
     let p = ctx.resolve(&rel);
+    // 编辑既是读也是写，按写的那一档判：`.ui/tool-output/` 的读例外
+    // 不适用于它，否则"读回全文"变成"改写全文"。
+    if blocked_write(ctx, &p) {
+        return ToolResult::err(protected_error(&p));
+    }
     let before = match fs::read_to_string(&p) {
         Ok(t) => t,
         Err(_) => return ToolResult::err(format!("文件不存在: {}", rel)),
@@ -382,6 +438,16 @@ fn fs_search_run(args: &Json, ctx: &Ctx) -> ToolResult {
     }
 }
 
+/// 扫描时这个目录条目能不能进。
+///
+/// 名字判定（默认清单 + 单段声明）先挡住绝大多数，`path` 那一次只在
+/// **有人追加过声明**时才付：多段声明（`vendor/keys`）按名字永远排不掉，
+/// 只有拿到完整路径才判得出来。反过来，绝对路径声明（`--private ~/.aws`）
+/// 在工作区内没有对应条目，这一句也不会误伤。
+fn private_subtree(workspace: &Path, path: &Path, name: &str) -> bool {
+    is_private_dir_name(name) || (has_declarations() && is_private_path(workspace, path))
+}
+
 fn walk(workspace: &Path, dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -389,17 +455,14 @@ fn walk(workspace: &Path, dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        // 受保护目录的清单只有 `protected::PROTECTED_DIRS` 一份；
+        let path = entry.path();
+        // 隐私清单只有 `protected` 那一份（默认三项 + `--private` 追加）；
         // 下面其余名字是搜索噪音，不是安全边界。
-        if is_protected_dir(&name)
-            || matches!(
-                name.as_str(),
-                "node_modules" | ".git" | ".ui" | "target" | ".cargo"
-            )
+        if private_subtree(workspace, &path, &name)
+            || matches!(name.as_str(), "node_modules" | "target" | ".cargo")
         {
             continue;
         }
-        let path = entry.path();
         // metadata() 会跟随符号链接。工作区里一个 `alias -> secrets`
         // 就能绕过按名字的跳过表，所以在跟随之前先看真实目标。
         let is_symlink = entry
@@ -435,14 +498,14 @@ fn symlink_target_is_safe(workspace: &Path, path: &Path) -> bool {
     let ws = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    real.starts_with(&ws) && !is_protected_path(&ws, &real)
+    real.starts_with(&ws) && !is_private_path(&ws, &real)
 }
 
 fn protected_error(target: &Path) -> String {
     format!(
         "受保护目录不可访问：{}（{}）",
         target.display(),
-        PROTECTED_DIRS.join("、")
+        private_entries().join("、")
     )
 }
 
@@ -607,11 +670,9 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
         let keep: Vec<(String, String)> = std::env::vars().collect();
         cmd.env_clear();
         for (k, v) in keep {
-            let up = k.to_ascii_uppercase();
-            let looks_secret = ["KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH"]
-                .iter()
-                .any(|p| up.contains(p));
-            if looks_secret {
+            // 判据与导出脱敏、`ui secrets` 共用 `secrets::key_is_secret`：
+            // 这里换一份名单，就等于「命令环境里挡住了，导出时漏出去」。
+            if crate::secrets::key_is_secret(&k) {
                 scrubbed += 1;
                 continue;
             }
@@ -1087,8 +1148,9 @@ mod tests {
         assert_eq!(r.meta.num_at("status"), Some(3.0));
     }
 
-    /// 四个读取入口共用 `protected::PROTECTED_DIRS`：fs_search 的 walk、
-    /// 系统 grep（--exclude-dir）、无 grep 时的 literal_search、tree。
+    /// 四个读取入口共用 `protected` 的那一份清单（默认三项 + `--private`）：
+    /// fs_search 的 walk、系统 grep（--exclude-dir）、无 grep 时的
+    /// literal_search、tree。
     ///
     /// 修复前：fs_search / grep 会返回 canary；tree(path="secrets") 会成功
     /// 列出 astra.json；literal_search 也会返回 canary。四条断言各自会失败。
@@ -1097,7 +1159,8 @@ mod tests {
         let c = ctx();
         let tools = registry();
         // 用清单本身而不是字面量 "secrets"：清单改了，这个测试跟着走。
-        let protected = PROTECTED_DIRS[0];
+        let protected = private_dir_names()[0].clone();
+        let protected = protected.as_str();
         let protected_dir = c.workspace.join(protected);
         fs::create_dir_all(&protected_dir).unwrap();
         fs::write(
@@ -1205,6 +1268,117 @@ mod tests {
             );
         }
     }
+
+    /// 追加声明（`--private` / `UI_PRIVATE`）走的是**同一套**读取入口，
+    /// 不是只多了一条策略规则：策略在 `run` 之外，直接调工具的路径不经过它。
+    ///
+    /// 这里用 `vendor/keys`（多段）而不是再造一个默认目录名：多段声明按
+    /// 连续段匹配，`--exclude-dir` 那种「只认名字」的排法必然漏，正好把
+    /// 「结果侧还要再过一遍路径判定」这条钉住。
+    #[test]
+    fn declared_private_dir_is_skipped_by_read_entries() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        crate::protected::add_private("vendor/keys").unwrap();
+        let c = ctx();
+        let tools = registry();
+        let hidden = c.workspace.join("vendor/keys");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(
+            hidden.join("deploy.pem"),
+            "PRIVATE-EJ-9988\napi_key = sk-DECL-CANARY\n",
+        )
+        .unwrap();
+        fs::write(c.workspace.join("main.rs"), "fn main() {}\n").unwrap();
+
+        // ① fs_search 的 walk：按段跳过，连目录都不进
+        let r = (find(&tools, "fs_search").unwrap().run)(
+            &Json::obj(vec![("pattern", Json::from("sk-DECL-CANARY"))]),
+            &c,
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert!(
+            !r.content.contains("sk-DECL-CANARY"),
+            "fs_search 读到了声明的隐私路径：{}",
+            r.content
+        );
+
+        // ② grep：--exclude-dir 只认名字，多段声明靠结果侧过滤兜住
+        let r = (find(&tools, "grep").unwrap().run)(
+            &Json::obj(vec![
+                ("pattern", Json::from("sk-DECL-CANARY")),
+                ("path", Json::from(".")),
+            ]),
+            &c,
+        );
+        assert!(
+            !r.content.contains("sk-DECL-CANARY"),
+            "grep 读到了声明的隐私路径：{}",
+            r.content
+        );
+        // 直接指向它必须被拒（不是"返回空"——空会让人以为真的没有这个文件）
+        let r = (find(&tools, "grep").unwrap().run)(
+            &Json::obj(vec![
+                ("pattern", Json::from("api_key")),
+                ("path", Json::from("vendor/keys")),
+            ]),
+            &c,
+        );
+        assert!(!r.ok, "grep(path=声明路径) 必须被拒绝：{}", r.content);
+        assert!(
+            r.error.unwrap_or_default().contains("vendor/keys"),
+            "拒绝信息要回显生效清单"
+        );
+
+        // ③ tree：既不列出，也不能被直接展开
+        let r = (find(&tools, "tree").unwrap().run)(
+            &Json::obj(vec![("path", Json::from("."))]),
+            &c,
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert!(
+            !r.content.contains("deploy.pem"),
+            "tree 列出了声明的隐私路径：{}",
+            r.content
+        );
+        let r = (find(&tools, "tree").unwrap().run)(
+            &Json::obj(vec![("path", Json::from("vendor/keys"))]),
+            &c,
+        );
+        assert!(!r.ok, "tree(path=声明路径) 必须被拒绝：{}", r.content);
+
+        // ④ 写也一样：往隐私路径里落盘不因为"目录是人自己加的"就放宽
+        let r = (find(&tools, "fs_write").unwrap().run)(
+            &Json::obj(vec![
+                ("path", Json::from("vendor/keys/notes.txt")),
+                ("content", Json::from("x")),
+            ]),
+            &c,
+        );
+        assert!(!r.ok, "fs_write 写进声明的隐私路径：{}", r.content);
+
+        crate::protected::clear_private();
+    }
+
+    #[test]
+    fn declarations_reach_the_rejection_message() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        crate::protected::add_private("vendor/keys").unwrap();
+        let c = ctx();
+        let tools = registry();
+        let r = (find(&tools, "tree").unwrap().run)(
+            &Json::obj(vec![("path", Json::from("vendor/keys"))]),
+            &c,
+        );
+        assert!(!r.ok);
+        // 模型只看到「不允许」是不够的：不告诉它清单上有什么，它只会反复试。
+        assert!(
+            r.error.unwrap_or_default().contains("vendor/keys"),
+            "拒绝信息里要印出生效清单"
+        );
+        crate::protected::clear_private();
+    }
 }
 // ── 新增工具的实现 ──────────────────────────────────────────────
 
@@ -1218,7 +1392,7 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     // `grep(path="secrets")` 的效果目标是 `<ws>/secrets` 目录本身；策略层
     // 现在也会拒，但工具自身再挡一次：直接调用 run 的代码不经过策略层。
     // 真实路径检查挡住 `alias -> secrets` 这类符号链接别名。
-    if is_protected_path(&ctx.workspace, &root) || is_protected_real_path(&ctx.workspace, &root) {
+    if is_private_path(&ctx.workspace, &root) || is_private_real_path(&ctx.workspace, &root) {
         return ToolResult::err(protected_error(&root));
     }
     let include = args.str_at("include");
@@ -1227,13 +1401,12 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     // 用系统 GNU grep：支持 POSIX ERE 正则，零依赖。找不到就退化成字面匹配。
     let mut cmd = std::process::Command::new("grep");
     cmd.arg("-rEn").arg("--binary-files=without-match");
-    // 受保护目录的清单只有一份；`--exclude-dir` 只对递归发现的目录生效，
-    // 所以上面还要单独检查 path 指向目录本身的调用。
-    for dir in PROTECTED_DIRS {
+    // 受保护目录的清单只有一份（`.ui` / `.git` / `secrets` 都在里面）；
+    // `--exclude-dir` 只对递归发现的目录生效，所以上面还要单独检查
+    // path 指向目录本身的调用。
+    for dir in private_dir_names() {
         cmd.arg(format!("--exclude-dir={}", dir));
     }
-    // 这两个不是安全边界，只是别把 .git 对象和 .ui 运行态扫进结果。
-    cmd.arg("--exclude-dir=.git").arg("--exclude-dir=.ui");
     if args.bool_at("ignoreCase") == Some(true) {
         cmd.arg("-i");
     }
@@ -1247,7 +1420,16 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     match cmd.output() {
         Ok(out) if out.status.code() == Some(0) || out.status.code() == Some(1) => {
             let text = String::from_utf8_lossy(&out.stdout);
-            let mut lines: Vec<&str> = text.lines().collect();
+            // `--exclude-dir` 只认名字：多段（`vendor/keys`）与绝对声明它排不掉。
+            // 结果行按真实路径再判一次，否则"清单里加了目录，grep 照样把它捞出来"
+            // ——边界必须取决于清单，不取决于哪条命令更快。
+            let mut lines: Vec<&str> = text
+                .lines()
+                .filter(|l| {
+                    let p = l.split(':').next().unwrap_or("");
+                    !p.is_empty() && !is_private_path(&ctx.workspace, &ctx.resolve(p))
+                })
+                .collect();
             let total = lines.len();
             if total == 0 {
                 return ToolResult::ok("（无匹配）");
@@ -1284,7 +1466,7 @@ fn literal_search(
     ignore_case: bool,
     max_hits: usize,
 ) -> Result<String, String> {
-    if is_protected_path(workspace, root) || is_protected_real_path(workspace, root) {
+    if is_private_path(workspace, root) || is_private_real_path(workspace, root) {
         return Err(protected_error(root));
     }
     let needle = if ignore_case {
@@ -1315,8 +1497,8 @@ fn literal_search(
             }
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
-            if is_protected_dir(&name)
-                || matches!(name.as_str(), ".git" | "target" | "node_modules" | ".ui")
+            if private_subtree(workspace, &p, &name)
+                || matches!(name.as_str(), "target" | "node_modules")
             {
                 continue;
             }
@@ -1542,7 +1724,7 @@ fn run_todo(args: &Json, ctx: &Ctx) -> ToolResult {
 fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
     let rel = args.str_at("path").unwrap_or(".");
     let root = ctx.resolve(rel);
-    if is_protected_path(&ctx.workspace, &root) || is_protected_real_path(&ctx.workspace, &root) {
+    if is_private_path(&ctx.workspace, &root) || is_private_real_path(&ctx.workspace, &root) {
         return ToolResult::err(protected_error(&root));
     }
     let depth = args.u64_at("depth").unwrap_or(2).min(6) as usize;
@@ -1573,15 +1755,12 @@ fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
                 return;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if is_protected_dir(&name)
-                || matches!(
-                    name.as_str(),
-                    ".git" | "target" | "node_modules" | ".ui" | "dist"
-                )
+            let p = e.path();
+            if private_subtree(workspace, &p, &name)
+                || matches!(name.as_str(), "target" | "node_modules" | "dist")
             {
                 continue;
             }
-            let p = e.path();
             let is_symlink = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
             let is_dir = p.is_dir();
             out.push(format!("{}{}{}", prefix, name, if is_dir { "/" } else { "" }));

@@ -135,6 +135,17 @@ impl Budget {
         }
     }
 
+    /// 开始一次新 run：保留限额，清零消耗和墙钟起点。
+    ///
+    /// 长驻 worker 若不调这个，上一任务的 token/费用会继承到下一任务，
+    /// 让预算条和取消后的重试都显示错误数字。
+    pub fn reset(&mut self) {
+        self.tokens = 0;
+        self.calls = 0;
+        self.usd = 0.0;
+        self.started_ms = crate::time::now_ms();
+    }
+
     pub fn used(&self, dim: Dim) -> f64 {
         match dim {
             Dim::Tokens => self.tokens as f64,

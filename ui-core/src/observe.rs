@@ -308,11 +308,11 @@ mod watcher {
     use super::{Changes, SKIP_DIRS};
     use std::collections::{BTreeMap, BTreeSet};
     use std::io;
-    use std::os::raw::{c_char, c_int, c_void};
+    use std::os::raw::{c_char, c_int, c_long, c_void};
     use std::path::{Path, PathBuf};
 
-    const SYS_INOTIFY_INIT1: isize = 294;
-    const SYS_INOTIFY_ADD_WATCH: isize = 254;
+    const SYS_INOTIFY_INIT1: c_long = 294;
+    const SYS_INOTIFY_ADD_WATCH: c_long = 254;
 
     const IN_NONBLOCK: c_int = 0o4000;
     const IN_CLOEXEC: c_int = 0o2_000_000;
@@ -339,7 +339,9 @@ mod watcher {
         | IN_DELETE_SELF;
 
     extern "C" {
-        fn syscall(num: isize, ...) -> isize;
+        // 签名与 sandbox.rs 保持一字不差：同一个 libc 符号在两份声明里写成
+        // `isize` / `c_long`，编译器会报 redeclare 警告—— ABI 假设必须只有一份。
+        fn syscall(num: c_long, ...) -> c_long;
         fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
         fn close(fd: c_int) -> c_int;
     }

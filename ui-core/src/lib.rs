@@ -32,15 +32,20 @@ pub mod policy;
 pub mod prompt;
 pub mod protected;
 pub mod sandbox;
+pub mod secrets;
 pub mod sha256;
 pub mod skill;
+pub mod spill;
 pub mod time;
 pub mod stream_verify;
 pub mod tools;
 pub mod winsandbox;
 pub mod workflow;
 
-pub use agent::{resume, Agent, AgentError, ApprovalRequest, Hooks, NullHooks, ResumeReport, TurnReport};
+pub use agent::{
+    resume, Agent, AgentError, ApprovalRequest, ApprovalResponse, ApprovalScope, ApprovalTicket,
+    Hooks, NullHooks, ResumeReport, TurnReport,
+};
 pub use budget::{estimate_tokens, Budget, BudgetExceeded, Dim, Limits};
 pub use cancel::Cancel;
 pub use compact::{compact, CompactOutcome, CompactPolicy, Summarizer};

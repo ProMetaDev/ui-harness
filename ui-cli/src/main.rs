@@ -16,7 +16,7 @@ mod providers;
 mod server;
 mod term;
 
-use ui_core::agent::{resume, Agent, ApprovalRequest, Hooks};
+use ui_core::agent::{resume, Agent, ApprovalRequest, ApprovalResponse, ApprovalScope, Hooks};
 use ui_core::budget::Limits;
 use ui_core::compact::CompactPolicy;
 use ui_core::json::{self, Json};
@@ -83,6 +83,9 @@ struct Args {
     flags: Vec<String>,
     /// 命令之后的位置参数（`ui lab pack` 里的 `pack`）
     rest: Vec<String>,
+    /// 同一个键重复出现的全部值（`--private a --private b`）。
+    /// `values` 只会留最后一个，隐私清单这种"逐条累加"的选项不能丢。
+    repeats: Vec<(String, String)>,
 }
 
 impl Args {
@@ -106,8 +109,11 @@ impl Args {
             "no-env-scrub",
             "no-isolate",
             "no-memory",
+            "no-redact",
             "no-splash",
             "no-tools",
+            "raw",
+            "rollback",
             "strict",
             "version",
             "watch-parent",
@@ -115,6 +121,7 @@ impl Args {
         ];
         let mut values = HashMap::new();
         let mut flags = Vec::new();
+        let mut repeats: Vec<(String, String)> = Vec::new();
         let mut rest: Vec<String> = Vec::new();
         let mut command: Option<String> = None;
         let mut i = 0;
@@ -127,6 +134,7 @@ impl Args {
                     i += 1;
                 } else if i + 1 < list.len() && !list[i + 1].starts_with("--") {
                     values.insert(key.to_string(), list[i + 1].clone());
+                    repeats.push((key.to_string(), list[i + 1].clone()));
                     i += 2;
                 } else {
                     flags.push(key.to_string());
@@ -141,11 +149,39 @@ impl Args {
                 i += 1;
             }
         }
-        (command, Args { values, flags, rest })
+        (
+            command,
+            Args {
+                values,
+                flags,
+                rest,
+                repeats,
+            },
+        )
     }
 
     fn sub(&self, index: usize) -> Option<&str> {
         self.rest.get(index).map(String::as_str)
+    }
+
+    /// 内部转发用的空参数表（`ui team` 造好 plan 后转交 `ui workflow`）。
+    /// 走构造函数而不是字面量：加字段时只有一处要改。
+    fn empty() -> Args {
+        Args {
+            values: HashMap::new(),
+            flags: Vec::new(),
+            rest: Vec::new(),
+            repeats: Vec::new(),
+        }
+    }
+
+    /// 某个键的全部取值（按出现顺序）。重复声明的选项走这里，不走 `get`。
+    fn many(&self, key: &str) -> Vec<String> {
+        self.repeats
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .collect()
     }
 
     fn get(&self, key: &str) -> Option<&str> {
@@ -313,8 +349,313 @@ fn cmd_sessions(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+/// 人话版的文件大小：`ui spill` 要说清"这里攒了多少原文"，字节数没人看得懂。
+fn human_bytes(n: u64) -> String {
+    const K: u64 = 1024;
+    if n < K {
+        return format!("{} B", n);
+    }
+    if n < K * K {
+        return format!("{} KiB", (n + K - 1) / K);
+    }
+    if n < K * K * K {
+        return format!("{} MiB", (n + K * K - 1) / (K * K));
+    }
+    format!("{} GiB", (n + K * K * K - 1) / (K * K * K))
+}
+
+/// `k`/`m`/`g` 后缀的容量写法：`--max-bytes 64m` 比 `67108864` 少一个错数量级的机会。
+fn parse_size(s: &str) -> Result<u64, String> {
+    // 解析本体在 `spill::parse_size`：命令行与环境变量必须认同一套写法，
+    // 否则"这里能写 1k、那里只能写 1024"会变成要靠试出来的东西。
+    ui_core::spill::parse_size(s)
+        .ok_or_else(|| format!("`{}` 不是字节数（认 512b/1k/256m/2g，或纯数字）", s))
+}
+
+/// `ui spill`：看与清落盘的**原文**（`.ui/tool-output/` ＋ `.ui/tool-private/`）。
+///
+/// 两个目录放的都是已经从日志里抹掉的正文，区别只有一条：`tool-output/` 是被
+/// 截断的长输出，模型按需读得回来（只读例外）；`tool-private/` 是按隐私清单扣留
+/// 的原文，模型读不到，只有人和重放看得见。保留策略管的是"这台机器上还留着多少
+/// 份原文"，所以个数与字节上限都按**两目录合计**算——分开算等于把上限翻倍。
+///
+/// 日志干净不等于这台机器干净：所以内核一边在 run 边界按保留
+/// 策略自动清（`ui_core::spill::Policy`），一边给人留一个能随时问一句
+/// 「现在盘上还有什么、按现在这一档会留下什么」的入口。
+///
+/// `clean` 默认只按策略清；`--all` 是无视策略全清（出门前那一下），代价是
+/// 本轮历史里"完整内容在 …"的指针全部失效，所以它要 `--yes`。
+fn cmd_spill(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let dirs = ui_core::spill::dirs(&ws);
+    let label = |d: &std::path::Path| {
+        d.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let verb = args.sub(0).unwrap_or("status");
+    if !matches!(verb, "status" | "clean") {
+        return Err(format!(
+            "ui spill 只认 status|clean，收到 `{}`（`ui spill --help`）",
+            verb
+        ));
+    }
+    let as_json = args.flag("json");
+    let dry = args.flag("dry-run");
+    let now = ui_core::time::now_ms();
+
+    // 命令行 > 环境变量 > 默认。三个上限各留一个覆盖口：跑一次性的清理时，
+    // 不该逼人为了临时改一档去动 shell 配置。
+    let mut policy = ui_core::spill::Policy::from_env();
+    if let Some(v) = args.get("older-than") {
+        policy.max_age_days = v
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("--older-than 要的是天数，收到 `{}`", v))?;
+    }
+    if let Some(v) = args.get("max-files") {
+        policy.max_files = v
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("--max-files 要的是个数，收到 `{}`", v))?;
+    }
+    if let Some(v) = args.get("max-bytes") {
+        policy.max_bytes = parse_size(v)?;
+    }
+    let all = args.flag("all");
+    if all {
+        if verb != "clean" {
+            return Err("--all 只对 `ui spill clean` 有意义".to_string());
+        }
+        if !args.flag("yes") {
+            return Err(
+                "--all 会清掉**全部**落盘原文（包括这一轮还指着的那些），日志里的指针会一起失效。\
+                 确认就加 --yes；想按保留策略走就别加 --all。"
+                    .to_string(),
+            );
+        }
+        policy.max_age_days = 0;
+        policy.max_files = 0;
+        policy.max_bytes = 0;
+        policy.keep_all = false;
+    }
+
+    let broken: Vec<String> = dirs
+        .iter()
+        .filter(|d| ui_core::spill::unreadable(d))
+        .map(|d| label(d))
+        .collect();
+    if !broken.is_empty() {
+        // 读不出来 ≠ 里面是空的。把这种情况报成"干净"是最难查的误导。
+        // 只报目录名：绝对路径里带着用户名与项目名，而这一行会被贴进 issue。
+        return Err(format!(
+            "{} 存在但列不出来（权限或挂载问题）——这里可能仍有原文，先修可读性再谈清理",
+            broken.join(", ")
+        ));
+    }
+    // 两个目录**合起来**算一份账：上限管的是"这台机器上留了多少份原文"，
+    // 分开算等于每个目录各领一份完整预算。
+    let listed = ui_core::spill::listings(&dirs);
+    let foot = ui_core::spill::footprints(&dirs);
+    let plan = ui_core::spill::plan_all(&dirs, &policy, now);
+    let doomed = &plan.remove;
+    let doomed_bytes = plan.bytes;
+    // 账上那些指向这里、但文件已经不在的指针：清理是对的，但断了要说
+    let jp = resolve_journal(args, &ws);
+    let dangling: Vec<String> = match std::fs::File::open(&jp) {
+        Ok(_) => {
+            let (events, _) = Journal::read(&jp).map_err(|e| format!("{}: {}", jp.display(), e))?;
+            ui_core::spill::dangling(&events, &ws)
+        }
+        Err(_) => Vec::new(),
+    };
+
+    // 身份按**全路径**认：两个目录里的命名规则一样，只比文件名会有撞上的可能
+    let going: Vec<std::path::PathBuf> = doomed.iter().map(|e| e.path.clone()).collect();
+    let from = |e: &ui_core::spill::Entry| {
+        e.path
+            .parent()
+            .map(|p| label(p))
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let prune_result = if verb == "clean" && !dry {
+        Some(ui_core::spill::prune_all(&dirs, &policy, now))
+    } else {
+        None
+    };
+
+    if as_json {
+        let rows = Json::Arr(
+            listed
+                .iter()
+                .map(|e| {
+                    Json::obj(vec![
+                        ("name", Json::from(e.name.as_str())),
+                        ("bytes", Json::from(e.bytes)),
+                        ("ageDays", Json::from((now.saturating_sub(e.touched_ms) as f64) / 86400000.0)),
+                        ("mine", Json::Bool(e.mine)),
+                        ("from", Json::from(from(e).as_str())),
+                        (
+                            "scheduled",
+                            Json::Bool(going.iter().any(|n| *n == e.path)),
+                        ),
+                    ])
+                })
+                .collect(),
+        );
+        let mut payload = vec![
+            ("workspace", Json::from(ws.to_string_lossy().as_ref())),
+            (
+                "dirs",
+                Json::Arr(
+                    dirs.iter()
+                        .map(|d| Json::from(d.to_string_lossy().as_ref()))
+                        .collect(),
+                ),
+            ),
+            ("policy", Json::from(policy.describe().as_str())),
+            (
+                "envWarnings",
+                Json::Arr(
+                    ui_core::spill::Policy::warnings()
+                        .into_iter()
+                        .map(|w| Json::from(w.as_str()))
+                        .collect(),
+                ),
+            ),
+            ("keepAll", Json::Bool(policy.keep_all)),
+            ("files", Json::from(listed.len() as u64)),
+            ("bytes", Json::from(foot.bytes)),
+            ("foreign", Json::from(foot.foreign as u64)),
+            ("cleaned", Json::Bool(verb == "clean" && !dry)),
+            (
+                "willRemove",
+                Json::Arr(
+                    doomed
+                        .iter()
+                        .map(|e| Json::from(e.name.as_str()))
+                        .collect(),
+                ),
+            ),
+            ("willRemoveBytes", Json::from(doomed_bytes)),
+            (
+                "danglingPointers",
+                Json::Arr(
+                    dangling
+                        .iter()
+                        .map(|d| Json::from(d.as_str()))
+                        .collect(),
+                ),
+            ),
+            ("entries", rows),
+        ];
+        if let Some(p) = &prune_result {
+            payload.push(("removed", Json::from(p.removed as u64)));
+            payload.push(("freedBytes", Json::from(p.freed_bytes)));
+            payload.push(("failed", Json::from(p.failed as u64)));
+        }
+        println!("{}", Json::obj(payload).to_compact());
+        return Ok(0);
+    }
+
+    println!(
+        "落盘原文：{}（模型可读） ＋ {}（只给人看）",
+        dirs[0].display(),
+        dirs[1].display()
+    );
+    println!(
+        "  现存 {} 个文件、{}（其中 {} 个不是内核命名，任何清理都不会碰）",
+        listed.len(),
+        human_bytes(foot.bytes),
+        foot.foreign
+    );
+    println!(
+        "  保留策略：{}{}",
+        policy.describe(),
+        if all { "（本次被 --all 覆盖成「一个不留」）" } else { "" }
+    );
+    for w in ui_core::spill::Policy::warnings() {
+        // 设了却没生效的旋钮：不说就等于骗人"这一档在管着"
+        println!("  ⚠ {}", w);
+    }
+    if listed.is_empty() {
+        println!("  盘上没有原文。日志里那些被抹掉/扣留的正文从没落到过这两个目录。");
+    } else if !listed.iter().any(|e| e.mine) {
+        println!("  一个都不是内核命名的——这里的东西不是我写的，我不删。");
+    } else {
+        const SHOW: usize = 12;
+        for e in listed.iter().take(SHOW) {
+            let age = now.saturating_sub(e.touched_ms) / 1000;
+            let age_s = if age < 3600 {
+                format!("{} 分钟前", age / 60)
+            } else if age < 86400 {
+                format!("{} 小时前", age / 3600)
+            } else {
+                format!("{} 天前", age / 86400)
+            };
+            println!(
+                "  {} {:>9} {:>9}  {}",
+                if going.iter().any(|n| *n == e.path) {
+                    "会清"
+                } else if e.mine {
+                    "留下"
+                } else {
+                    "外来"
+                },
+                age_s,
+                human_bytes(e.bytes),
+                if from(e) == label(std::path::Path::new(ui_core::spill::PRIVATE_DIR)) {
+                    format!("{}  [扣留原文]", e.name)
+                } else {
+                    e.name.clone()
+                }
+            );
+        }
+        if listed.len() > SHOW {
+            println!("  … 还有 {} 个（--json 看全部）", listed.len() - SHOW);
+        }
+    }
+    println!(
+        "  按这一档：{} 个、{} 会被清掉",
+        doomed.len(),
+        human_bytes(doomed_bytes)
+    );
+    if policy.keep_all && !all {
+        println!("  注意：现在是「全留」——removed=0 的意思是没清，不是这里没东西");
+    }
+    if !dangling.is_empty() {
+        println!("  日志里有 {} 条指针指向已经不存在的原文：", dangling.len());
+        for d in dangling.iter().take(8) {
+            println!("    · {}", d);
+        }
+        println!("    （这是清理的正常结果：正文出过盘，但保留期过了。日志里的字数与指纹仍然可核对。）");
+    }
+    match &prune_result {
+        Some(p) => {
+            println!(
+                "\n已清：删掉 {} 个、释放 {}",
+                p.removed,
+                human_bytes(p.freed_bytes)
+            );
+            if p.failed > 0 {
+                println!("  有 {} 个删不掉（只读挂载或被占用）——它们还在盘上，下次再试", p.failed);
+            }
+            if p.skipped_foreign > 0 {
+                println!("  跳过 {} 个非内核命名的文件", p.skipped_foreign);
+            }
+            println!("  剩下 {} 个、{}", p.kept.files, human_bytes(p.kept.bytes));
+        }
+        None if verb == "clean" => println!("\n--dry-run：以上清单是将被删的，没有动盘"),
+        None => println!("\n要按这一档清一次：ui spill clean（先看清单加 --dry-run）"),
+    }
+    Ok(0)
+}
+
 fn dispatch(argv: &[String]) -> Result<i32, String> {
     let (command, args) = Args::parse(argv);
+    // 隐私清单必须在任何命令跑起来之前登记完：工具侧、策略层、HTTP 共用
+    // 同一份判定，晚一步就会有某条路先按默认清单判过一次。
+    apply_private(&args)?;
     match command.as_deref() {
         Some("doctor") => cmd_doctor(&args),
         Some("run") => cmd_run(&args),
@@ -326,6 +667,8 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("replay") => cmd_replay(&args),
         Some("verify") => cmd_verify(&args),
         Some("export") => cmd_export(&args),
+        Some("secrets") => cmd_secrets(&args),
+        Some("spill") => cmd_spill(&args),
         Some("skills") => cmd_skills(&args),
         Some("workflow") => cmd_workflow(&args),
         Some("team") => cmd_team(&args),
@@ -342,7 +685,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("forget") => memory::cmd_forget(&args),
         Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|skills|workflow|apply|policy|knowledge|remember|forget|memory）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory）",
             other
         )),
         None => {
@@ -350,6 +693,50 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+/// 把命令行与环境变量上声明的隐私路径登记进进程级清单。
+///
+/// 三条来源，全部累加：重复的 `--private a --private b`、单个值里的
+/// `a;b` / `a,b`，以及 `UI_PRIVATE`（给容器与 CI 用的——那里改不动命令行）。
+/// 声明只在进程启动时发生一次，模型的工具写不到这张表，否则「把 secrets
+/// 从清单里删掉」就成了一次它能自主发起的升级。
+fn apply_private(args: &Args) -> Result<(), String> {
+    for raw in args.many("private") {
+        // 一条都不剩就是写错了（`--private ""`、`--private "  "`、引号漏了
+        // 只剩个分号）。静默接受比不声明更糟：人会以为已经挡住了。
+        let parts = split_list(&raw);
+        if parts.is_empty() {
+            return Err(format!(
+                "--private 没有收到可用的路径：{:?}（要一次给多条用 ; 或 , 分隔）",
+                raw
+            ));
+        }
+        for part in parts {
+            ui_core::protected::add_private(&part)?;
+        }
+    }
+    // 环境变量给不了就当作没设；设了却是 `";"` 这种，同样按写错处理。
+    if let Ok(env) = std::env::var("UI_PRIVATE") {
+        if !env.trim().is_empty() {
+            let parts = split_list(&env);
+            if parts.is_empty() {
+                return Err(format!("UI_PRIVATE 没有收到可用的路径：{:?}", env));
+            }
+            for part in parts {
+                ui_core::protected::add_private(&part)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 拆列表值：`;` 与 `,` 都当分隔符，空段丢掉。
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split([';', ','])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn help() -> String {
@@ -361,12 +748,15 @@ fn help() -> String {
      ui resume                    对账崩溃打断的副作用\n\
      ui replay                    回放日志\n\
      ui verify                    日志自检：哈希链、未完成调用\n\
-     ui export --html F           导出单文件轨迹查看器（双击即看）\n\
+     ui export --html F           导出单文件轨迹查看器（双击即看；默认脱敏，--raw 出原样）\n\
+     ui secrets [--redact-out F]  扫日志与工具输出里的疑似密钥（只报位置，命中退 1）\n\
+     ui spill [clean]             看/清落盘原文 .ui/tool-output/ ＋ .ui/tool-private/（--dry-run 先给清单；--all --yes 一个不留）\n\
      ui skills                    列出工作区里的 skill\n\
      ui workflow --file F         按文件里的步骤跑工作流（每步一次 turn）\n\
      ui workflow --file F --isolate   并行子代理各用一份工作区副本\n\
      ui team --task \"复杂任务\" --agents 3   协作模式：自动拆成并行子任务再跑\n\
-     ui apply --id ID [--yes]     把某个隔离子代理的改动写回工作区\n\
+     ui apply --id ID [--yes]     把某个隔离子代理的改动写回工作区（--yes = 一个可回退的事务）\n\
+     ui apply --rollback [--txn ID] --yes   把某次 apply 退回写回之前的原样\n\
      ui audit --as strict         用另一个模式重判历史：哪些动作会被拦\n\
      ui lab pack --name e1        打包一次实验：产物 + 哈希 + 血缘 + 环境\n\
      ui lab claim --name acc --value 0.9   声明结论（必须被产物背书）\n\
@@ -385,6 +775,9 @@ fn help() -> String {
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
      通用参数: --workspace PATH  --task-file PATH  --max-tokens N  --max-calls N  --max-steps N  --yes\n\
+     隐私:     --private PATH（可重复，也可 a;b 一条给多个）或 UI_PRIVATE=\"a;b\"\n\
+             默认清单 .ui/.git/secrets 之外再挡住的路径：工具、策略、网页端共用同一份\n\
+     落账:     工具输出写进日志前默认抹掉凭据形状（要原文加 --no-redact，日志会记下这个选择）\n\
      模式:     --mode quiet | standard | strict\n\
      模型:     --mock 剧本.json   或   UI_MODEL_CMD=\"node adapters/deepseek.mjs\"\n\
      网页端:   --port N  --bundles 目录  --bench-cmd \"命令\"\n\
@@ -411,7 +804,73 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     println!("            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件写入限制");
     println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
     println!("  mcp_call：同上，外部 server 在进程内自主");
-    println!("  结论    ：Linux 上 shell 有写入沙箱；Windows 上只有资源与回收约束；plugin / MCP 两者都没有");
+    println!("            读取两侧都不限制——沙箱挡的是写，不是读");
+    println!("  结论    ：Linux 上 shell 有写入与网络沙箱；Windows 上只有资源与回收约束；两边的**读**都靠策略与清单，不靠内核");
+
+    // 隐私清单：判定只有一份（protected.rs），工具、策略、网页端、导出
+    // 都问它。doctor 要把「此刻生效的是哪几条」原样打出来——不然人加了
+    // `--private`，却没有任何地方能确认它真的被登记了。
+    println!("\n隐私清单（工具不可读、不可写；网页端不可直达）");
+    for entry in ui_core::protected::private_entries() {
+        let from = if ui_core::protected::is_declared(&entry) {
+            "声明"
+        } else {
+            "默认"
+        };
+        println!("  · [{}] {}", from, entry);
+    }
+    println!("  追加：--private PATH（可重复、可 a;b）或 UI_PRIVATE=\"a;b\"。只有命令行能加，模型加工具加不了");
+
+    // 落账前的脱敏管的是**日志**，管不到落盘缓存：被截断的长输出在
+    // .ui/tool-output/，按清单扣留的原文在 .ui/tool-private/。它们是 0600，
+    // 但仍然是原文——打包工作区、整个目录发给别人的人会把这份也一起带走。
+    // doctor 必须把脚印与**保留策略**一起打出来，否则"日志里没有"会被读成
+    // "这台机器上没有"，而"会自动清"又被读成"已经清过了"。
+    let spill_dirs = ui_core::spill::dirs(&ws);
+    let policy = ui_core::spill::Policy::from_env();
+    let now = ui_core::time::now_ms();
+    let foot = ui_core::spill::footprints(&spill_dirs);
+    let plan = ui_core::spill::plan_all(&spill_dirs, &policy, now);
+    let unreadable = spill_dirs.iter().any(|d| ui_core::spill::unreadable(d));
+    println!(
+        "\n落盘原文（{} 个文件，{}）：{} ＋ {}",
+        foot.files,
+        human_bytes(foot.bytes),
+        spill_dirs[0].display(),
+        spill_dirs[1].display()
+    );
+    if unreadable {
+        println!("  ⚠ 有目录存在但列不出来（权限/挂载）：这里可能仍有原文，上面的数字不可信");
+    }
+    println!("  日志里抹掉或扣留的那一份正文就在这儿；保留策略 {}（run 边界自动执行）", policy.describe());
+    for w in ui_core::spill::Policy::warnings() {
+        println!("  ⚠ {}——这一档没生效，原文会按上面那行攒着", w);
+    }
+    println!("  下一次会自动清掉 {} 个、{}；看清单与手动清：ui spill / ui spill clean",
+        plan.remove.len(), human_bytes(plan.bytes));
+    if foot.foreign > 0 {
+        println!(
+            "  其中 {} 个不是内核命名——清理不碰它们（要删请自己确认是什么）",
+            foot.foreign
+        );
+    }
+    if policy.keep_all {
+        println!("  ⚠ 现在是「全留」档：自动清理被 UI_SPILL_KEEP=all 关着，原文会一直攒着");
+    }
+    // 账上指向已删原文的指针：清理的正常结果，但得有人说出来
+    let jp = resolve_journal(args, &ws);
+    if jp.is_file() {
+        if let Ok((events, _)) = Journal::read(&jp) {
+            let dangling = ui_core::spill::dangling(&events, &ws);
+            if !dangling.is_empty() {
+                println!(
+                    "  日志里有 {} 条指针指向已过保留期的原文（字数与指纹仍可核对，正文找不回来了）",
+                    dangling.len()
+                );
+            }
+        }
+    }
+    println!("  出门前查一遍：ui secrets 会连它一起扫，命中即退出码 1");
 
     println!("\n工具与效果");
     for tool in registry() {
@@ -605,6 +1064,11 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
     }
+    if args.flag("no-redact") {
+        // 关的是**落账前**那一道脱敏：日志里会留下原文，并且每轮开始先写
+        // 一条 privacy/redact-off，三个月后翻日志的人能看出这段是原文。
+        agent.set_redact_output(false);
+    }
     if let Some(text) = args.get("append-system-prompt") {
         ui_core::prompt::set_extra_system(text);
     }
@@ -644,6 +1108,10 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
             }
             _ => {
                 let mut hooks = ConsoleHooks::new(args.flag("yes"), false);
+                // 一条输入 = 一次 run：预算、工具序号、「本次会话允许」都从
+                // 这里重新起算。所以 /status 显示的是**这一条**的账本，
+                // 整个会话的累计在日志里（`ui replay` 看得见）。
+                agent.begin_run();
                 match agent.run_turn(&input, &mut hooks) {
                     Ok(report) => println!(
                         "\n{}\n第 {} 轮结束 · {} · {} 次工具",
@@ -740,6 +1208,11 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
+    }
+    if args.flag("no-redact") {
+        // 关的是**落账前**那一道脱敏：日志里会留下原文，并且每轮开始先写
+        // 一条 privacy/redact-off，三个月后翻日志的人能看出这段是原文。
+        agent.set_redact_output(false);
     }
     if let Some(text) = args.get("append-system-prompt") {
         ui_core::prompt::set_extra_system(text);
@@ -912,6 +1385,11 @@ fn cmd_tui(args: &Args) -> Result<i32, String> {
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
     }
+    if args.flag("no-redact") {
+        // 关的是**落账前**那一道脱敏：日志里会留下原文，并且每轮开始先写
+        // 一条 privacy/redact-off，三个月后翻日志的人能看出这段是原文。
+        agent.set_redact_output(false);
+    }
     if let Some(text) = args.get("append-system-prompt") {
         ui_core::prompt::set_extra_system(text);
     }
@@ -1012,6 +1490,10 @@ fn handle_command(agent: &mut Agent, hooks: &mut TuiHooks, text: &str) {
 }
 
 fn run_one(agent: &mut Agent, hooks: &mut TuiHooks, text: &str) {
+    // 一条输入 = 一次 run：预算、工具序号、上一次的「本次会话允许」都重新起算。
+    // 令牌必须**继续用 TUI 自己那一个**——Esc 取消拿的是 `tui.cancel_token()`，
+    // 换成新令牌就等于把退出键和这一轮断开，界面再也取消不了。
+    agent.begin_run_with_cancel(Some(hooks.tui.cancel_token()));
     hooks.state.rail.begin_turn();
     hooks.state.lines.push(frame::Line::user(text.to_string()));
     hooks.state.scroll = 0;
@@ -1102,14 +1584,14 @@ impl Hooks for TuiHooks {
         self.redraw();
     }
 
-    fn on_approval(&mut self, req: &ApprovalRequest) -> Decision {
+    fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
         if self.allow_all {
             self.state
                 .lines
                 .push(frame::Line::info(format!("[auto] 已批准 {}", req.tool)));
-            self.state.rail.resolve(&req.call_id, "allow");
+            self.state.rail.resolve(&req.call_id, "allow-session");
             self.redraw();
-            return Decision::Allow;
+            return ApprovalResponse::allow_session();
         }
         self.state.approval = Some(frame::Approval {
             tool: req.tool.clone(),
@@ -1119,18 +1601,20 @@ impl Hooks for TuiHooks {
         self.redraw();
         loop {
             match self.tui.wait_key() {
+                // `y` = 只批这一次，`a` = 本次会话内同类免审。右侧栏把范围
+                // 印出来，用户才知道自己刚按下去的是哪一种。
                 Ok(term::Key::Char('y')) | Ok(term::Key::Char('Y')) => {
                     self.state.approval = None;
-                    self.state.rail.resolve(&req.call_id, "allow");
+                    self.state.rail.resolve(&req.call_id, "allow-once");
                     self.redraw();
-                    return Decision::Allow;
+                    return ApprovalResponse::allow_once();
                 }
                 Ok(term::Key::Char('a')) | Ok(term::Key::Char('A')) => {
                     self.allow_all = true;
                     self.state.approval = None;
-                    self.state.rail.resolve(&req.call_id, "allow");
+                    self.state.rail.resolve(&req.call_id, ApprovalScope::Session.name());
                     self.redraw();
-                    return Decision::Allow;
+                    return ApprovalResponse::allow_session();
                 }
                 Ok(term::Key::Char('n'))
                 | Ok(term::Key::Char('N'))
@@ -1139,12 +1623,13 @@ impl Hooks for TuiHooks {
                     self.state.approval = None;
                     self.state.rail.resolve(&req.call_id, "deny");
                     self.redraw();
-                    return Decision::Deny;
+                    return ApprovalResponse::deny();
                 }
                 Ok(_) => {}
                 Err(_) => {
+                    // 终端读不到按键（会话被挂断、stdin 关了）：不是人按了「否」。
                     self.state.rail.resolve(&req.call_id, "deny");
-                    return Decision::Deny;
+                    return ApprovalResponse::deny().via("no-input");
                 }
             }
         }
@@ -1251,6 +1736,11 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     println!("journal   {}", jp.display());
 
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
+    // run 边界：Agent::new 之后第一件事就是划它。晚一步，`--skills` 预加载
+    // 的正文和 knowledge 命中会被 reset 抹掉；早一步也没有意义（新对象本来就是
+    // 干净状态），真正要紧的是别在 `agent.cancel.clone()` 之后才划——那样
+    // watch-parent 线程抓到的是**上一个**令牌，取消永远传不进来。
+    agent.begin_run();
     agent.memory_query = Some(memory_input);
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
@@ -1260,6 +1750,11 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     apply_tool_filter(&mut agent, args);
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
+    }
+    if args.flag("no-redact") {
+        // 关的是**落账前**那一道脱敏：日志里会留下原文，并且每轮开始先写
+        // 一条 privacy/redact-off，三个月后翻日志的人能看出这段是原文。
+        agent.set_redact_output(false);
     }
     if args.flag("no-memory") {
         agent.memory_enabled = false;
@@ -2318,19 +2813,34 @@ fn cmd_prompt(args: &Args) -> Result<i32, String> {
 fn cmd_resume(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
-    let journal = Journal::open(&jp).map_err(|e| e.to_string())?;
-    let inc = analyze_incomplete(&journal.events);
+    // 「有没有活要恢复」必须从**文件**里流式数出来，不能看 `Journal::open`
+    // 留在内存里的那段尾巴：事件缓冲有上限（2000 条），大日志里崩溃现场
+    // 早就被挤出去了，于是 `ui resume` 对着一个明明没收尾的日志说
+    // 「没有需要恢复的工作」——而真正的对账（`resume()` 内部走 verify_stream）
+    // 是看得见的。同一个问题用两套事实，假阴性就是这么长出来的。
+    let stream = ui_core::stream_verify::verify_stream(&jp).map_err(|e| e.to_string())?;
     println!("journal {}", jp.display());
+    if let Some(c) = &stream.corrupt {
+        if !c.torn {
+            // 正文被改过：链已经不是真的了，在它上面写恢复事件等于把伪造
+            // 的现场坐实。先让人看，再决定要不要继续。
+            println!("FAIL  日志损坏 seq={:?}: {}", c.seq, c.reason);
+            println!("      未完成状态无法信任——先跑 `ui verify`，别在这里对账。");
+            return Ok(2);
+        }
+        println!("WARN  尾部撕裂，已按最后一条完整事件对账: {}", c.reason);
+    }
     println!(
         "未完成: turn={} 工具={}",
-        inc.open_turn.is_some(),
-        inc.open_tools.len()
+        stream.open_turn.is_some(),
+        stream.open_tools.len()
     );
-    if inc.open_turn.is_none() && inc.open_tools.is_empty() {
+    if stream.open_turn.is_none() && stream.open_tools.is_empty() {
         println!("没有需要恢复的工作");
         return Ok(0);
     }
 
+    let journal = Journal::open(&jp).map_err(|e| e.to_string())?;
     let mut agent = Agent::new(
         journal,
         Box::new(UnavailableModel),
@@ -2390,6 +2900,10 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let jp = resolve_journal(args, &ws);
     let limits = limits_from(args);
+    // 导出默认脱敏：这份 HTML 的定位就是「可离线转发」（尾部提示就是这么写的），
+    // 而日志里装着完整提示词、工具参数和工具输出。要原样留档得显式说
+    // `--raw`，让「带密钥导出」变成一个要主动选择的行为。
+    let raw = args.flag("raw");
 
     // 先流式校验：**不导出损坏的日志**（尾部撕裂可以，正文被改不行）。
     // 这一步很便宜（30 万条 ~0.5s），但能保证后面原样拷贝的行都是可信的。
@@ -2414,6 +2928,7 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
             ]),
         ),
         ("eventCount", Json::from(report.events as u64)),
+        ("redact", Json::from(if raw { "off" } else { "secrets" })),
     ])
     .to_compact();
     let head = &head[..head.len().saturating_sub(1)]; // 去掉结尾的 }
@@ -2431,6 +2946,7 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
 
     let file = File::create(out).map_err(|e| format!("写文件失败: {}", e))?;
     let mut w = std::io::BufWriter::new(file);
+    let mut redacted = 0usize;
 
     w.write_all(prefix.as_bytes())
         .map_err(|e| format!("写文件失败: {}", e))?;
@@ -2459,8 +2975,28 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
             w.write_all(b",").map_err(|e| format!("写文件失败: {}", e))?;
         }
         first = false;
+        // 脱敏：解析→清洗→只在真的动了的时候重新序列化。
+        // 没命中的行原样写出，事件数、字段顺序、数字格式全都不变——
+        // 「导出必须等于日志」这条（tests/cli.rs 会数行数）不能因为脱敏而失真。
+        let payload = if raw {
+            line.to_string()
+        } else {
+            match ui_core::json::parse(line) {
+                Ok(mut ev) => {
+                    let n = ui_core::secrets::redact_json(&mut ev);
+                    redacted += n;
+                    if n == 0 {
+                        line.to_string()
+                    } else {
+                        ev.to_compact()
+                    }
+                }
+                // 撕裂的尾行：verify_stream 已经放行，这里没法解析就保持原样
+                Err(_) => line.to_string(),
+            }
+        };
         // 事件里出现 `</script>` 会截断文档，必须转义
-        let escaped = line.replace("</", "<\\/");
+        let escaped = payload.replace("</", "<\\/");
         w.write_all(escaped.as_bytes())
             .map_err(|e| format!("写文件失败: {}", e))?;
     }
@@ -2474,6 +3010,16 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
 
     let abs = std::fs::canonicalize(out).unwrap_or_else(|_| PathBuf::from(out));
     println!("已导出 {}", abs.display());
+    if raw {
+        println!("--raw：事件按日志原文写出，未做密钥脱敏。转发前自己确认一遍。");
+    } else if redacted > 0 {
+        println!(
+            "脱敏：{} 处疑似密钥已换成 [REDACTED:…]（留档要原样就加 --raw）",
+            redacted
+        );
+    } else {
+        println!("脱敏：未发现疑似密钥（默认开启，--raw 关闭）");
+    }
     if let Some(win) = windows_path(&abs) {
         println!("Windows 路径 {}", win);
         println!("双击打开；或把上一条路径粘进浏览器地址栏。");
@@ -2481,6 +3027,235 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
         println!("用浏览器打开它即可；数据已内嵌，可离线转发。");
     }
     Ok(0)
+}
+
+/// `ui secrets`：把「日志里到底有没有凭据」变成一个能查、能出门的问题。
+///
+/// 扫的是最容易被转发出去的两类东西：
+/// - 当前 journal（`--journal` / `--session` 指定）：`ui export`、viewer、
+///   快照都从它取数；
+/// - `.ui/tool-output/`：长输出在这里留了**全文**，上下文里只是截断片段。
+/// - `.ui/tool-private/`：按隐私清单扣留的**原文**，日志里连片段都没有。
+///
+/// 刻意不扫 `.ui/memory/` 和 `.ui/sessions/` 之外的内核状态：前者在写入时
+/// 就有 `memory::looks_secret` 硬闸（命中直接拒绝写），后者就是 journal 本身。
+///
+/// 找到东西时退出码 1，方便 CI 把它当一道闸。
+fn cmd_secrets(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let jp = resolve_journal(args, &ws);
+    let as_json = args.flag("json");
+
+    let mut hits: Vec<(String, Json)> = Vec::new();
+    let mut scanned = 0usize;
+
+    // (来源标签, 文件)
+    let mut sources: Vec<(String, PathBuf)> = Vec::new();
+    if jp.is_file() {
+        sources.push(("journal".to_string(), jp.clone()));
+    }
+    // 两个落盘目录都要扫。`tool-private/` 里放的正是"日志里没有、盘上却留着"
+    // 的那一份——漏掉它，`ui secrets` 说"干净"就只覆盖了最不需要管的那一半。
+    for dir in ui_core::spill::dirs(&ws) {
+        let tag = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    sources.push((
+                        format!(
+                            "{}/{}",
+                            tag,
+                            p.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        p,
+                    ));
+                }
+            }
+        }
+    }
+    // 记忆库是**原文**的另一个藏身处：`memory/write` 走的是 `append_raw`
+    // （正文要原样召回，抹了就是记错），所以它不归门管，归这里管。
+    let memory = ws.join(".ui").join("memory.jsonl");
+    if memory.is_file() {
+        sources.push(("memory".to_string(), memory));
+    }
+    if sources.is_empty() {
+        // 两个落盘目录都要点名：只报一个，读的人会以为另一个不存在
+        let where_ = ui_core::spill::dirs(&ws)
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<String>>()
+            .join(" ＋ ");
+        println!("没有可扫的东西：{}、{}、.ui/memory.jsonl 都不存在", jp.display(), where_);
+        return Ok(0);
+    }
+
+    for (label, path) in &sources {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => return Err(format!("{}: {}", path.display(), e)),
+        };
+        let mut reader = std::io::BufReader::new(file);
+        let mut buf = String::new();
+        let mut line_no = 0usize;
+        loop {
+            buf.clear();
+            let n = reader
+                .read_line(&mut buf)
+                .map_err(|e| format!("{}: {}", path.display(), e))?;
+            if n == 0 {
+                break;
+            }
+            line_no += 1;
+            let line = buf.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            // journal 一行一事件；工具输出是整个文件一行一行来。
+            // 两种都按行扫，因为判据是子串级的。
+            scanned += 1;
+            let marks = ui_core::secrets::find(line);
+            if marks.is_empty() {
+                continue;
+            }
+            let labels: Vec<&str> = marks.iter().map(|m| m.label).collect();
+            let mut seen = labels.clone();
+            seen.sort();
+            seen.dedup();
+            hits.push((
+                label.clone(),
+                Json::obj(vec![
+                    ("source", Json::from(label.as_str())),
+                    ("line", Json::from(line_no as u64)),
+                    ("count", Json::from(marks.len() as u64)),
+                    (
+                        "labels",
+                        Json::Arr(seen.iter().map(|l| Json::from(*l)).collect()),
+                    ),
+                ]),
+            ));
+        }
+    }
+
+    if as_json {
+        let payload = Json::obj(vec![
+            ("workspace", Json::from(ws.to_string_lossy().as_ref())),
+            ("scannedLines", Json::from(scanned as u64)),
+            (
+                "hits",
+                Json::Arr(hits.iter().map(|(_, j)| j.clone()).collect()),
+            ),
+        ]);
+        println!("{}", payload.to_compact());
+    } else {
+        println!(
+            "扫描 {} 行（{} 个来源）",
+            scanned,
+            sources.len()
+        );
+        if hits.is_empty() {
+            println!("未发现疑似密钥。");
+        }
+        for (label, hit) in &hits {
+            println!(
+                "  {} 第 {} 行：{} 处（{}）",
+                label,
+                hit.u64_at("line").unwrap_or(0),
+                hit.u64_at("count").unwrap_or(0),
+                hit.arr_at("labels")
+                    .map(|a| a
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、"))
+                    .unwrap_or_default()
+            );
+        }
+        if !hits.is_empty() {
+            println!(
+                "\n只报位置和类型，不复述内容——要出门跑 `ui export`（默认脱敏），\n\
+                 要留原样加 `--raw`；日志本身要一份干净副本：`ui secrets --redact-out <路径>`。"
+            );
+        }
+    }
+
+    // 一份脱敏副本：新日志自己得能过 `ui verify`，所以走 Journal::open +
+    // append（重建哈希链），而不是把清洗后的行直接抄过去。
+    if let Some(out) = args.get("redact-out") {
+        let src = sources
+            .iter()
+            .find(|(label, _)| label == "journal")
+            .map(|(_, p)| p.clone())
+            .ok_or_else(|| "没有 journal 可脱敏（--journal/--session 指对了吗）".to_string())?;
+        let dst = if Path::new(out).is_absolute() {
+            PathBuf::from(out)
+        } else {
+            ws.join(out)
+        };
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut written = 0usize;
+        let mut changed = 0usize;
+        {
+            let mut journal = Journal::open(&dst).map_err(|e| e.to_string())?;
+            let mut reader = std::io::BufReader::new(
+                std::fs::File::open(&src).map_err(|e| format!("{}: {}", src.display(), e))?,
+            );
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                if reader
+                    .read_line(&mut buf)
+                    .map_err(|e| format!("{}: {}", src.display(), e))?
+                    == 0
+                {
+                    break;
+                }
+                let line = buf.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+                match ui_core::json::parse(line) {
+                    Ok(mut ev) => {
+                        if ui_core::secrets::redact_json(&mut ev) > 0 {
+                            changed += 1;
+                        }
+                        // 信封字段（kind/seq/ts/prev/hash/w）描述的是**原**日志：
+                        // 副本必须由 Journal 自己重新编号、重新签链，抄过来
+                        // 一条就红一条（append 会把同名字段当成新键再塞一遍）。
+                        let kind = ev.str_at("kind").unwrap_or("event").to_string();
+                        ev.remove("kind");
+                        for envelope in ["seq", "ts", "prev", "hash", "w"] {
+                            ev.remove(envelope);
+                        }
+                        journal
+                            .append(&kind, ev)
+                            .map_err(|e| e.to_string())?;
+                        written += 1;
+                    }
+                    Err(_) => return Err(format!("{} 第 {} 行不是合法事件", src.display(), written + 1)),
+                }
+            }
+        }
+        println!(
+            "脱敏副本 {}：{} 条事件，其中 {} 条被清洗",
+            dst.display(),
+            written,
+            changed
+        );
+    }
+
+    if hits.is_empty() {
+        Ok(0)
+    } else {
+        Ok(1)
+    }
 }
 
 /// 把 WSL 的 `/mnt/x/...` 翻成 `X:\...`，省得用户自己换算。
@@ -2609,11 +3384,7 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     println!("计划文件：{}", plan_path.display());
 
     // ── 3. 委派给 workflow 执行器（并行 + 隔离 + 闸门都在那边）──
-    let mut wf_args = Args {
-        values: std::collections::HashMap::new(),
-        flags: Vec::new(),
-        rest: Vec::new(),
-    };
+    let mut wf_args = Args::empty();
     wf_args.values.insert(
         "file".to_string(),
         plan_path.to_string_lossy().to_string(),
@@ -2641,11 +3412,7 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     let wf_code = cmd_workflow(&wf_args)?;
 
     // ── 4. 把子代理的改动合并回主工作区（冲突/漂移闸都在 apply 里）──
-    let mut apply_args = Args {
-        values: std::collections::HashMap::new(),
-        flags: Vec::new(),
-        rest: Vec::new(),
-    };
+    let mut apply_args = Args::empty();
     apply_args.values.insert(
         "workspace".to_string(),
         ws.to_string_lossy().to_string(),
@@ -2851,6 +3618,11 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     if args.flag("no-env-scrub") {
         agent.env_scrub = false;
     }
+    if args.flag("no-redact") {
+        // 关的是**落账前**那一道脱敏：日志里会留下原文，并且每轮开始先写
+        // 一条 privacy/redact-off，三个月后翻日志的人能看出这段是原文。
+        agent.set_redact_output(false);
+    }
     if let Some(text) = args.get("append-system-prompt") {
         ui_core::prompt::set_extra_system(text);
     }
@@ -2880,6 +3652,11 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
         let n = i + 1;
         match node {
             ui_core::workflow::Node::Task(task) => {
+                // 每一步是一次独立的 run：上一部的预算、工具序号、以及
+                // 「本次会话允许」的规则都不该顺着工作流往后淌。
+                // 边界必须划在 preload_skills **之前**——晚一步就等于把这一步
+                // 刚预加载的 skill 清掉；早一步也没别的地方可放。
+                agent.begin_run();
                 append_log(
                     &mut agent,
                     "workflow/step",
@@ -2897,6 +3674,9 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
 
                 if task.gate {
                     let req = ApprovalRequest {
+                        // 闸门也要有身份：日志里「批准了哪一步」不能只写
+                        // `workflow-3`——同一份日志跑第二遍就是同一串 ID。
+                        approval_id: format!("gate-{}", agent.journal.seq()),
                         call_id: format!("workflow-{}", n),
                         tool: "workflow".to_string(),
                         args: Json::obj(vec![
@@ -2906,7 +3686,8 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
                         effects: Vec::new(),
                         reason: format!("工作流「{}」第 {} 步需要确认", wf.name, n),
                     };
-                    if hooks.on_approval(&req) != Decision::Allow {
+                    // 工作流闸门没有「会话级」这回事：下一步就是另一个 run。
+                    if hooks.on_approval(&req).decision != Decision::Allow {
                         stopped = Some((n, "gated".to_string()));
                         break;
                     }
@@ -3409,15 +4190,674 @@ fn read_manifest(workdir: &Path) -> std::collections::HashMap<String, String> {
     map
 }
 
+// ── apply 事务：留底 → 写回 → 校验 → 提交，任何一步失败整批还原 ──────────
+//
+// 原来这里是一条 `for … std::fs::copy(src, dst)?`：第 3 个文件写失败时，
+// 前 2 个已经落地、第 3 个可能只写了一半（`copy` 先截断再拷），而 `?` 把
+// 错误抛出去之后什么记录都不留——工作区停在「一半新一半旧」的状态，日志
+// 假装无事发生，也没有任何手段退回原样。
+//
+// 现在一次 `--yes` 是一个事务：
+//
+// 1. **先记日志再动手**：`apply/begin` 写不进日志（`--journal` 指错、链断了、
+//    目录只读）就直接失败，一个文件都不碰。改了东西却查不到，正是这套内核
+//    要消灭的东西。
+// 2. **留底**：每个目标的原样先拷进 `.ui/apply/<txn>/before/`；「当时不
+//    存在」也记一笔——那种情况的回滚是删除。备份放在 `.ui` 里，模型读不到
+//    （`protected::PROTECTED_DIRS`），它伪造不了「上一版长这样」。
+// 3. **状态落盘**：`manifest.json` 走 staged → applying → committed /
+//    rolled-back。崩在写回途中时，下一条 `ui apply` 认得出「上一半没写完」，
+//    不会在残缺状态上再叠一次写回。
+// 4. **写完就验**：内容哈希对不上源文件同样算失败，整批还原。
+// 5. **还原讲分寸**：事务内部失败是无条件还原（盘上只有我们自己的笔迹）；
+//    事后 `--rollback` 只还原「内容仍然是事务当初写进去的那份」，用户在
+//    apply 之后自己改过的文件留给用户，留底也留着。
+
+/// `.ui/apply/`：apply 事务的档案与留底。
+fn apply_root(ws: &Path) -> PathBuf {
+    ws.join(".ui").join("apply")
+}
+
+/// 相对路径摊平成备份文件名：分隔符换成 `+`，保留文件名和扩展名好让人翻。
+fn flatten_rel(rel: &str) -> String {
+    rel
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '+',
+            other => other,
+        })
+        .collect()
+}
+
+fn json_arr(items: &[String]) -> Json {
+    Json::Arr(items.iter().map(|s| Json::s(s.as_str())).collect())
+}
+
+/// 哈希字段的 JSON 表示：`null` = 那一边根本没有这个文件。
+fn hash_json(h: Option<String>) -> Json {
+    match h {
+        Some(h) => Json::s(h.as_str()),
+        None => Json::Null,
+    }
+}
+
+fn read_apply_manifest(dir: &Path) -> Option<Json> {
+    let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+    json::parse(&text).ok()
+}
+
+/// 事务档案里的文件清单。
+fn apply_manifest_entries(manifest: &Json) -> Vec<Json> {
+    manifest.arr_at("entries").cloned().unwrap_or_default()
+}
+
+/// 工作区里所有 apply 事务目录，按名字排序。
+///
+/// 名字前缀是补零到 8 位的日志序号，所以字典序就是时间序。
+fn apply_txn_dirs(ws: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(apply_root(ws)) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect(),
+        Err(_) => return Vec::new(),
+    };
+    dirs.sort();
+    dirs
+}
+
+fn write_apply_manifest(
+    dir: &Path,
+    status: &str,
+    txn: &str,
+    ws: &Path,
+    entries: &[Json],
+) -> Result<(), String> {
+    let manifest = Json::obj(vec![
+        ("txn", Json::s(txn)),
+        ("status", Json::s(status)),
+        ("workspace", Json::s(ws.to_string_lossy().as_ref())),
+        ("updatedAt", Json::n(ui_core::time::now_ms() as f64)),
+        ("entries", Json::Arr(entries.to_vec())),
+    ]);
+    std::fs::write(dir.join("manifest.json"), manifest.to_pretty())
+        .map_err(|e| format!("写事务档案 {} 失败: {}", dir.display(), e))
+}
+
+/// 上一次 apply 是不是死在写回途中，返回那个事务的目录与 ID。
+///
+/// 只认 `applying`：`staged` 表示崩在留底和落笔之间，工作区当时还是干净的，
+/// 留一个没人动过的目录不是危险状态，不该拦住下一次合并。
+fn unfinished_apply_txn(ws: &Path) -> Option<(PathBuf, String)> {
+    for dir in apply_txn_dirs(ws) {
+        let manifest = match read_apply_manifest(&dir) {
+            Some(m) => m,
+            None => continue,
+        };
+        if manifest.str_at("status") == Some("applying") {
+            let id = txn_id_of(&dir, &manifest);
+            return Some((dir, id));
+        }
+    }
+    None
+}
+
+/// 把停在写回途中的事务标记成 abandoned：用户已经看过警告并选择「就在残缺
+/// 状态上继续」。不记这一笔，这条闸会一辈子拦住后续 apply——每次都得 --force。
+fn abandon_apply_txn(ws: &Path, jp: &Path, dir: &Path, txn: &str, note: &dyn Fn(String)) {
+    if let Some(manifest) = read_apply_manifest(dir) {
+        let _ = write_apply_manifest(
+            dir,
+            "abandoned",
+            txn,
+            ws,
+            &apply_manifest_entries(&manifest),
+        );
+    }
+    match Journal::open(jp) {
+        Ok(mut journal) => {
+            if let Err(e) = journal.append(
+                "apply/abandoned",
+                Json::obj(vec![("txn", Json::s(txn))]),
+            ) {
+                note(format!("  apply/abandoned 记不进日志: {}", e));
+            }
+        }
+        Err(e) => note(format!("  日志 {} 打不开: {}", jp.display(), e)),
+    }
+}
+
+/// 事务 ID：档案里写的那个，兜底用目录名。
+fn txn_id_of(dir: &Path, manifest: &Json) -> String {
+    match manifest.str_at("txn") {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+    }
+}
+
+/// 一次事务式回写的结果。
+#[derive(Default)]
+struct ApplyRun {
+    txn: Option<String>,
+    /// 留底目录；committed 之后 `--rollback` 靠它
+    dir: Option<PathBuf>,
+    written: Vec<String>,
+    restored: Vec<String>,
+    error: Option<String>,
+}
+
+/// 按事务档案还原工作区后的账目。
+#[derive(Default)]
+struct ApplyUndo {
+    /// 用留底覆盖回去的（`dry` 时是「打算覆盖」）
+    restored: Vec<String>,
+    /// 事务新建、现已删掉的（`dry` 时是「打算删」）
+    removed: Vec<String>,
+    /// 「apply 之后你自己动过」——没敢碰，留给人决定
+    skipped: Vec<String>,
+    /// 还原动作本身失败：留底也救不了，必须说出来
+    errors: Vec<String>,
+}
+
+impl ApplyUndo {
+    /// 是否已经和写回之前一模一样——这时留底才真的可以扔。
+    fn complete(&self) -> bool {
+        self.skipped.is_empty() && self.errors.is_empty()
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.restored.is_empty() {
+            parts.push(format!("还原 {} 个", self.restored.len()));
+        }
+        if !self.removed.is_empty() {
+            parts.push(format!("删除 {} 个", self.removed.len()));
+        }
+        if !self.skipped.is_empty() {
+            parts.push(format!("跳过 {} 个", self.skipped.len()));
+        }
+        if !self.errors.is_empty() {
+            parts.push(format!("失败 {} 个", self.errors.len()));
+        }
+        if parts.is_empty() {
+            "什么都没动".to_string()
+        } else {
+            parts.join("、")
+        }
+    }
+}
+
+/// 按事务档案把工作区退回写回之前。
+///
+/// `gate` = 只还原「盘上内容仍然是事务当初写进去的那份」。事后 `--rollback`
+/// 必须开着它：用户自己改过的、或事后被删掉的文件不能被当成事务产物抹掉。
+/// 事务内部失败的回滚不开——那时笔迹只有我们自己的，无条件还原才是对的。
+///
+/// `dry` = 只分类不动盘，给计划模式用。
+fn restore_apply_entries(ws: &Path, dir: &Path, entries: &[Json], gate: bool, dry: bool) -> ApplyUndo {
+    let mut undo = ApplyUndo::default();
+    for e in entries {
+        let rel = match e.str_at("rel") {
+            Some(r) => r.to_string(),
+            None => continue,
+        };
+        let dst = ws.join(&rel);
+        let backup = e.str_at("backup").map(|b| dir.join("before").join(b));
+        // 事务当初写进去的内容。没有它就没法判断「后来有没有人动过」。
+        let after = e.str_at("after").map(str::to_string);
+        let current = ui_core::isolate::hash_file(&dst);
+        // 读不出哈希（ENOTDIR、权限）时不能当成「等于事务写的版本」：
+        // 一次读失败就骗过闸门、把别人的东西覆盖掉，是最坏的一种漏法。
+        let touched_by_us = matches!((&after, &current), (Some(a), Some(c)) if a == c);
+
+        match backup {
+            Some(b) => {
+                if !b.is_file() {
+                    undo
+                        .errors
+                        .push(format!("{}：留底 {} 不见了，无法还原", rel, b.display()));
+                    continue;
+                }
+                if gate {
+                    if !dst.exists() {
+                        undo.skipped
+                            .push(format!("{}：apply 之后被删掉了，不擅自复活", rel));
+                        continue;
+                    }
+                    if !touched_by_us {
+                        undo.skipped
+                            .push(format!("{}：apply 之后内容又变过，保留现状", rel));
+                        continue;
+                    }
+                }
+                if dry {
+                    undo.restored.push(rel);
+                    continue;
+                }
+                if let Some(parent) = dst.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::copy(&b, &dst) {
+                    Ok(_) => undo.restored.push(rel),
+                    Err(err) => undo.errors.push(format!("{}：还原失败 {}", rel, err)),
+                }
+            }
+            None => {
+                // 写回之前这里没有文件：还原 = 删掉它
+                if !dst.is_file() {
+                    if dst.exists() {
+                        undo.skipped.push(format!("{}：那是目录不是文件，没有删", rel));
+                    }
+                    continue;
+                }
+                if gate && !touched_by_us {
+                    undo.skipped
+                        .push(format!("{}：apply 之后内容又变过，保留现状", rel));
+                    continue;
+                }
+                if dry {
+                    undo.removed.push(rel);
+                    continue;
+                }
+                match std::fs::remove_file(&dst) {
+                    Ok(_) => {
+                        // 事务顺手建出来的目录也一起收掉，不然「退回写回之前」
+                        // 会留下一堆空壳。里面还有东西就删不动，忽略即可。
+                        if let Some(parent) = dst.parent() {
+                            let _ = std::fs::remove_dir(parent);
+                        }
+                        undo.removed.push(rel);
+                    }
+                    Err(err) => undo.errors.push(format!("{}：删除失败 {}", rel, err)),
+                }
+            }
+        }
+    }
+    undo
+}
+
+/// 事务式回写：留底 → 写回 → 逐个验货 → 提交。失败时动过的已经全部还原。
+fn run_apply_transaction(
+    ws: &Path,
+    jp: &Path,
+    plan: &[(String, PathBuf)],
+    note: &dyn Fn(String),
+) -> ApplyRun {
+    // ── 0. 日志先行：记不下来的改动就不该发生 ──
+    let mut journal = match Journal::open(jp) {
+        Ok(j) => j,
+        Err(e) => {
+            return ApplyRun {
+                error: Some(format!("打不开日志 {}: {}", jp.display(), e)),
+                ..Default::default()
+            }
+        }
+    };
+    // ID 前缀 = 这条 apply 之后要写的第一个日志序号：同一份日志内唯一，
+    // 后缀的 writer 让并发进程也不撞车，而且名字能排出时间序。
+    let txn = format!("{:08}-{}", journal.seq() + 1, journal.writer());
+    if let Err(e) = journal.append(
+        "apply/begin",
+        Json::obj(vec![
+            ("txn", Json::s(txn.as_str())),
+            ("workspace", Json::s(ws.to_string_lossy().as_ref())),
+            (
+                "files",
+                json_arr(&plan.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>()),
+            ),
+        ]),
+    ) {
+        return ApplyRun {
+            txn: Some(txn),
+            error: Some(format!("写 apply/begin 失败: {}", e)),
+            ..Default::default()
+        };
+    }
+
+    let dir = apply_root(ws).join(&txn);
+    let before = dir.join("before");
+    if let Err(e) = std::fs::create_dir_all(&before) {
+        return ApplyRun {
+            txn: Some(txn),
+            error: Some(format!("建事务目录 {} 失败: {}", dir.display(), e)),
+            ..Default::default()
+        };
+    }
+
+    // ── 1. 留底：一个字节都还没改，先确保每个目标的原样存得下来 ──
+    let mut entries: Vec<Json> = Vec::new();
+    let mut saved: Vec<PathBuf> = Vec::new();
+    for (index, (rel, src)) in plan.iter().enumerate() {
+        let dst = ws.join(rel);
+        let existed = dst.is_file();
+        let name = format!("{:04}-{}", index, flatten_rel(rel));
+        let path = before.join(&name);
+        if existed {
+            if let Err(e) = std::fs::copy(&dst, &path) {
+                for p in &saved {
+                    let _ = std::fs::remove_file(p);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+                return ApplyRun {
+                    txn: Some(txn),
+                    error: Some(format!("给 {} 留底失败: {}（工作区未改动）", rel, e)),
+                    ..Default::default()
+                };
+            }
+            saved.push(path);
+        }
+        entries.push(Json::obj(vec![
+            ("rel", Json::s(rel.as_str())),
+            ("src", Json::s(src.to_string_lossy().as_ref())),
+            (
+                "backup",
+                if existed {
+                    Json::s(name.as_str())
+                } else {
+                    Json::Null
+                },
+            ),
+            (
+                "before",
+                hash_json(if existed {
+                    ui_core::isolate::hash_file(&dst)
+                } else {
+                    None
+                }),
+            ),
+            ("after", hash_json(ui_core::isolate::hash_file(src))),
+        ]));
+    }
+
+    // ── 2. 档案：先 staged（此刻工作区仍然干净），落笔前改成 applying ──
+    // 崩在两者之间会留下没有 manifest、或状态停在 staged 的目录，而工作区
+    // 没动过——`unfinished_apply_txn` 因此不会拦住下一次合并。
+    let mut failure: Option<String> = write_apply_manifest(&dir, "staged", &txn, ws, &entries)
+        .err()
+        .map(|e| {
+            let _ = std::fs::remove_dir_all(&dir);
+            e
+        });
+
+    // ── 3. 写回 + 验货 ──
+    let mut written: Vec<String> = Vec::new();
+    if failure.is_none() {
+        failure = write_apply_manifest(&dir, "applying", &txn, ws, &entries).err();
+    }
+    if failure.is_none() {
+        for e in &entries {
+            let rel = match e.str_at("rel") {
+                Some(r) => r.to_string(),
+                None => {
+                    failure = Some("事务档案里有条目没有 rel".to_string());
+                    break;
+                }
+            };
+            let src = match e.str_at("src") {
+                Some(s) => PathBuf::from(s),
+                None => {
+                    failure = Some(format!("事务档案里 {} 没有源路径", rel));
+                    break;
+                }
+            };
+            if !src.is_file() {
+                // 副本里这个文件又没了：工作区版本原样留着，跳过但不算失败
+                note(format!("  跳过（副本里已不存在）: {}", rel));
+                continue;
+            }
+            let dst = ws.join(&rel);
+            if let Some(parent) = dst.parent() {
+                if let Err(err) = std::fs::create_dir_all(parent) {
+                    failure = Some(format!("建 {} 失败: {}", parent.display(), err));
+                    break;
+                }
+            }
+            if let Err(err) = std::fs::copy(&src, &dst) {
+                failure = Some(format!("写回 {} 失败: {}", rel, err));
+                break;
+            }
+            let want = ui_core::isolate::hash_file(&src);
+            let got = ui_core::isolate::hash_file(&dst);
+            if want.is_none() || want != got {
+                failure = Some(format!(
+                    "写回 {} 后校验不过：源 {:?}，盘上 {:?}",
+                    rel, want, got
+                ));
+                break;
+            }
+            written.push(rel);
+        }
+    }
+
+    // ── 4. 失败 → 整批还原（内部回滚不设哈希闸：盘上只有我们自己的笔迹）──
+    if let Some(error) = failure {
+        let undo = restore_apply_entries(ws, &dir, &entries, false, false);
+        let _ = write_apply_manifest(&dir, "rolled-back", &txn, ws, &entries);
+        if let Err(e) = journal.append(
+            "apply/rolled-back",
+            Json::obj(vec![
+                ("txn", Json::s(txn.as_str())),
+                ("stage", Json::s("write")),
+                ("error", Json::s(error.as_str())),
+                ("restored", json_arr(&undo.restored)),
+                ("removed", json_arr(&undo.removed)),
+                ("failed", json_arr(&undo.errors)),
+            ]),
+        ) {
+            note(format!("  这笔回滚记不进日志: {}", e));
+        }
+        // 完全退回原样才扔留底；有残留就说明还有人要靠它。
+        // 先算完账再搬字段：`ApplyUndo` 的部分字段被移走之后就不能再调方法了。
+        let complete = undo.complete();
+        let summary = undo.summary();
+        let mut restored = undo.restored;
+        restored.extend(undo.removed);
+        let failed = undo.errors;
+        for why in &failed {
+            note(format!("  还原不了: {}", why));
+        }
+        if complete {
+            let _ = std::fs::remove_dir_all(&dir);
+            return ApplyRun {
+                txn: Some(txn),
+                restored,
+                error: Some(error),
+                ..Default::default()
+            };
+        }
+        note(format!(
+            "  留底留在 {}（{}）；没还原干净的那几个要人工处理",
+            dir.display(),
+            summary
+        ));
+        return ApplyRun {
+            txn: Some(txn),
+            dir: Some(dir),
+            restored,
+            error: Some(error),
+            ..Default::default()
+        };
+    }
+
+    // ── 5. 提交 ──
+    // 记账失败不该把已经写好的文件退回：还原本身也是一次写，风险更大。
+    // 文件已经在正确的位置，只需要把「这笔账没记上」说出来。
+    if let Err(e) = write_apply_manifest(&dir, "committed", &txn, ws, &entries) {
+        note(format!("  事务档案没更新: {}（文件已写回）", e));
+    }
+    if let Err(e) = journal.append(
+        "apply/committed",
+        Json::obj(vec![
+            ("txn", Json::s(txn.as_str())),
+            ("written", json_arr(&written)),
+            ("backups", Json::s(dir.to_string_lossy().as_ref())),
+        ]),
+    ) {
+        note(format!("  apply/committed 记不进日志: {}（文件已写回）", e));
+    }
+    ApplyRun {
+        txn: Some(txn),
+        dir: Some(dir),
+        written,
+        restored: Vec::new(),
+        error: None,
+    }
+}
+
+/// `ui apply --rollback [--txn ID] [--yes]`：把某次 apply 退回写回之前。
+///
+/// 默认退「最近一个还没退干净的事务」。只退「盘上仍然是事务当初写进去的那
+/// 份」——apply 之后用户自己改过、或事后被删掉的文件不碰，留底也留着。
+/// 退出码：0 = 退干净；4 = 有文件被跳过（内容又变过，要人工决定）；
+/// 5 = 还原动作本身失败。
+fn cmd_apply_rollback(
+    args: &Args,
+    ws: &Path,
+    jp: &Path,
+    json_out: bool,
+    note: &dyn Fn(String),
+) -> Result<i32, String> {
+    let dirs = apply_txn_dirs(ws);
+    if dirs.is_empty() {
+        return Err(format!(
+            "{} 里没有 apply 事务，没有可退的东西",
+            apply_root(ws).display()
+        ));
+    }
+    let (dir, manifest) = match args.get("txn") {
+        Some(want) => {
+            let dir = apply_root(ws).join(want);
+            let manifest =
+                read_apply_manifest(&dir).ok_or_else(|| format!("找不到事务 {} 的档案", want))?;
+            (dir, manifest)
+        }
+        None => {
+            // 从最新往回，找第一个还没退掉的事务
+            let mut picked: Option<(PathBuf, Json)> = None;
+            for dir in dirs.iter().rev() {
+                let manifest = match read_apply_manifest(dir) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                match manifest.str_at("status") {
+                    Some("committed") | Some("applying") | Some("staged") => {
+                        picked = Some((dir.clone(), manifest));
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            picked.ok_or("最近的 apply 事务已经退回原样了")?
+        }
+    };
+    let txn = txn_id_of(&dir, &manifest);
+    let entries = apply_manifest_entries(&manifest);
+    let status = manifest
+        .str_at("status")
+        .unwrap_or("未知")
+        .to_string();
+    note(format!(
+        "事务 {}（档案状态 {}）· {} 个文件",
+        txn,
+        status,
+        entries.len()
+    ));
+
+    let dry = !args.flag("yes");
+    let undo = restore_apply_entries(ws, &dir, &entries, true, dry);
+    for rel in &undo.restored {
+        note(format!("  还原  {}", rel));
+    }
+    for rel in &undo.removed {
+        note(format!("  删除  {}（事务新建的）", rel));
+    }
+    for why in &undo.skipped {
+        note(format!("  保留  {}", why));
+    }
+    for why in &undo.errors {
+        note(format!("  失败  {}", why));
+    }
+
+    if dry {
+        note(format!(
+            "\n（计划模式）{} · 加 --yes 才会真的退回",
+            undo.summary()
+        ));
+    } else {
+        // 退干净了才扔留底；跳过或失败的文件还要靠它做人
+        if undo.complete() {
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            let _ = write_apply_manifest(&dir, "partially-rolled-back", &txn, ws, &entries);
+            note(format!("\n留底留在 {}", dir.display()));
+        }
+        // 还原已经落盘，日志只是记账：记不进去要说，但不能拦住还原。
+        match Journal::open(jp) {
+            Ok(mut journal) => {
+                if let Err(e) = journal.append(
+                    "apply/rolled-back",
+                    Json::obj(vec![
+                        ("txn", Json::s(txn.as_str())),
+                        ("stage", Json::s("rollback")),
+                        ("restored", json_arr(&undo.restored)),
+                        ("removed", json_arr(&undo.removed)),
+                        ("skipped", json_arr(&undo.skipped)),
+                        ("failed", json_arr(&undo.errors)),
+                    ]),
+                ) {
+                    note(format!("  apply/rolled-back 记不进日志: {}", e));
+                }
+            }
+            Err(e) => note(format!(
+                "  日志 {} 打不开: {}（还原已在磁盘上生效）",
+                jp.display(),
+                e
+            )),
+        }
+        note(format!("\n{}", undo.summary()));
+    }
+
+    let exit = if !undo.errors.is_empty() {
+        5
+    } else if !undo.skipped.is_empty() {
+        4
+    } else {
+        0
+    };
+    if json_out {
+        println!(
+            "{}",
+            Json::obj(vec![
+                ("ok", Json::Bool(exit == 0)),
+                ("exit", Json::from(exit)),
+                ("mode", Json::s(if dry { "plan" } else { "rollback" })),
+                ("txn", Json::s(txn.as_str())),
+                ("workspace", Json::s(ws.to_string_lossy().as_ref())),
+                ("restored", json_arr(&undo.restored)),
+                ("removed", json_arr(&undo.removed)),
+                ("skipped", json_arr(&undo.skipped)),
+                ("failed", json_arr(&undo.errors)),
+            ])
+            .to_compact()
+        );
+    }
+    Ok(exit)
+}
+
 /// 把子代理的改动拷回工作区。
 ///
-/// 退出码：0 = 顺利；3 = 有冲突（多源内容不同）；4 = 有漂移（父工作区被改过）。
-/// 两者都有时返回 3（冲突更严重）。`--json` 把结果输出成一行 JSON。
+/// 退出码：0 = 顺利；3 = 有冲突（多源内容不同）；4 = 有漂移（父工作区被改过）；
+/// 5 = 回写中途失败（已经把动过的文件全部还原）或上一次事务死在写回途中。
+/// 冲突和漂移都有时返回 3（冲突更严重）。`--json` 把结果输出成一行 JSON。
+///
+/// `--yes` 不是「随便写」，是「开一个事务」：先给每个目标留原样，再写，
+/// 写完逐个校验，任何一步不对就整批退回原样（见 `run_apply_transaction`）。
+/// `--rollback [--txn ID]` 把某次 apply 退回去。
 fn cmd_apply(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let json_out = args.flag("json");
     let jp = resolve_journal(args, &ws);
-    let events = Journal::load(&jp).map_err(|e| e.to_string())?;
 
     // JSON 模式下人类可读信息走 stderr，stdout 只留一行 JSON
     let note = |msg: String| {
@@ -3427,6 +4867,12 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
             say(msg);
         }
     };
+
+    if args.flag("rollback") {
+        return cmd_apply_rollback(args, &ws, &jp, json_out, &note);
+    }
+
+    let events = Journal::load(&jp).map_err(|e| e.to_string())?;
 
     let picked: Vec<Json> = if args.flag("all") {
         events
@@ -3551,19 +4997,40 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
     }
 
     let mut written: Vec<String> = Vec::new();
-    if write {
-        for (rel, src) in &plan {
-            if !src.is_file() {
-                note(format!("  跳过（副本里已不存在）: {}", rel));
-                continue;
+    let mut restored: Vec<String> = Vec::new();
+    let mut txn: Option<String> = None;
+    let mut backups: Option<PathBuf> = None;
+    let mut apply_error: Option<String> = None;
+
+    // 闸零：上一次事务死在写回途中时，工作区现在是「半份新内容」。这时候
+    // 再叠一次写回，等于把残缺状态永久焊死，还查得出是哪一半新的——所以
+    // 先停下来让人决定（退回原样，或确认就在残缺状态上继续）。
+    let mut blocked: Option<String> = None;
+    if write && !plan.is_empty() {
+        if let Some((dir, dangling)) = unfinished_apply_txn(&ws) {
+            if force {
+                note(format!(
+                    "上一次 apply 事务 {} 停在写回途中；--force 表示就在残缺状态上继续，已标记为 abandoned。",
+                    dangling
+                ));
+                abandon_apply_txn(&ws, &jp, &dir, &dangling, &note);
+            } else {
+                note(format!(
+                    "上一次 apply 事务 {} 停在写回途中（工作区可能只写了一半）。\n  先 `ui apply --rollback --txn {} --yes` 退回原样；确认要在残缺状态上继续，加 --force。",
+                    dangling, dangling
+                ));
+                blocked = Some(dangling);
             }
-            let dst = ws.join(rel);
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::copy(src, &dst).map_err(|e| format!("写回 {} 失败: {}", rel, e))?;
-            written.push(rel.clone());
         }
+    }
+
+    if write && !plan.is_empty() && blocked.is_none() {
+        let run = run_apply_transaction(&ws, &jp, &plan, &note);
+        txn = run.txn;
+        backups = run.dir;
+        written = run.written;
+        restored = run.restored;
+        apply_error = run.error;
     }
 
     note(format!(
@@ -3580,11 +5047,30 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
     }
     if !write {
         note("\n（计划模式）加 --yes 才会真的写回工作区".to_string());
+    } else if let Some(e) = &apply_error {
+        note(format!(
+            "\n回写失败：{}\n已自动还原 {} 个文件，工作区退回写回之前。",
+            e,
+            restored.len()
+        ));
+        if let Some(dir) = &backups {
+            note(format!("留底留在 {}——有文件没能自动退干净，需要人工处理", dir.display()));
+        }
     } else {
         note(format!("\n已写回 {} 个文件到 {}", written.len(), ws.display()));
+        if let (Some(id), Some(dir)) = (&txn, &backups) {
+            note(format!(
+                "事务 {} · 原样留底在 {}\n想退回去：ui apply --rollback --txn {} --yes",
+                id,
+                dir.display(),
+                id
+            ));
+        }
     }
 
-    let exit = if !conflicts.is_empty() {
+    let exit = if blocked.is_some() || apply_error.is_some() {
+        5
+    } else if !conflicts.is_empty() {
         3
     } else if !drifts.is_empty() {
         4
@@ -3593,18 +5079,21 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
     };
 
     if json_out {
-        let arr = |items: &[String]| Json::Arr(items.iter().map(|s| Json::from(s.as_str())).collect());
         let would: Vec<String> = plan.iter().map(|(r, _)| r.clone()).collect();
         println!(
             "{}",
             Json::obj(vec![
                 ("ok", Json::Bool(exit == 0)),
                 ("exit", Json::from(exit)),
-                ("workspace", Json::from(ws.to_string_lossy().to_string())),
-                ("wouldWrite", arr(&would)),
-                ("written", arr(&written)),
-                ("conflicts", arr(&conflicts)),
-                ("drift", arr(&drifts)),
+                ("workspace", Json::s(ws.to_string_lossy().as_ref())),
+                ("wouldWrite", json_arr(&would)),
+                ("written", json_arr(&written)),
+                ("restored", json_arr(&restored)),
+                ("conflicts", json_arr(&conflicts)),
+                ("drift", json_arr(&drifts)),
+                ("txn", match &txn { Some(id) => Json::s(id.as_str()), None => Json::Null }),
+                ("unfinished", match &blocked { Some(id) => Json::s(id.as_str()), None => Json::Null }),
+                ("error", match &apply_error { Some(e) => Json::s(e.as_str()), None => Json::Null }),
             ])
             .to_compact()
         );
@@ -3703,6 +5192,18 @@ fn cmd_policy(args: &Args) -> Result<i32, String> {
     let (decision, reason) = policy.explain(&Effect::new(effect_kind, target));
     println!("{} -> {} ({})", effect_kind, decision.name(), reason);
     println!("workspace {}", ws.display());
+    // 隐私清单在策略**之前**起作用：工具层直接拒，规则表里的 Deny 只是
+    // 第二道。人查一个 `--private` 路径时若只印 Deny 规则，会以为是某条
+    // 模式命中的，其实是清单——两种「被挡」的可操作性不同，得说清。
+    let path = std::path::Path::new(target);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        ws.join(path)
+    };
+    if ui_core::protected::is_private_path(&ws, &abs) {
+        println!("隐私清单：命中——工具层在读到策略之前就已拒绝（--private / UI_PRIVATE 可追加）");
+    }
     Ok(0)
 }
 
@@ -3753,25 +5254,35 @@ impl Hooks for ConsoleHooks {
         say(format!("  → {:<9} {:<4} {}", name, status, first.trim()));
     }
 
-    fn on_approval(&mut self, req: &ApprovalRequest) -> Decision {
+    fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
         if self.auto_yes || self.allow_all {
             self.emit(format!("  [自动批准] {}", req.tool));
-            return Decision::Allow;
+            // 「以后都同意」确实是会话级的，但它的生命周期就是**这次进程**：
+            // 报成 Session 让日志里能看出授权范围，而不是冒充一次性批准。
+            // via=auto：这笔不是人当场点的，是 `--yes` 替人点的。
+            return ApprovalResponse::allow_session().via("auto");
         }
         let effects: Vec<String> = req.effects.iter().map(|e| e.describe()).collect();
         self.emit(render::approval_prompt(&req.tool, &effects, &req.args));
         let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
-            return Decision::Deny;
-        }
-        match line.trim() {
-            "y" | "Y" => Decision::Allow,
-            "a" | "A" => {
-                self.allow_all = true;
-                Decision::Allow
+        // Ok(0) 是 EOF：stdin 是 /dev/null、管道已关、或非交互执行。
+        // 这跟"读到了但听不懂"是两件事，混成一个记号会把"没人答"读成"答错了"。
+        match io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => {
+                // 读不到 stdin：按拒绝，但要说清"没人回答过"
+                // ——否则日志里它和人手打了一个 `n` 一模一样。
+                return ApprovalResponse::deny().via("no-input");
             }
-            _ => Decision::Deny,
+            _ => {}
         }
+        // 词表与内核共用一份：CLI、网页、脚本写的 JSON 里那些同义词，
+        // 不该在不同入口得到不同结论。
+        let answer = ApprovalResponse::parse_verdict(line.trim());
+        // `a`（会话级批准）在本进程内继续免审——这是它的原意，不能因为换词表丢掉。
+        if answer.decision == Decision::Allow && answer.scope == ApprovalScope::Session {
+            self.allow_all = true;
+        }
+        answer
     }
 }
 

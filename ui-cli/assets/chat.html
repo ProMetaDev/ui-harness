@@ -1825,7 +1825,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   let liveTimer = 0;
   let lastElapsedSec = 0;
   let isBusy = false;
-  let queuedTurns = 0;
 
   function syncLive() {
     if (!busySince || !liveMeta) return;
@@ -1863,10 +1862,26 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
   }
 
-  async function cancelTurn() {
+  // 「停谁」必须是页面和服务端共同知道的事实：正在跑的那条 ID，或队列里的某一条。
+  let activeTaskId = '';
+  const queuedTaskIds = [];
+
+  function dropTask(id) {
+    if (!id) return;
+    const i = queuedTaskIds.indexOf(id);
+    if (i >= 0) queuedTaskIds.splice(i, 1);
+    if (id === activeTaskId) activeTaskId = '';
+  }
+
+  async function cancelTurn(target) {
     if (liveStop && !liveStop.hidden) liveStop.disabled = true;
+    const id = typeof target === 'string' && target ? target : activeTaskId;
     try {
-      await request('/api/cancel', { method: 'POST' });
+      await request('/api/cancel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(id ? { taskId: id } : {}),
+      });
     } catch (e) {
       if (liveStop) liveStop.disabled = false;
       notify('停止失败：' + e.message, 'error');
@@ -1898,6 +1913,9 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     box.setAttribute('role', 'alertdialog');
     box.setAttribute('aria-label', '需要审批：' + (ev.tool || '工具'));
     box.dataset.callId = ev.callId || '';
+    // 回执必须点名：服务端只认「这张卡的 approvalId + callId」，
+    // 老页面或第二个标签页拿着旧 ID 点击会被判为过期，而不是蒙对下一次审批。
+    box.dataset.approvalId = ev.approvalId || '';
     box.innerHTML =
       '<h3>需要批准 · ' + escapeHtml(ev.tool) + '</h3>' +
       '<div class="body">' +
@@ -1906,8 +1924,8 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       escapeHtml(ev.args || '') + '</pre></details>' +
       '</div>' +
       '<div class="acts">' +
-      '<button class="primary" data-v="allow">本次允许 <kbd>Y</kbd></button>' +
-      '<button data-v="always">总是允许 <kbd>A</kbd></button>' +
+      '<button class="primary" data-v="allow" title="只放行这一次调用">本次允许 <kbd>Y</kbd></button>' +
+      '<button data-v="always" title="规则只活到本轮结束，下一条消息重新问">本轮都允许 <kbd>A</kbd></button>' +
       '<button class="danger" data-v="deny">拒绝 <kbd>N</kbd></button>' +
       '</div>';
     approvals.appendChild(box);
@@ -1919,14 +1937,23 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       btn.onclick = async () => {
         const verdict = btn.dataset.v;
         for (const b of box.querySelectorAll('button')) b.disabled = true;
+        let data = null;
         try {
-          await request('/api/approve', {
+          const res = await fetch('/api/approve', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ verdict }),
+            body: JSON.stringify({
+              verdict,
+              approvalId: box.dataset.approvalId,
+              callId: box.dataset.callId,
+            }),
           });
-          box.classList.add('leaving');
-          setTimeout(() => box.remove(), 160);
+          data = await res.json().catch(() => ({}));
+        } catch (e) {
+          data = null;
+        }
+        if (data && data.ok) {
+          retireApproval(box);
           resolveDecision(box.dataset.callId, verdict);
           clearQueue();
           if (window.__UI_BOOT__) {
@@ -1937,14 +1964,32 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
             setStep('已审批', 'ok');
           }
           if (window.__uiMoodSync) window.__uiMoodSync();
-        } catch (e) {
-          for (const b of box.querySelectorAll('button')) b.disabled = false;
-          notify('审批提交失败，请重试：' + e.message, 'error');
+          return;
         }
+        const reason = data && data.reason;
+        if (reason === 'stale') {
+          retireApproval(box);
+          notify('这张批准卡已过期，请按当前那张操作', 'error');
+          return;
+        }
+        if (reason === 'no-pending-approval') {
+          retireApproval(box);
+          notify('审批已结束，这一轮按拒绝处理', 'error');
+          return;
+        }
+        for (const b of box.querySelectorAll('button')) b.disabled = false;
+        notify('审批提交失败，请重试', 'error');
       };
     }
     scrollDown();
   }
+
+  // 批准卡只有一条生命线：答成功、被判过期、或服务端说它结束了，就撤掉。
+  function retireApproval(box) {
+    box.classList.add('leaving');
+    setTimeout(() => box.remove(), 160);
+  }
+
 
   let sending = false;
   async function send() {
@@ -2129,6 +2174,17 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     }
     renderDecisions();
   }
+  // 「代答」的来源：页面上那句"审批结果：deny"最容易读错——
+  // 没人回答、卡失效、我们没听懂那句话，都不是这个人说了「不」。
+  const VIA_TEXT = {
+    timeout: '300 秒没人回答',
+    cancelled: '被停止打断',
+    stale: '审批卡已失效',
+    'no-channel': '没有审批通道',
+    'unknown-word': '批准词没听懂',
+    auto: '--yes 自动批准',
+    'no-input': '读不到输入'
+  };
   function noteApproved(callId, ts) {
     for (let i = decisions.length - 1; i >= 0; i--) {
       if (decisions[i].callId === callId) {
@@ -2190,11 +2246,10 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   }
 
   function finishTurn() {
-    if (queuedTurns > 0) {
-      queuedTurns -= 1;
-      beginTurn();
+    // 排队以服务端队列为准（queuedTaskIds 来自 user / state）：
+    // 还剩没被捡走的，就继续显示运行中，别在两条消息之间闪一下「空闲」。
+    if (queuedTaskIds.length > 0) {
       setBusy(true);
-      addSystem('开始处理排队消息' + (queuedTurns ? ' · 后面还有 ' + queuedTurns + ' 条' : ''));
       return true;
     }
     setBusy(false);
@@ -2219,14 +2274,34 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       case 'user':
         hideEmpty();
         if (isBusy) {
-          queuedTurns += 1;
-          addSystem('消息已排队 · 当前轮次结束后自动执行', ev.ts);
+          if (ev.taskId) queuedTaskIds.push(ev.taskId);
+          addSystem('消息已排队' + (ev.taskId ? ' · ' + ev.taskId : '') + ' · 当前轮次结束后自动执行', ev.ts);
         } else {
           beginTurn();
         }
         addUser(ev.text, ev.ts);
         setBusy(true);
         break;
+      case 'task-started': {
+        const at = queuedTaskIds.indexOf(ev.taskId);
+        const wasQueued = at >= 0;
+        if (wasQueued) queuedTaskIds.splice(at, 1);
+        activeTaskId = ev.taskId || activeTaskId;
+        // 只有「从队列里被捡起来」的那条才重开一轮：当前这条在 user 时已经开过了。
+        if (wasQueued) {
+          beginTurn();
+          setBusy(true);
+          addSystem('开始处理排队消息' + (queuedTaskIds.length ? ' · 后面还有 ' + queuedTaskIds.length + ' 条' : ''), ev.ts);
+        }
+        break;
+      }
+      case 'task-cancelled': {
+        const ids = ev.taskIds || (ev.taskId ? [ev.taskId] : []);
+        ids.forEach(dropTask);
+        addSystem('已撤销排队消息 ' + ids.join('、'), ev.ts);
+        if (!isBusy && !queuedTaskIds.length) setBusy(false);
+        break;
+      }
       case 'delta': hideEmpty(); addDelta(ev.text); break;
       case 'assistant': hideEmpty(); setStep('运行中', 'warn live'); addAssistant(ev.text, ev.ts); break;
       case 'tool': hideEmpty(); endStream(); noteTool(ev.name, ev.ts, ev.ok); addTool(ev.name, ev.ok, ev.detail, ev.id, ev.ts); break;
@@ -2253,14 +2328,17 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       case 'approved':
         setBusy(true);
         noteApproved(ev.callId, ev.ts);
-        addSystem('审批结果：' + ev.verdict, ev.ts);
+        addSystem('审批结果：' + ev.verdict
+          + (ev.scope ? '（' + (ev.scope === 'session' ? '本轮' : '仅这一次') + '）' : '')
+          + (ev.via && VIA_TEXT[ev.via] ? '—' + VIA_TEXT[ev.via] + '，不是人做的决定' : ''), ev.ts);
         resolveDecision(ev.callId, ev.verdict);
         clearQueue();
         approvals.querySelectorAll('.approval').forEach((card) => {
-          if (!ev.callId || card.dataset.callId === ev.callId) {
-            card.classList.add('leaving');
-            setTimeout(() => card.remove(), 160);
-          }
+          // 优先按 approvalId 撤卡：一次调用一个身份，别的卡不该被顺手清掉
+          const mine = ev.approvalId
+            ? card.dataset.approvalId === ev.approvalId
+            : !ev.callId || card.dataset.callId === ev.callId;
+          if (mine) retireApproval(card);
         });
         setStep('运行中', 'warn live');
         if (stateEl) stateEl.textContent = '运行中';
@@ -2268,7 +2346,17 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
         if (dot) dot.className = 'dot busy';
         if (window.__uiMood) window.__uiMood('thinking');
         break;
-      case 'cancel-requested': addSystem('已请求停止…', ev.ts); break;
+      case 'approval-stale':
+        // 服务端亲口说这张卡作废（超时/被取消/换了任务）：卡片必须消失，
+        // 否则页面上留着一个按下去永远不会算数的按钮。
+        approvals.querySelectorAll('.approval').forEach((card) => {
+          if (!ev.approvalId || card.dataset.approvalId === ev.approvalId) retireApproval(card);
+        });
+        addSystem('审批已失效（超时或已取消），按拒绝处理', ev.ts);
+        break;
+      case 'cancel-requested':
+        addSystem('已请求停止' + (ev.taskId ? ' ' + ev.taskId : '') + '…', ev.ts);
+        break;
       case 'session-switched':
         if (window.__uiSessionSwitched) window.__uiSessionSwitched(ev.session);
         break;
@@ -2280,6 +2368,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
         break;
       case 'turn': {
         endStream();
+        dropTask(ev.taskId);
         const continued = finishTurn();
         // 正常收尾才笑；还有排队轮次时保持思考，不假装全部完成。
         if (!continued && window.__uiMood && ev.reason === 'done') window.__uiMood('happy', 1600);
@@ -2290,6 +2379,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       }
       case 'error': {
         endStream();
+        dropTask(ev.taskId);
         const continued = finishTurn();
         if (window.__uiMood) window.__uiMood('error', 3000);
         setStep(continued ? '运行中' : '出错', continued ? 'warn live' : 'bad');
@@ -2569,6 +2659,10 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       if (Number(s.seq || 0) >= lastSeq) {
         if (s.seq) lastSeq = Number(s.seq);
         setBusy(!!s.busy);
+        // 刷新之后「在跑哪条 / 队列里还有谁」以服务端为准：自己数的会骗人
+        queuedTaskIds.length = 0;
+        (s.queued || []).forEach((id) => queuedTaskIds.push(String(id)));
+        activeTaskId = s.taskId ? String(s.taskId) : '';
       }
     })
     .catch(() => {});

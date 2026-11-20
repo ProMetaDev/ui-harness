@@ -33,6 +33,8 @@ pub struct Journal {
     offset: u64,
     /// 本进程的 writer 标识：多进程共享日志时，靠它把交织的 turn 分开
     writer: String,
+    /// 落账前的脱敏开关，**状态只存在这一份**（见 `append` / `append_raw`）
+    redact: bool,
     pub events: Vec<Json>,
     /// 因为内存上限被挤出的事件数（日志文件里仍然完整）
     dropped: u64,
@@ -243,7 +245,9 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    // ? str ???(??? memchr),???? windows().any() ?????
+    // 两边都是 UTF-8 时交给 str::contains：标准库的实现够快，不必自己写
+    // memchr，也不用 `windows(needle.len()).any()` 逐字节比。
+    // 任一不是 UTF-8 就返回 false——日志是 JSONL，只按 UTF-8 找东西才有意义。
     match std::str::from_utf8(hay) {
         Ok(s) => match std::str::from_utf8(needle) {
             Ok(n) => s.contains(n),
@@ -336,6 +340,7 @@ impl Journal {
             prev: tail.prev,
             offset,
             writer: writer_id(),
+            redact: std::env::var("UI_REDACT").map(|v| v != "0").unwrap_or(true),
             events,
             dropped: tail.dropped,
             turns: tail.turns,
@@ -356,6 +361,20 @@ impl Journal {
         &self.path
     }
 
+    /// 这份日志落账前脱不脱敏。**状态只存在这里一份**。
+    ///
+    /// 之前它是 `Agent` 上的一个 bool 字段，于是出现了两种各自漂移的 bug：
+    /// CLI 在 `begin_run()` 之后才改字段（记号漏写），以及 agent 外的写者
+    /// （`turn/skipped`、`memory/write`）根本没读到它（明文进盘）。
+    /// 开关跟门放在一起，调用方只能透过 `set_redact` 改，改不到第二份状态上。
+    pub fn set_redact(&mut self, on: bool) {
+        self.redact = on;
+    }
+
+    pub fn redacting(&self) -> bool {
+        self.redact
+    }
+
     /// 已经完成过多少轮（不受内存上限影响）。
     pub fn turn_count(&self) -> u64 {
         self.turns
@@ -369,6 +388,14 @@ impl Journal {
     /// 有多少条历史事件为了省内存被挤出缓冲（日志文件里仍然完整）。
     pub fn dropped_events(&self) -> u64 {
         self.dropped
+    }
+
+    /// 当前进程的日志写者标识。
+    ///
+    /// 调用 ID 必须跨进程、跨轮次唯一；只拿 `seq` 不够，因为恢复或并发的
+    /// 另一份日志也可能从同一起点编号。
+    pub fn writer(&self) -> &str {
+        &self.writer
     }
 
     /// 把别的 writer 在我们上次读取之后追加的内容补进来，并接上 seq/prev。
@@ -435,12 +462,32 @@ impl Journal {
         Ok(())
     }
 
-    /// Append one event, durably, before the caller acts on it.
+    /// 落账那道门：**默认**把 payload 里任何字符串的凭据形状换掉，再写盘。
     ///
-    /// 多个进程可以共享同一份日志：写入前先拿独占锁，再把「上次读到的位置之后」
-    /// 的内容补读进来、对齐 seq/prev，然后才写自己这条。否则两个 writer 各自
-    /// 拿着旧 seq，链会断。
+    /// 为什么门在这里而不是在调用方：`Agent::log_event` 那道门第一版只覆盖
+    /// agent 自己，结果 `ui-cli/src/server.rs` 的 `turn/skipped`（正文是**人自己
+    /// 打的字**）和 `memory/write` 各走各的 `journal.append`，实测明文进盘。
+    /// 靠"记得走门"已经错过两次，所以把它挪到唯一会写这个文件的地方：
+    /// 新增落账点默认就带脱敏，绕过它必须写成 `append_raw`，一眼看得出是故意的。
+    ///
+    /// `redacted: N` 由这里盖上去：N>0 说明这一条被动过手，原文得回工作区找，
+    /// 别在日志里找。
     pub fn append(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
+        let mut payload = payload;
+        if self.redact {
+            let hits = crate::secrets::redact_json(&mut payload);
+            if hits > 0 {
+                payload.set("redacted", Json::from(hits));
+            }
+        }
+        self.append_raw(kind, payload)
+    }
+
+    /// 不脱敏的那一个：只给两处例外用，调用方要能说清为什么。
+    ///
+    /// 现在只有 `agent::journal_tool_output` 走这里——它自己按"模式脱敏 +
+    /// 来源扣留"两档处理过正文，再过一遍会把 `redacted` 计数的含义洗掉。
+    pub fn append_raw(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
         let lock_path = self.path.with_extension("lock");
         let _lock = FileLock::acquire(&lock_path).map_err(|e| journal_ctx(e, &self.path, "拿不到日志锁"))?;
         self.catch_up().map_err(|e| journal_ctx(e, &self.path, "补读日志失败"))?;
@@ -677,6 +724,60 @@ mod tests {
     }
 
     #[test]
+    fn the_door_is_the_writer_itself_not_the_caller() {
+        // 回归：这道门原来挂在 `Agent::log_event` 上，于是 agent 之外的落账点
+        // ——`ui-cli/src/server.rs` 的 `turn/skipped`（正文是人自己打的那句话）、
+        // `memory/write`、`apply/*`——各写各的 `journal.append`。
+        // 实跑复现过一次：排队时撤掉的消息把 AKIA… 原样写进了 journal.jsonl。
+        // 靠"调用方记得走门"已经错过两次，现在门就是写这个文件的那个函数。
+        let path = tmp("door");
+        let mut j = Journal::open(&path).unwrap();
+        // 开关钉死，不让别人机器上的 UI_REDACT 改变这条测试的结论
+        j.set_redact(true);
+        j.append(
+            "turn/skipped",
+            Json::obj(vec![
+                ("reason", Json::from("cancelled-while-queued")),
+                ("text", Json::from("部署要用 AKIAIOSFODNN7EXAMPLE")), // 测试夹具：密钥形状，非真凭据（allowlist secret）
+            ]),
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("AKIAIOSFODNN7EXAMPLE"), // 测试夹具：密钥形状，非真凭据（allowlist secret）
+            "默认这一档：盘上不能出现原文\n{}",
+            on_disk
+        );
+        assert!(on_disk.contains("[REDACTED:aws key]"), "要留下抹除的痕迹");
+        assert!(on_disk.contains("\"redacted\":1"), "还要留下抹了几处");
+
+        // 绕过门必须写成 `append_raw`：diff 里一眼就看得出这是故意的
+        j.append_raw(
+            "memory/write",
+            Json::obj(vec![("text", Json::from("ghp_CCCCDEEEFFFGGGHHHIII"))]),
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("ghp_CCCCDEEEFFFGGGHHHIII"), "raw 就是 raw");
+
+        // 关掉门（`--no-redact` / `UI_REDACT=0`）：走的是同一个 `append`，明文
+        j.set_redact(false);
+        j.append(
+            "turn/skipped",
+            Json::obj(vec![("text", Json::from("再来一次 AKIAIOSFODNN7EXAMPLE"))]), // 测试夹具：密钥形状，非真凭据（allowlist secret）
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("AKIAIOSFODNN7EXAMPLE"), "关掉了就该是明文"); // 测试夹具：密钥形状，非真凭据（allowlist secret）
+        assert!(!on_disk.contains("\"redacted\":2"), "关掉时不该盖计数");
+
+        // 门改的是写出去之前的那一份 payload：链必须仍然自洽
+        let (events, corrupt) = Journal::read(&path).unwrap();
+        assert!(corrupt.is_none(), "过门之后哈希链不能断: {:?}", corrupt);
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
     fn appends_and_verifies_chain() {
         let path = tmp("chain");
         let mut j = Journal::open(&path).unwrap();
@@ -869,6 +970,7 @@ fn open_offset_always_matches_the_records_it_parsed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(test)]
 fn complete_count(data: &[u8]) -> u64 {
     data.split_inclusive(|b| *b == b'\n')
         .filter(|l| l.ends_with(b"\n"))

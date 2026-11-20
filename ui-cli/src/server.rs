@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
-use ui_core::agent::{ApprovalRequest, Hooks};
+use ui_core::agent::{ApprovalRequest, ApprovalResponse, ApprovalScope, Hooks};
 use ui_core::json::{self, Json};
 use ui_core::prompt::Snapshot;
 
@@ -25,6 +25,27 @@ const BG_LIGHT: &[u8] = include_bytes!("../assets/bg-light.jpg");
 /// 都能把 Web 进程打爆；超过这个值一律 413，并且不读正文。
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
+/// 一个排队或正在跑的任务。
+///
+/// 令牌跟着任务走，不跟着 worker 走：在队列里就能被取消，取消也只影响
+/// 这一个任务——上一任务留下的「已取消」绝不能顺到下一任务头上。
+#[derive(Clone)]
+struct WebTask {
+    id: String,
+    text: String,
+    cancel: ui_core::Cancel,
+}
+
+/// 等待浏览器回答的一次审批。
+///
+/// 三个字段都是必需的：`approval_id` 让回答能指名道姓，`call_id` 让页面
+/// 能把回执对到正确的调用上（一个审批对应一次调用），`tx` 是唤醒内核的通道。
+struct PendingApproval {
+    approval_id: String,
+    call_id: String,
+    tx: Sender<ApprovalResponse>,
+}
+
 #[derive(Default)]
 struct Hub {
     /// 已广播的事件（序号 + JSON 行），新连接用 `?since=` 补齐，重连不重复
@@ -34,9 +55,16 @@ struct Hub {
     /// 每个 SSE 连接一个发送端
     subs: Mutex<Vec<Sender<String>>>,
     /// 等待浏览器回答的审批
-    approval: Mutex<Option<Sender<Decision>>>,
-    /// 工作线程的取消令牌：页面上的「停止」直接打这里
-    cancel: Mutex<Option<ui_core::Cancel>>,
+    approval: Mutex<Option<PendingApproval>>,
+    /// 正在跑的任务（None = 空闲）
+    active: Mutex<Option<WebTask>>,
+    /// 排队中、worker 还没取走的任务
+    queue: Mutex<Vec<WebTask>>,
+    /// 排队期间被撤掉的任务（id + 原文）：日志只能由 worker 单点写，
+    /// HTTP 线程把账放在这儿，worker 下一次醒来时补上 `turn/skipped`。
+    skipped: Mutex<Vec<(String, String)>>,
+    /// 任务序号：给页面一个能贴住「停止哪个」的稳定 ID
+    task_seq: std::sync::atomic::AtomicU64,
     /// 工具的完整输出（页面上点开再看）：按调用序号存
     tools: Mutex<Vec<Json>>,
     /// 启动检查结果：开机界面照它逐条点亮（真实结果，不是定时器）
@@ -88,13 +116,181 @@ impl Hub {
         (backlog, rx)
     }
 
-    fn answer(&self, decision: Decision) -> bool {
+    /// 浏览器回答一次审批，必须指名道姓。
+    ///
+    /// 旧实现是 `take().send(decision)`：谁回答都算、答几次都行，于是
+    /// 「双击批准」= 批准两次，「页面开着上一轮的批准按钮」= 把答案投给
+    /// 下一次审批。这里对不上身份就把原审批**放回去**，让它继续等人。
+    fn answer(
+        &self,
+        approval_id: &str,
+        call_id: &str,
+        response: ApprovalResponse,
+    ) -> Answer {
+        let mut slot = self.approval.lock().unwrap();
+        let pending = match slot.take() {
+            Some(p) => p,
+            // 没有人等在问：审批已超时/被取消/这一轮根本没有审批
+            None => return Answer::Gone,
+        };
+        if pending.approval_id != approval_id || pending.call_id != call_id {
+            let stale = Answer::Stale {
+                expected_approval_id: pending.approval_id.clone(),
+                expected_call_id: pending.call_id.clone(),
+            };
+            *slot = Some(pending);
+            return stale;
+        }
+        let approval_id = pending.approval_id.clone();
+        let call_id = pending.call_id.clone();
+        match pending.tx.send(response) {
+            Ok(()) => Answer::Accepted {
+                approval_id,
+                call_id,
+            },
+            // 内核那一头已经不在了（这一轮被取消后 drop 掉了接收端）
+            Err(_) => Answer::Gone,
+        }
+    }
+
+    /// 排队用的新任务：一个 ID、一个只属于它的取消令牌。
+    fn new_task(&self, text: String) -> WebTask {
+        let n = self.task_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        WebTask {
+            id: format!("t{}", n),
+            text,
+            cancel: ui_core::Cancel::new(),
+        }
+    }
+
+    /// worker 取下一个待执行任务（队列头）。排队中被取消的已经不在队列里。
+    ///
+    /// 取走的同时就登记为 active：否则「worker 已拿走、还没写进 active」这一小段里
+    /// 点停止会谁都对不上，`/api/cancel` 如实回答 idle，而任务照跑——
+    /// 按钮按下去没反应，比报错更难查。
+    fn take_queued(&self) -> Option<WebTask> {
+        let task = {
+            let mut q = self.queue.lock().unwrap();
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
+        };
+        if let Some(t) = &task {
+            *self.active.lock().unwrap() = Some(t.clone());
+        }
+        task
+    }
+
+    /// 给 worker 的一记空信号：干活看的是队列，这颗子弹只是把它从 `recv` 上叫醒。
+    fn wake_signal() -> WebTask {
+        WebTask {
+            id: String::new(),
+            text: String::new(),
+            cancel: ui_core::Cancel::new(),
+        }
+    }
+
+    /// 取走并清空「排队时被撤掉」的账（由 worker 写进日志）。
+    fn take_skipped(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.skipped.lock().unwrap())
+    }
+
+    /// 当前在跑的任务 + 排队中的任务 ID（给 /api/state 与页面用）。
+    fn task_view(&self) -> (Option<String>, Vec<String>) {
+        let active = self.active.lock().unwrap().as_ref().map(|t| t.id.clone());
+        let queued = self
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        (active, queued)
+    }
+
+    /// 「停止」按钮的后端语义：先停正在跑的，再退回排队里的，都没有就是空闲。
+    ///
+    /// 带 `target` 时只动那一个任务。取消只置标志、不清标志——
+    /// 令牌是每任务一个，所以「取消过」不会顺着队列流到下一个任务。
+    fn cancel_task(&self, target: Option<&str>) -> Cancelled {
+        let active = self.active.lock().unwrap().clone();
+        if let Some(task) = active {
+            if matches_target(&task.id, target) {
+                task.cancel.cancel();
+                // 审批正等着人点：取消要立刻打断那个等待，不然停止按钮
+                // 要等到 300 秒超时才生效。
+                self.clear_approval();
+                return Cancelled::Active(task.id);
+            }
+        }
+        let picked: Vec<WebTask> = {
+            let mut q = self.queue.lock().unwrap();
+            let hit: Vec<WebTask> = q
+                .iter()
+                .filter(|t| matches_target(&t.id, target))
+                .cloned()
+                .collect();
+            q.retain(|t| !hit.iter().any(|h| h.id == t.id));
+            hit
+        };
+        if picked.is_empty() {
+            return Cancelled::Idle;
+        }
+        let ids: Vec<String> = picked.iter().map(|t| t.id.clone()).collect();
+        for task in &picked {
+            task.cancel.cancel();
+            // 撤掉的这一条得留下"为什么没跑"。写日志的人只有 worker 一个，
+            // 所以这里只记账，由 worker 醒来时补成 turn/skipped。
+            self.skipped.lock().unwrap().push((
+                task.id.clone(),
+                task.text.chars().take(200).collect::<String>(),
+            ));
+        }
+        Cancelled::Queued(ids)
+    }
+
+    /// 丢掉正在等待的审批：任务被取消了，答案没人要了。
+    ///
+    /// 先放锁再 push——`push` 拿的是 log/subs 两把锁，别在 approval 的
+    /// 临界区里广播，锁顺序留一条就够（log → subs）。
+    fn clear_approval(&self) {
+        let pending = self.approval.lock().unwrap().take();
+        if let Some(pending) = pending {
+            self.push(Json::obj(vec![
+                ("type", Json::from("approval-stale")),
+                ("approvalId", Json::from(pending.approval_id.as_str())),
+                ("callId", Json::from(pending.call_id.as_str())),
+            ]));
+        }
+    }
+
+    /// 正在跑的任务是否已被取消（审批等待循环用它打断自己）。
+    fn active_cancelled(&self) -> bool {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.cancel.is_cancelled())
+            .unwrap_or(false)
+    }
+
+    /// 入队，返回它排在第几位（0 = 下一个就轮到自己，给页面一个「前面还有几条」）。
+    fn enqueue(&self, task: &WebTask) -> usize {
+        let mut q = self.queue.lock().unwrap();
+        let position = q.len();
+        q.push(task.clone());
+        position
+    }
+
+    /// 当前等待回答的审批身份（页面刷新后靠它把回执点对那张卡）。
+    fn approval_view(&self) -> Option<(String, String)> {
         self.approval
             .lock()
             .unwrap()
-            .take()
-            .map(|tx| tx.send(decision).is_ok())
-            .unwrap_or(false)
+            .as_ref()
+            .map(|p| (p.approval_id.clone(), p.call_id.clone()))
     }
 
     /// 存一份完整工具输出，返回给页面用的 id
@@ -117,6 +313,50 @@ impl Hub {
 
     fn tool(&self, id: u64) -> Option<Json> {
         self.tools.lock().unwrap().get((id as usize).checked_sub(1)?).cloned()
+    }
+}
+
+/// 认不出的批准词仍然按拒绝处理（安全默认不变），但不能**静默**降级：
+/// 页面写着"已拒绝"，人以为自己点的是"允许"，是查不出来的那一类事故。
+fn verdict_note(verdict: &str) -> Option<&'static str> {
+    if verdict.is_empty() {
+        return Some("请求里没有 verdict，按拒绝处理");
+    }
+    if ApprovalResponse::is_known_verdict(verdict) {
+        return None;
+    }
+    Some("不认识的批准词，按拒绝处理")
+}
+
+/// `/api/approve` 的三种结局，必须让页面分辨得出来。
+#[derive(Debug)]
+enum Answer {
+    Accepted {
+        approval_id: String,
+        call_id: String,
+    },
+    /// 身份不符：原审批还在等，页面该刷新成当前那张卡
+    Stale {
+        expected_approval_id: String,
+        expected_call_id: String,
+    },
+    /// 没有在等的审批了（超时/取消/这一轮没有审批）
+    Gone,
+}
+
+/// `/api/cancel` 打到了什么上。
+#[derive(Debug)]
+enum Cancelled {
+    Active(String),
+    Queued(Vec<String>),
+    Idle,
+}
+
+/// `target` 为空表示「不管是谁都算」，否则必须点名对上 ID。
+fn matches_target(id: &str, target: Option<&str>) -> bool {
+    match target {
+        None => true,
+        Some(wanted) => wanted == id,
     }
 }
 
@@ -235,19 +475,30 @@ impl Hooks for WebHooks {
         ]));
     }
 
-    fn on_approval(&mut self, req: &ApprovalRequest) -> Decision {
+    fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
         if self.auto_yes {
             self.hub.push(Json::obj(vec![
                 ("type", Json::from("approved")),
                 ("verdict", Json::from("auto")),
+                ("scope", Json::from(ApprovalScope::Once.name())),
+                ("approvalId", Json::from(req.approval_id.as_str())),
                 ("callId", Json::from(req.call_id.as_str())),
+                // 页面和日志说同一件事：这笔是 `--yes` 替人批的。
+                ("via", Json::from("auto")),
             ]));
-            return Decision::Allow;
+            // `--yes` 是命令行替人点的批准：日志里必须留下 via=auto，
+            // 否则这份轨迹看上去像有人逐条看过现场。
+            return ApprovalResponse::allow_once().via("auto");
         }
-        let (tx, rx) = channel::<Decision>();
-        *self.hub.approval.lock().unwrap() = Some(tx);
+        let (tx, rx) = channel::<ApprovalResponse>();
+        *self.hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: req.approval_id.clone(),
+            call_id: req.call_id.clone(),
+            tx,
+        });
         self.hub.push(Json::obj(vec![
             ("type", Json::from("approval")),
+            ("approvalId", Json::from(req.approval_id.as_str())),
             ("callId", Json::from(req.call_id.as_str())),
             ("tool", Json::from(req.tool.as_str())),
             (
@@ -266,43 +517,61 @@ impl Hooks for WebHooks {
         let started = std::time::Instant::now();
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok(decision) => {
-                    self.hub.push(Json::obj(vec![
+                Ok(response) => {
+                    let mut done = Json::obj(vec![
                         ("type", Json::from("approved")),
-                        ("verdict", Json::from(decision.name())),
+                        ("verdict", Json::from(response.decision.name())),
+                        ("scope", Json::from(response.scope.name())),
+                        ("approvalId", Json::from(req.approval_id.as_str())),
                         ("callId", Json::from(req.call_id.as_str())),
-                    ]));
-                    return decision;
+                    ]);
+                    // 页面显示的"已拒绝"有可能是我们没听懂那句话：和日志一样，
+                    // 代答要当场说清是谁替人做的决定，不能只留在 JSONL 里。
+                    if let Some(via) = response.via {
+                        done.set("via", Json::from(via));
+                    }
+                    self.hub.push(done);
+                    return response;
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Decision::Deny,
+                // 接收端被 hub 丢弃（取消或超时清理），没人要这个答案了
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let verdict = if self.hub.active_cancelled() {
+                        "cancelled"
+                    } else {
+                        "stale"
+                    };
+                    self.push_end(verdict, req);
+                    // 账本要分得清"没人回答了"和"有人说了不"：前者是取消/失效，
+                    // 后者是决定。两者都记成 deny 会让复盘把卡顿读成否决。
+                    return ApprovalResponse::deny().via(verdict);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let cancelled = self
-                        .hub
-                        .cancel
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .map(|c| c.is_cancelled())
-                        .unwrap_or(false);
-                    if cancelled {
-                        self.hub.push(Json::obj(vec![
-                            ("type", Json::from("approved")),
-                            ("verdict", Json::from("cancelled")),
-                            ("callId", Json::from(req.call_id.as_str())),
-                        ]));
-                        return Decision::Deny;
+                    if self.hub.active_cancelled() {
+                        self.hub.clear_approval();
+                        self.push_end("cancelled", req);
+                        return ApprovalResponse::deny().via("cancelled");
                     }
                     if started.elapsed().as_secs() > 300 {
-                        self.hub.push(Json::obj(vec![
-                            ("type", Json::from("approved")),
-                            ("verdict", Json::from("timeout")),
-                            ("callId", Json::from(req.call_id.as_str())),
-                        ]));
-                        return Decision::Deny;
+                        self.hub.clear_approval();
+                        self.push_end("timeout", req);
+                        return ApprovalResponse::deny().via("timeout");
                     }
                 }
             }
         }
+    }
+}
+
+/// 收尾事件不属于 `Hooks` 契约，单独放一个 impl。
+impl WebHooks {
+    /// 审批没有正常收到回答时的收尾事件（cancelled / timeout / stale）。
+    fn push_end(&self, verdict: &str, req: &ApprovalRequest) {
+        self.hub.push(Json::obj(vec![
+            ("type", Json::from("approved")),
+            ("verdict", Json::from(verdict)),
+            ("approvalId", Json::from(req.approval_id.as_str())),
+            ("callId", Json::from(req.call_id.as_str())),
+        ]));
     }
 }
 
@@ -332,7 +601,9 @@ pub fn serve(
     hub0.workspace = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or("."));
     *hub0.session.lock().unwrap() = session_arg.unwrap_or("default").to_string();
     let hub = Arc::new(hub0);
-    let (task_tx, task_rx) = channel::<String>();
+    // 通道只是「队列里有活」的信号：真正执行哪个任务以 hub.queue 为准，
+    // 这样排队期间被取消（已从队列摘走）的任务不会被 worker 再捡起来。
+    let (task_tx, task_rx) = channel::<WebTask>();
     hub.splash.store(splash, Ordering::SeqCst);
     *hub.mode.lock().unwrap() = agent.mode;
 
@@ -351,10 +622,30 @@ pub fn serve(
     {
         let hub = Arc::clone(&hub);
         let mut agent = agent;
-        // 「停止」按钮要用它：令牌是 Arc 里的原子标志，跨线程安全
-        *hub.cancel.lock().unwrap() = Some(agent.cancel.clone());
         std::thread::spawn(move || {
-            while let Ok(text) = task_rx.recv() {
+            while let Ok(signal) = task_rx.recv() {
+                let _ = signal;
+                // 排队期间被撤掉的任务：这一轮压根不该开始——不烧预算、不叫模型。
+                // 但它**必须留下痕迹**：这条任务确实存在过、被撤掉了、为什么没跑。
+                // 只在 SSE 里喊一嗓子等于事后查不到，日志才是这套内核的账本。
+                for (id, text) in hub.take_skipped() {
+                    // 走 `log_event`，不走 `journal.append`：这里的 text 是
+                    // **人自己打的那句话**，排队时撤掉不等于它没外流过——
+                    // 实测直接把 AKIA… 写进了 journal.jsonl。
+                    let _ = agent.log_event(
+                        "turn/skipped",
+                        Json::obj(vec![
+                            ("task", Json::from(id.as_str())),
+                            ("reason", Json::from("cancelled-while-queued")),
+                            ("text", Json::from(text.as_str())),
+                        ]),
+                    );
+                }
+                // 队列为准：排队中被取消的任务已被 cancel_task 摘走，这里拿不到就是空闲。
+                let task = match hub.take_queued() {
+                    Some(t) => t,
+                    None => continue,
+                };
                 hub.busy.store(true, Ordering::SeqCst);
                 agent.mode = *hub.mode.lock().unwrap();
                 // 会话切换：换日志 + 重建历史（不能把上一条会话的上下文带过来）
@@ -376,19 +667,58 @@ pub fn serve(
                         }
                     }
                 }
+                // 刚认领就被撤：`take_queued` 已经把它记成 active，所以这一路也会走到这儿。
+                // 同样是"没开始"，账要照记，active 要清掉，否则停止按钮下次点到旧任务。
+                if task.cancel.is_cancelled() {
+                    *hub.active.lock().unwrap() = None;
+                    let _ = agent.log_event(
+                        "turn/skipped",
+                        Json::obj(vec![
+                            ("task", Json::from(task.id.as_str())),
+                            ("reason", Json::from("cancelled-on-claim")),
+                            (
+                                "text",
+                                Json::from(
+                                    task.text.chars().take(200).collect::<String>().as_str(),
+                                ),
+                            ),
+                        ]),
+                    );
+                    hub.push(Json::obj(vec![
+                        ("type", Json::from("task-cancelled")),
+                        ("taskId", Json::from(task.id.as_str())),
+                        ("stage", Json::from("queued")),
+                    ]));
+                    hub.busy.store(false, Ordering::SeqCst);
+                    continue;
+                }
+                // run 边界由 worker 划：预算、工具序号、会话审批规则、取消令牌
+                // 全部换成这一份任务自己的，上一任务留下的东西一样带不过来。
+                agent.begin_run_with_cancel(Some(task.cancel.clone()));
+                // active 在 `take_queued` 里就登记了：认领与"可被停止"之间不留窗口。
+                hub.push(Json::obj(vec![
+                    ("type", Json::from("task-started")),
+                    ("taskId", Json::from(task.id.as_str())),
+                ]));
                 let mut hooks = WebHooks {
                     hub: Arc::clone(&hub),
                     auto_yes,
                 };
-                match agent.run_turn(&text, &mut hooks) {
+                let report = agent.run_turn(&task.text, &mut hooks);
+                *hub.active.lock().unwrap() = None;
+                // 这一轮结束后不该再有人能回答它的审批
+                hub.clear_approval();
+                match report {
                     Ok(report) => hub.push(Json::obj(vec![
                         ("type", Json::from("turn")),
+                        ("taskId", Json::from(task.id.as_str())),
                         ("reason", Json::from(report.reason.as_str())),
                         ("steps", Json::from(report.steps)),
                         ("calls", Json::from(report.tool_calls)),
                     ])),
                     Err(e) => hub.push(Json::obj(vec![
                         ("type", Json::from("error")),
+                        ("taskId", Json::from(task.id.as_str())),
                         ("message", Json::from(e.to_string())),
                     ])),
                 }
@@ -405,7 +735,10 @@ pub fn serve(
         println!("UI 已启动  http://{}/?t={}", addr, hub.token);
         println!("鉴权       需要 token：首次带 ?t= 打开，之后浏览器用 Cookie");
     }
-    println!("工作区     {}", agent_workspace_hint());
+    // 这里印的是本机终端，不是页面：路径要印真的。「不给绝对路径」那条约束
+    // 属于 HTTP 响应（agent_workspace_hint 的原始理由），启动横幅照抄它只会让人
+    // 看不到自己到底在哪个工作区上开审批。
+    println!("工作区     {}", hub.workspace.display());
     println!("Ctrl-C 退出");
 
     for stream in listener.incoming() {
@@ -420,11 +753,6 @@ pub fn serve(
         });
     }
     Ok(())
-}
-
-/// 工作区在启动时已经打印过；这里只留一句提示（避免泄漏绝对路径给页面）
-fn agent_workspace_hint() -> &'static str {
-    "(见启动参数 --workspace)"
 }
 
 /// `/api/file` 与 `/api/tree` 共用的路径校验：URL 解码 → 拒绝绝对路径与危险目录段 →
@@ -448,21 +776,42 @@ fn resolve_in_workspace(
     if !path.starts_with(&root) {
         return Err("路径越界".to_string());
     }
+    // 名字过滤看的是 URL 里的段，符号链接能把一个安全名字指到受保护目录
+    // （`notes/link -> ../secrets`）。canonicalize 之后必须按真实路径再判一次，
+    // 判据和工具侧共用同一个函数。
+    if ui_core::protected::is_private_path(&root, &path) {
+        return Err("路径不允许".to_string());
+    }
     Ok((rel, path))
 }
 
 /// 不展示、也不允许直达的目录名。大小写不敏感：Windows 文件系统本身不区分大小写，
 /// 只挡小写 `secrets` 等于没挡（`Secrets/` 照样能读）。
 fn is_blocked_component(name: &str) -> bool {
-    name == ".."
-        || name.eq_ignore_ascii_case(".ui")
-        || name.eq_ignore_ascii_case(".git")
-        || name.eq_ignore_ascii_case("secrets")
-        || name.eq_ignore_ascii_case("target")
-        || name.eq_ignore_ascii_case("node_modules")
+    // 安全边界与工具侧共用 ui-core::protected 那一份清单（默认三项 +
+    // `--private` 追加）：浏览器里能直达的目录不该比模型能读到的更宽，
+    // 否则 `/api/file?path=.ui/journal.jsonl` 就是一条绕过策略层、
+    // 把整轮提示词和工具结果捞出去的旁路。清单本身大小写不敏感。
+    if name == ".." || ui_core::protected::is_private_dir_name(name) {
+        return true;
+    }
+    // 这两个只是展示噪音（构建产物、依赖树），不是隐私边界。
+    name.eq_ignore_ascii_case("target") || name.eq_ignore_ascii_case("node_modules")
 }
 
-fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std::io::Result<()> {
+/// 列目录时这个条目要不要藏起来。
+///
+/// 名字能判的先按名字判（默认清单与单段声明都是名字型的），只有人追加过
+/// 声明时才补一次完整路径判定——`--private vendor/keys` 这种多段声明按
+/// 名字永远排不掉，浏览器里就会露出一个能点进去的 `keys/`。工具侧的
+/// `walk` 已经按同一形状做了，两边不一致的话「看得见」和「读得到」就分家了。
+fn blocked_entry(workspace: &std::path::Path, path: &std::path::Path, name: &str) -> bool {
+    is_blocked_component(name)
+        || (ui_core::protected::has_declarations()
+            && ui_core::protected::is_private_path(workspace, path))
+}
+
+fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -607,10 +956,14 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             };
             let mut entries: Vec<Json> = Vec::new();
             if let Ok(rd) = std::fs::read_dir(&dir) {
+                // 隐私判定按「相对工作区的连续段」做，所以基准必须是
+                // canonicalize 过的工作区：拿没解析过的 ready.workspace 去
+                // strip_prefix 会失败，整条绝对路径就被当成一串目录名扫了。
+                let ws_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
                 for e in rd.flatten().take(300) {
                     let name = e.file_name().to_string_lossy().to_string();
                     // 不展示 .git/target/node_modules/.ui/secrets（名字本身也是信息）
-                    if is_blocked_component(&name) {
+                    if blocked_entry(&ws_root, &e.path(), &name) {
                         continue;
                     }
                     let meta = e.metadata().ok();
@@ -786,11 +1139,40 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             json_response(&mut stream, "{\"ok\":true}")
         }
         ("GET", "/api/state") => {
-            let state = Json::obj(vec![
+            // 页面刷新后要靠这三样把按钮恢复成真相：在跑哪个、排队有哪些、
+            // 哪一张审批卡还等着人点。
+            let (active, queued) = hub.task_view();
+            let pending = hub.approval_view();
+            let state = vec![
                 ("busy", Json::Bool(hub.busy.load(Ordering::SeqCst))),
                 ("seq", Json::from(hub.seq.load(Ordering::SeqCst))),
-            ]);
-            json_response(&mut stream, &state.to_compact())
+                (
+                    "taskId",
+                    match active {
+                        Some(id) => Json::from(id),
+                        None => Json::Null,
+                    },
+                ),
+                (
+                    "queued",
+                    Json::Arr(queued.iter().map(|id| Json::from(id.as_str())).collect()),
+                ),
+                (
+                    "approvalId",
+                    match pending.as_ref().map(|p| p.0.clone()) {
+                        Some(id) => Json::from(id),
+                        None => Json::Null,
+                    },
+                ),
+                (
+                    "approvalCallId",
+                    match pending.as_ref().map(|p| p.1.clone()) {
+                        Some(id) => Json::from(id),
+                        None => Json::Null,
+                    },
+                ),
+            ];
+            json_response(&mut stream, &Json::obj(state).to_compact())
         }
         ("POST", "/api/mode") => {
             let value = json::parse(body.trim()).unwrap_or(Json::Null);
@@ -807,15 +1189,59 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             }
         }
         ("POST", "/api/cancel") => {
-            if let Some(cancel) = hub.cancel.lock().unwrap().as_ref() {
-                cancel.cancel();
-                hub.push(Json::obj(vec![
-                    ("type", Json::from("cancel-requested")),
-                ]));
-                json_response(&mut stream, "{\"ok\":true}")
-            } else {
-                json_response(&mut stream, "{\"ok\":false,\"reason\":\"no running turn\"}")
-            }
+            // 两种取消要分得开：停正在跑的那一轮，还是撤掉还在排队的那条消息。
+            // 不带 taskId = 老语义（停当前的），带 = 只动点名那个。
+            let value = json::parse(body.trim()).unwrap_or(Json::Null);
+            let target = value
+                .str_at("taskId")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    query
+                        .split('&')
+                        .find_map(|kv| kv.split_once('='))
+                        .filter(|(k, _)| *k == "task")
+                        .map(|(_, v)| pct_decode(v))
+                });
+            let (ok, outcome) = match hub.cancel_task(target.as_deref()) {
+                Cancelled::Active(id) => {
+                    hub.push(Json::obj(vec![
+                        ("type", Json::from("cancel-requested")),
+                        ("taskId", Json::from(id.as_str())),
+                        ("stage", Json::from("running")),
+                    ]));
+                    (true, format!("running:{}", id))
+                }
+                Cancelled::Queued(ids) => {
+                    hub.push(Json::obj(vec![
+                        ("type", Json::from("task-cancelled")),
+                        ("taskIds", Json::Arr(ids.iter().map(|i| Json::from(i.as_str())).collect())),
+                        ("stage", Json::from("queued")),
+                    ]));
+                    // 叫醒 worker 去补那笔「没跑」的账：不叫的话，最后一条被撤的消息
+                    // 可能永远等不到下一次唤醒，日志里就只剩「没做」。
+                    let _ = task_tx.send(Hub::wake_signal());
+                    (true, format!("queued:{}", ids.join(",")))
+                }
+                Cancelled::Idle => (false, "idle".to_string()),
+            };
+            json_response(
+                &mut stream,
+                &Json::obj(vec![
+                    ("ok", Json::Bool(ok)),
+                    ("outcome", Json::from(outcome.as_str())),
+                    (
+                        "reason",
+                        Json::from(if ok {
+                            ""
+                        } else {
+                            "现在没有正在跑或排队的任务"
+                        }),
+                    ),
+                ])
+                .to_compact(),
+            )
         }
         ("GET", path_) if path_.starts_with("/api/tool/") => {
             let id = path_.trim_start_matches("/api/tool/").parse::<u64>();
@@ -834,30 +1260,71 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<String>) -> std:
             if text.is_empty() {
                 return json_response(&mut stream, "{\"ok\":false}");
             }
+            let task = hub.new_task(text.clone());
+            let task_id = task.id.clone();
             hub.push(Json::obj(vec![
                 ("type", Json::from("user")),
+                ("taskId", Json::from(task_id.as_str())),
                 ("text", Json::from(text.as_str())),
             ]));
-            let _ = task_tx.send(text);
-            json_response(&mut stream, "{\"ok\":true}")
+            // 先入队再发信号：worker 只看队列，反序会让一条消息永远没人捡。
+            let position = hub.enqueue(&task);
+            let _ = task_tx.send(task);
+            json_response(
+                &mut stream,
+                &Json::obj(vec![
+                    ("ok", Json::Bool(true)),
+                    ("taskId", Json::from(task_id.as_str())),
+                    ("queued", Json::from(position)),
+                ])
+                .to_compact(),
+            )
         }
         ("POST", "/api/approve") => {
             let value = json::parse(body.trim()).unwrap_or(Json::Null);
-            let verdict = value.str_at("verdict").unwrap_or("deny");
-            let decision = match verdict {
-                "allow" | "always" => Decision::Allow,
-                _ => Decision::Deny,
+            // 空串与不认识的词都落到拒绝（安全默认），但回执里要说出来：
+            // 静默把 `yes-pls` 变成拒绝，和静默把拒绝变成批准一样不可解释。
+            let verdict = value.str_at("verdict").unwrap_or("");
+            let approval_id = value.str_at("approvalId").unwrap_or("");
+            let call_id = value.str_at("callId").unwrap_or("");
+            let response = ApprovalResponse::parse_verdict(verdict);
+            // 身份必须点名对上：旧实现谁答都算，于是「双击批准」= 批准两次，
+            // 开着的老页面还能把答案投给下一张根本不同的审批卡。
+            let reply = match hub.answer(approval_id, call_id, response) {
+                Answer::Accepted { approval_id, call_id } => {
+                    let mut reply = Json::obj(vec![
+                        ("ok", Json::Bool(true)),
+                        ("approvalId", Json::from(approval_id.as_str())),
+                        ("callId", Json::from(call_id.as_str())),
+                        ("verdict", Json::from(response.decision.name())),
+                        ("scope", Json::from(response.scope.name())),
+                    ]);
+                    if let Some(note) = verdict_note(verdict) {
+                        reply.set("note", Json::from(note));
+                    }
+                    reply
+                }
+                Answer::Stale { expected_approval_id, expected_call_id } => {
+                    let mut reply = Json::obj(vec![
+                        ("ok", Json::Bool(false)),
+                        ("reason", Json::from("stale")),
+                        ("expectedApprovalId", Json::from(expected_approval_id.as_str())),
+                        ("expectedCallId", Json::from(expected_call_id.as_str())),
+                    ]);
+                    // 认错人之外还可能认错词：两种失败都得当场说清，
+                    // 否则页面只会显示"没批下来"，人去猜是哪一边的问题。
+                    reply.set("verdict", Json::from(response.decision.name()));
+                    if let Some(note) = verdict_note(verdict) {
+                        reply.set("note", Json::from(note));
+                    }
+                    reply
+                }
+                Answer::Gone => Json::obj(vec![
+                    ("ok", Json::Bool(false)),
+                    ("reason", Json::from("no-pending-approval")),
+                ]),
             };
-            // WebHooks::on_approval 是唯一回执来源；这里只回答当前等待者。
-            // 重复点击或接收端已断开都不能伪装成审批成功。
-            if hub.answer(decision) {
-                json_response(&mut stream, "{\"ok\":true}")
-            } else {
-                json_response(
-                    &mut stream,
-                    "{\"ok\":false,\"reason\":\"没有待处理的审批，或审批已结束\"}",
-                )
-            }
+            json_response(&mut stream, &reply.to_compact())
         }
         ("GET", "/api/events") => sse(&mut stream, hub, query),
         _ => {
@@ -1236,19 +1703,53 @@ mod tests {
     }
 
     #[test]
-    fn approval_answer_is_single_shot_and_reports_disconnect() {
+    fn approval_answer_must_name_the_approval_it_answers() {
         let hub = Hub::default();
-        assert!(!hub.answer(Decision::Allow), "没有等待者时不能返回成功");
-        let (tx, rx) = channel();
-        *hub.approval.lock().unwrap() = Some(tx);
-        assert!(hub.answer(Decision::Allow));
-        assert_eq!(rx.recv().unwrap(), Decision::Allow);
-        assert!(!hub.answer(Decision::Deny), "第二次回答必须失败");
+        // 没有等待者：不能说成功
+        assert!(
+            matches!(hub.answer("ap-1-0", "call-1", ApprovalResponse::allow_once()), Answer::Gone),
+            "没有等待者时不能返回成功"
+        );
+        let (tx, rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-1-0".into(),
+            call_id: "call-1".into(),
+            tx,
+        });
+        // 认错人：原审批必须被放回，继续等人，而不是被这一次点击消耗掉
+        match hub.answer("ap-2-0", "call-9", ApprovalResponse::allow_session()) {
+            Answer::Stale { expected_approval_id, expected_call_id } => {
+                assert_eq!(expected_approval_id, "ap-1-0");
+                assert_eq!(expected_call_id, "call-1");
+            }
+            other => panic!("身份不符必须回报 Stale，拿到 {:?}", other),
+        }
+        assert!(
+            hub.approval.lock().unwrap().is_some(),
+            "被拒绝的回执不能把原审批一起丢掉"
+        );
+        // 点名对上：一次成功，且只成功一次
+        assert!(matches!(
+            hub.answer("ap-1-0", "call-1", ApprovalResponse::allow_session()),
+            Answer::Accepted { .. }
+        ));
+        assert_eq!(rx.recv().unwrap(), ApprovalResponse::allow_session());
+        assert!(
+            matches!(hub.answer("ap-1-0", "call-1", ApprovalResponse::deny()), Answer::Gone),
+            "第二次回答必须失败"
+        );
 
-        let (tx, rx) = channel();
-        *hub.approval.lock().unwrap() = Some(tx);
+        let (tx, rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-3-0".into(),
+            call_id: "call-3".into(),
+            tx,
+        });
         drop(rx);
-        assert!(!hub.answer(Decision::Allow), "接收端断开必须返回失败");
+        assert!(
+            matches!(hub.answer("ap-3-0", "call-3", ApprovalResponse::allow_once()), Answer::Gone),
+            "接收端断开必须返回失败"
+        );
     }
 
     #[test]
@@ -1259,6 +1760,7 @@ mod tests {
             auto_yes: false,
         };
         let req = ApprovalRequest {
+            approval_id: "ap-7-0".into(),
             call_id: "call-42".into(),
             tool: "shell".into(),
             args: Json::Null,
@@ -1271,8 +1773,12 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "审批等待者未及时注册");
             std::thread::yield_now();
         }
-        assert!(hub.answer(Decision::Allow));
-        assert_eq!(worker.join().unwrap(), Decision::Allow);
+        // 页面把 approvalId + callId 一起带回来，服务端才知道答的是哪一张卡
+        assert!(matches!(
+            hub.answer("ap-7-0", "call-42", ApprovalResponse::allow_session()),
+            Answer::Accepted { .. }
+        ));
+        assert_eq!(worker.join().unwrap(), ApprovalResponse::allow_session());
         let log = hub.log.lock().unwrap();
         let receipts: Vec<_> = log
             .iter()
@@ -1280,7 +1786,138 @@ mod tests {
             .collect();
         assert_eq!(receipts.len(), 1, "一次审批只能有一条权威回执");
         assert!(receipts[0].1.contains("\"callId\":\"call-42\""));
+        assert!(receipts[0].1.contains("\"approvalId\":\"ap-7-0\""));
         assert!(receipts[0].1.contains("\"verdict\":\"allow\""));
+        // 作用域必须原样传出去：allow-session 不是 allow-once
+        assert!(receipts[0].1.contains("\"scope\":\"session\""));
+        // 人当场按下的按钮：不该被标成"代答"
+        assert!(
+            !receipts[0].1.contains("\"via\""),
+            "人表态的回执不该有 via: {}",
+            receipts[0].1
+        );
+        let asks: Vec<_> = log
+            .iter()
+            .filter(|(_, line)| line.contains("\"type\":\"approval\""))
+            .collect();
+        assert_eq!(asks.len(), 1);
+        assert!(asks[0].1.contains("\"approvalId\":\"ap-7-0\""));
+        drop(log);
+        assert!(hub.approval.lock().unwrap().is_none(), "答完必须清空等待槽");
+    }
+
+    /// 页面那句"审批结果：deny"也可能是我们没听懂那句话：`via` 要一路带到 SSE，
+    /// 否则只有日志能分辨"有人说不"和"没人答对"，界面上仍然在骗人。
+    #[test]
+    fn unrecognized_verdict_reaches_the_page_as_provenance() {
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: false,
+        };
+        let req = ApprovalRequest {
+            approval_id: "ap-8-0".into(),
+            call_id: "call-43".into(),
+            tool: "shell".into(),
+            args: Json::Null,
+            effects: Vec::new(),
+            reason: "test".into(),
+        };
+        let worker = std::thread::spawn(move || hooks.on_approval(&req));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while hub.approval.lock().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "审批等待者未及时注册");
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            hub.answer("ap-8-0", "call-43", ApprovalResponse::parse_verdict("yes-pls")),
+            Answer::Accepted { .. }
+        ));
+        let answer = worker.join().unwrap();
+        assert_eq!(answer.decision, Decision::Deny, "听不懂仍旧按拒绝");
+        assert_eq!(answer.via, Some("unknown-word"));
+        let log = hub.log.lock().unwrap();
+        let line = log
+            .iter()
+            .rev()
+            .find(|(_, l)| l.contains("\"type\":\"approved\""))
+            .map(|(_, l)| l.clone())
+            .expect("要有回执");
+        assert!(line.contains("\"via\":\"unknown-word\""), "{}", line);
+    }
+
+    #[test]
+    fn queued_tasks_can_be_cancelled_before_the_worker_starts() {
+        let hub = Hub::default();
+        let first = hub.new_task("第一条".into());
+        let second = hub.new_task("第二条".into());
+        assert_eq!(hub.enqueue(&first), 0, "第一条下一个就轮到");
+        assert_eq!(hub.enqueue(&second), 1, "第二条排在后面");
+        match hub.cancel_task(Some(&second.id)) {
+            Cancelled::Queued(ids) => assert_eq!(ids, vec!["t2".to_string()]),
+            other => panic!("撤排队中的必须回报 Queued，拿到 {:?}", other),
+        }
+        assert_eq!(hub.take_queued().map(|t| t.id), Some("t1".to_string()));
+        assert!(
+            hub.take_queued().is_none(),
+            "排队中被取消的任务不能被 worker 再次捡起"
+        );
+        assert!(
+            !first.cancel.is_cancelled(),
+            "取消第二条绝不能把第一条也标成已取消"
+        );
+        assert!(second.cancel.is_cancelled(), "撤掉的任务自己要带已取消的令牌");
+        // 撤掉的这笔必须留下账：worker 醒来时按它补 turn/skipped，
+        // 否则日志里只能看到「没做」，分不清是撤了、丢了、还是根本没提交。
+        let skipped = hub.take_skipped();
+        assert_eq!(skipped.len(), 1, "排队取消要留下一笔账");
+        assert_eq!(skipped[0].0, "t2");
+        assert_eq!(skipped[0].1, "第二条", "账上得写清撤掉的是哪句话");
+        assert!(hub.take_skipped().is_empty(), "取走即清空：同一笔不能记两次");
+    }
+
+    /// worker 认领任务与「本轮开始」之间不能有空窗：
+    /// 那段时间里点停止，绝不能回答「没有东西可取消」然后让任务照跑。
+    #[test]
+    fn a_claimed_task_is_stoppable_before_the_turn_starts() {
+        let hub = Hub::default();
+        let first = hub.new_task("第一条".into());
+        hub.enqueue(&first);
+        let claimed = hub.take_queued().expect("队列里有任务");
+        match hub.cancel_task(Some(&claimed.id)) {
+            Cancelled::Active(id) => assert_eq!(id, "t1"),
+            other => panic!("认领之后必须还能被点名停止，拿到 {:?}", other),
+        }
+        assert!(claimed.cancel.is_cancelled(), "令牌要真的落下");
+        assert!(
+            hub.take_skipped().is_empty(),
+            "已经认领的不算「排队时被撤」，别记两笔"
+        );
+    }
+
+    #[test]
+    fn cancel_hits_running_first_and_never_leaks_to_the_next_task() {
+        let hub = Hub::default();
+        let running = hub.new_task("正在跑".into());
+        let queued = hub.new_task("排队中".into());
+        *hub.active.lock().unwrap() = Some(running.clone());
+        hub.enqueue(&queued);
+        // 不带 taskId：只停在正在跑的那一轮，排队的条子留着下一轮用
+        match hub.cancel_task(None) {
+            Cancelled::Active(id) => assert_eq!(id, "t1"),
+            other => panic!("正在跑时必须回报 Active，拿到 {:?}", other),
+        }
+        assert!(running.cancel.is_cancelled());
+        assert!(hub.active_cancelled(), "审批等待循环要能看见这次取消");
+        assert!(!queued.cancel.is_cancelled(), "排队的没有被波及");
+        match hub.cancel_task(Some("t404")) {
+            Cancelled::Idle => {}
+            other => panic!("点名不存在时不该说取消了谁，拿到 {:?}", other),
+        }
+        // 令牌跟着任务走：新任务是干净的，上一轮的「已取消」带不过来
+        let next = hub.new_task("下一个".into());
+        assert!(!next.cancel.is_cancelled());
+        assert_eq!(next.id, "t3", "任务 ID 全局递增，页面才能贴住停的是哪条");
     }
 
     // ── 测试用的最小 HTTP 收发 ──（只处理一条连接，够验证路由与响应）
@@ -1312,7 +1949,7 @@ mod tests {
     fn http_request(hub: Arc<Hub>, raw: &str) -> (String, String) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let (task_tx, task_rx) = channel::<String>();
+        let (task_tx, task_rx) = channel::<WebTask>();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let _ = handle(stream, hub, task_tx);
@@ -1343,6 +1980,207 @@ mod tests {
                 target
             ),
         )
+    }
+
+    fn http_post(hub: Arc<Hub>, path: &str, body: &str) -> (String, String) {
+        http_request(
+            hub,
+            &format!(
+                "POST {} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                path,
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    #[test]
+    fn approve_route_needs_the_exact_approval_identity() {
+        // 回归：`/api/approve` 过去只看 verdict——老页面、双击、别的标签页，
+        // 谁都能把答案投给当前那张卡。现在必须点名，认错人则原审批继续等。
+        let ws = temp_workspace("approve-route");
+        let hub = hub_for(&ws);
+        let (tx, _rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-1-0".into(),
+            call_id: "call-1".into(),
+            tx,
+        });
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"verdict":"allow","approvalId":"ap-0-9","callId":"call-0"}"#,
+        );
+        assert!(out.contains("\"reason\":\"stale\""), "认错人要能分辨: {}", out);
+        assert!(
+            out.contains("\"expectedApprovalId\":\"ap-1-0\""),
+            "要告诉页面当前是哪张卡: {}",
+            out
+        );
+        assert!(
+            hub.approval.lock().unwrap().is_some(),
+            "被拒绝的回执不能把原审批一起丢掉"
+        );
+        // 没有等待者时也不能假装成功
+        let pending = hub.approval.lock().unwrap().take();
+        drop(pending);
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"verdict":"allow","approvalId":"ap-1-0","callId":"call-1"}"#,
+        );
+        assert!(
+            out.contains("\"reason\":\"no-pending-approval\""),
+            "审批已结束时要说清楚: {}",
+            out
+        );
+        // 点名对上：allow 还要区分 once / session
+        let (tx, rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-2-0".into(),
+            call_id: "call-2".into(),
+            tx,
+        });
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"verdict":"always","approvalId":"ap-2-0","callId":"call-2"}"#,
+        );
+        assert!(out.contains("\"ok\":true"), "{}", out);
+        assert!(out.contains("\"scope\":\"session\""), "作用域必须回显: {}", out);
+        assert_eq!(rx.recv().unwrap(), ApprovalResponse::allow_session());
+
+        // 认错人时也要说清用的是哪个词——否则页面只显示"没批下来"，
+        // 人会去点第二次，而不是改自己写的 verdict。
+        let (tx, _rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-3-0".into(),
+            call_id: "call-3".into(),
+            tx,
+        });
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"verdict":"yes-pls","approvalId":"ap-9","callId":"call-9"}"#,
+        );
+        assert!(out.contains("\"reason\":\"stale\""), "{}", out);
+        assert!(
+            out.contains("\"verdict\":\"deny\""),
+            "不认识的词要如实按拒绝回显: {}",
+            out
+        );
+        assert!(out.contains("note"), "要说明为什么是拒绝: {}", out);
+
+        // 认得词但没点名：仍然只是 stale，不该带 note
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"verdict":"allow","approvalId":"ap-9","callId":"call-9"}"#,
+        );
+        assert!(out.contains("\"reason\":\"stale\""), "{}", out);
+        assert!(!out.contains("\"note\""), "认识的词不该被提醒: {}", out);
+
+        // 点名的未知词：按拒绝处理但要说出来
+        let (tx, rx) = channel::<ApprovalResponse>();
+        *hub.approval.lock().unwrap() = Some(PendingApproval {
+            approval_id: "ap-4-0".into(),
+            call_id: "call-4".into(),
+            tx,
+        });
+        let (_head, out) = http_post(
+            hub.clone(),
+            "/api/approve",
+            r#"{"approvalId":"ap-4-0","callId":"call-4"}"#,
+        );
+        assert!(out.contains("\"ok\":true"), "{}", out);
+        assert!(out.contains("\"verdict\":\"deny\""), "{}", out);
+        assert!(out.contains("note"), "缺 verdict 也要说明: {}", out);
+        // 账本上还得更正"是谁替人做的决定"：没人答 ≠ 有人说了不。
+        assert_eq!(rx.recv().unwrap(), ApprovalResponse::deny().via("unknown-word"));
+    }
+
+    #[test]
+    fn cancel_route_separates_running_from_queued() {
+        // 回归：「停止」曾只有一个全局令牌——排队中的消息撤不掉，
+        // 而且取消状态会顺着令牌流到下一条消息。
+        let ws = temp_workspace("cancel-route");
+        let hub = hub_for(&ws);
+        let (_head, out) = http_post(hub.clone(), "/api/cancel", "{}");
+        assert!(out.contains("\"ok\":false"), "空闲时不该谎称停了什么: {}", out);
+        assert!(out.contains("idle"), "{}", out);
+
+        let first = hub.new_task("第一条".into());
+        let second = hub.new_task("第二条".into());
+        *hub.active.lock().unwrap() = Some(first.clone());
+        hub.enqueue(&second);
+        // 只撤排在后面的那条
+        let (_head, out) = http_post(hub.clone(), "/api/cancel", r#"{"taskId":"t2"}"#);
+        assert!(out.contains("queued:t2"), "{}", out);
+        assert!(second.cancel.is_cancelled(), "撤掉的那条必须带已取消令牌");
+        assert!(!first.cancel.is_cancelled(), "正在跑的那轮不该被牵连");
+        // 不带 taskId：停在正在跑的
+        let (_head, out) = http_post(hub.clone(), "/api/cancel", "{}");
+        assert!(out.contains("running:t1"), "{}", out);
+        assert!(first.cancel.is_cancelled());
+        // 状态查询要能告诉页面「在跑哪个 / 队列里还有谁」
+        *hub.active.lock().unwrap() = None;
+        let third = hub.new_task("第三条".into());
+        hub.enqueue(&third);
+        let (_head, state) = http_get(hub, "/api/state");
+        assert!(state.contains("\"taskId\":null"), "空闲时不该有在跑的任务: {}", state);
+        assert!(state.contains("\"queued\":[\"t3\"]"), "排队列表要能看见: {}", state);
+    }
+
+    /// 清单是进程级共享状态，而 `cargo test` 多线程跑用例：碰它的那个用例
+    /// 自己串行。用例会结束在空清单上，所以别的用例不受牵连。
+    fn private_list_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn declared_private_paths_stay_invisible_to_the_browser() {
+        let _g = private_list_guard();
+        ui_core::protected::set_privates(&["vendor/keys"]).unwrap();
+        let ws = temp_workspace("priv");
+        std::fs::create_dir_all(ws.join("vendor").join("keys")).unwrap();
+        std::fs::write(ws.join("vendor").join("keys").join("deploy.pem"), "PRIV").unwrap();
+        std::fs::create_dir_all(ws.join("vendor").join("licenses")).unwrap();
+        std::fs::write(ws.join("vendor").join("licenses").join("MIT.txt"), "ok").unwrap();
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::write(ws.join("notes").join("a.md"), "hi").unwrap();
+        let hub = hub_for(&ws);
+
+        // 直达文件：多段声明也要挡住，判定看的是完整路径而不是最后一段名字
+        for target in [
+            "/api/file?path=vendor/keys/deploy.pem",
+            "/api/tree?path=vendor/keys",
+            "/api/tree?path=vendor%2Fkeys%2Fdeploy.pem",
+        ] {
+            let (_head, body) = http_get(hub.clone(), target);
+            assert!(body.contains("\"error\""), "{} 应当被拒绝: {}", target, body);
+            assert!(!body.contains("PRIV"), "{} 泄露了内容: {}", target, body);
+        }
+
+        // 父目录的列表里不能出现 `keys`：名字本身是信息，而且点了就该 404
+        let (head, body) = http_get(hub.clone(), "/api/tree?path=vendor");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(!body.contains("keys"), "列表里露出了声明的隐私目录: {}", body);
+        assert!(
+            body.contains("licenses"),
+            "同级的正常目录被误伤了: {}",
+            body
+        );
+
+        // 没声明过的路径一切照旧——否则这条测试只是在证明"全挡了"
+        let (head, body) = http_get(hub.clone(), "/api/file?path=notes/a.md");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(body.contains("hi"), "{}", body);
+
+        let _ = std::fs::remove_dir_all(&ws);
+        ui_core::protected::set_privates(&[]).unwrap();
     }
 
     #[test]
@@ -1412,6 +2250,17 @@ mod tests {
         std::fs::write(ws.join("src").join("a.js"), "export const a = 1;\n").unwrap();
         std::fs::create_dir_all(ws.join("secrets")).unwrap();
         std::fs::write(ws.join("secrets").join("token.txt"), "s3cr3t").unwrap();
+        // 大小写变体必须一起挡：Windows 文件系统不区分大小写，只挡小写等于没挡。
+        std::fs::create_dir_all(ws.join("Secrets")).unwrap();
+        std::fs::write(ws.join("Secrets").join("token.txt"), "s3cr3t-caps").unwrap();
+        // .ui 里是整轮提示词与工具结果——它是隐私边界，不是"隐藏目录"。
+        std::fs::create_dir_all(ws.join(".ui")).unwrap();
+        std::fs::write(ws.join(".ui").join("journal.jsonl"), "{\"kind\":\"prompt/snapshot\"}").unwrap();
+        // target/node_modules 只是噪音，但走的是同一个判据，不能有旁路。
+        std::fs::create_dir_all(ws.join("target")).unwrap();
+        std::fs::write(ws.join("target").join("build.txt"), "artifact").unwrap();
+        std::fs::create_dir_all(ws.join("node_modules")).unwrap();
+        std::fs::write(ws.join("node_modules").join("pkg.txt"), "dep").unwrap();
 
         let (_head, ok) = http_get(hub_for(&ws), "/api/file?path=src%2Fa.js");
         assert!(ok.contains("\"ok\":true"), "正常文件应能预览: {}", ok);
@@ -1422,11 +2271,33 @@ mod tests {
             "/api/file?path=%2Fetc%2Fpasswd",
             "/api/file?path=secrets%2Ftoken.txt",
             "/api/file?path=..%2Fetc%2Fpasswd",
+            "/api/file?path=Secrets%2Ftoken.txt",
+            "/api/file?path=SECRETS%2Ftoken.txt",
+            "/api/file?path=.ui%2Fjournal.jsonl",
+            "/api/file?path=%2Eui%2Fjournal.jsonl",
+            "/api/file?path=target%2Fbuild.txt",
+            "/api/file?path=node_modules%2Fpkg.txt",
+            "/api/file?path=src%2F..%2F..%2Fetc%2Fpasswd",
         ] {
             let (_head, body) = http_get(hub_for(&ws), target);
             assert!(body.contains("\"ok\":false"), "{} 应被拒绝: {}", target, body);
             assert!(!body.contains("s3cr3t"), "{} 泄露了 secrets: {}", target, body);
+            assert!(
+                !body.contains("prompt/snapshot"),
+                "{} 泄露了内核日志: {}",
+                target,
+                body
+            );
         }
+        // 根列表同理：名字本身也是信息——"这里有 .ui/有 journal"已经泄了一半。
+        let (_head, root) = http_get(hub_for(&ws), "/api/tree");
+        for leak in ["secrets", "Secrets", ".ui", "journal", "target", "node_modules"] {
+            assert!(
+                !root.contains(&format!("\"name\":\"{leak}\"")),
+                "根列表出现了 {leak}: {root}"
+            );
+        }
+        assert!(root.contains("\"src\""), "正常目录仍要能列出: {root}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

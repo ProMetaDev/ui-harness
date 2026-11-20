@@ -197,14 +197,21 @@
 
   /* 事件流 → 步骤 */
   const steps = [];
+  const inStep = new Set();
   let cur = null;
+  let pendingStart = null;
   for (const e of events) {
+    // turn/start 走在快照前面：先攥着，等这一步真的建起来再归位；
+    // 要是它后面没有快照（开局就崩），它就留在旁路账里，不会凭空消失。
+    if (e.kind === "turn/start") { pendingStart = e; continue; }
     if (e.kind === "prompt/snapshot") {
       cur = { snap: e, calls: [], model: null, repairs: [] };
+      if (pendingStart) { inStep.add(pendingStart); cur.start = pendingStart; pendingStart = null; }
       steps.push(cur);
       continue;
     }
     if (!cur) continue;
+    inStep.add(e);
     if (e.kind === "model/response") cur.model = e;
     if (e.kind === "model/repair") cur.repairs.push(e);
     if (e.kind === "tool/request") cur.calls.push({ req: e, end: null, approval: null });
@@ -216,6 +223,9 @@
       const c = cur.calls.find((x) => x.req.callId === e.callId);
       if (c) c.approval = e;
     }
+    // 一轮到此为止：后面的事件（合并、回滚、被撤掉的排队任务）不属于这一步，
+    // 它们走页面底部的"旁路"账——人是按轮说话的，动文件的不一定。
+    if (e.kind === "turn/end") cur = null;
   }
 
   const status = (s) => {
@@ -242,6 +252,66 @@
   };
 
   const totalCalls = steps.reduce((n, s) => n + s.calls.length, 0);
+  /* 旁路事件：不属于任何一轮对话的操作记录。
+     合并（apply/*）、回滚、排队期取消（turn/skipped）、工作流与子代理都在这儿——
+     它们是"人或内核对工作区动的手"，审计时最常被问到，却不能只存在于终端输出里。 */
+  const extra = events.filter((e) => !inStep.has(e) && e.kind !== "prompt/snapshot");
+  const envelope = ["seq", "ts", "w", "prev", "hash", "kind"];
+  const brief = (v) => {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    return s.length > 96 ? s.slice(0, 95) + "…" : s;
+  };
+  const names = (a) => (Array.isArray(a) && a.length ? a.map(brief).join("、") : "无");
+  function note(e) {
+    switch (e.kind) {
+      case "apply/begin":
+        return "事务 " + (e.txn || "?") + " · 准备写回 " + (e.files || []).length + " 个：" + names(e.files) + "（原样留底已存，失败会自动退回）";
+      case "apply/committed":
+        return "事务 " + (e.txn || "?") + " · 已写回 " + (e.written || []).length + " 个：" + names(e.written);
+      case "apply/rolled-back":
+        return "事务 " + (e.txn || "?") + " · " + (e.stage === "rollback" ? "人手动退回" : "写回失败已自动退回") +
+               " · 还原 " + (e.restored || []).length + " 个：" + names(e.restored) +
+               ((e.removed || []).length ? " · 删除 " + (e.removed || []).length + " 个：" + names(e.removed) : "") +
+               ((e.skipped || []).length ? " · 保留（之后又被改过）：" + names(e.skipped) : "") +
+               (e.error ? " · 原因：" + brief(e.error) : "");
+      case "apply/abandoned":
+        return "事务 " + (e.txn || "?") + " · 被 --force 跳过（半途那笔不再回滚）";
+      case "turn/skipped":
+        return "任务 " + (e.task || "?") + " · 排队期间被取消，这一轮没有开始（不烧预算）" +
+               (e.text ? " · 内容：" + brief(e.text) : "");
+      case "workflow/start":
+        return brief(e.name) + " · " + (e.steps != null ? e.steps + " 步" : "");
+      case "workflow/end":
+        return "结束 · " + brief(e.reason) + (e.stoppedAt != null ? " · 停在第 " + e.stoppedAt + " 步" : "");
+      case "delegate/end":
+        return "子代理 " + brief(e.id) + " · " + (e.ok ? "完成" : "失败") +
+               " · 改动 " + (e.changed || []).length + " 个：" + names(e.changed);
+      case "journal/torn":
+        return "崩溃留下的半条记录已截断";
+      default: {
+        const parts = [];
+        for (const k of Object.keys(e)) {
+          if (envelope.indexOf(k) >= 0) continue;
+          parts.push(k + "=" + brief(e[k]));
+          if (parts.length >= 4) break;
+        }
+        return parts.join(" · ");
+      }
+    }
+  }
+  function sidecard() {
+    if (!extra.length) return "";
+    let h = '<div class="card"><div class="card-h"><h2>旁路事件</h2>' +
+            '<span class="meta">' + extra.length + " 条 · 不属于任何一步</span></div>" +
+            '<div class="card-b flush"><table><thead><tr><th class="num">seq</th><th>时间</th>' +
+            '<th>事件</th><th>说明</th></tr></thead><tbody>';
+    for (const e of extra) {
+      h += '<tr><td class="num">' + (e.seq != null ? e.seq : "-") + "</td><td>" +
+           '<span class="k">' + clock(e.ts || 0) + "</span></td><td class=\"k\">" + esc(e.kind) +
+           "</td><td>" + esc(note(e)) + "</td></tr>";
+    }
+    return h + "</tbody></table></div></div>";
+  }
   const firstTs = events.length ? events[0].ts : 0;
   const lastTs = events.length ? events[events.length - 1].ts : 0;
 
@@ -278,7 +348,8 @@
   function renderDetail() {
     const box = document.getElementById("detail");
     if (selected < 0) {
-      box.innerHTML = '<div class="empty">日志里还没有 prompt/snapshot 事件。</div>';
+      box.innerHTML = '<div class="page"><div class="empty">日志里还没有 prompt/snapshot 事件。</div>' +
+                      sidecard() + "</div>";
       return;
     }
     const s = steps[selected];
@@ -355,6 +426,9 @@
     }
     h += "</div>";
 
+    // 步骤之外的人为操作：合并、回滚、取消、工作流、子代理
+    h += sidecard();
+
     box.innerHTML = '<div class="page">' + h + "</div>";
     box.querySelectorAll(".call").forEach((row) => {
       row.onclick = () => { selectedCall = Number(row.dataset.call); renderDetail(); };
@@ -408,6 +482,7 @@
       ["事件", String(events.length)],
       ["步骤", String(steps.length)],
     ];
+    if (extra.length) facts.push(["旁路事件", String(extra.length)]);
     let f = facts.map(([k, v]) => '<div class="row"><span>' + k + "</span><b>" + v + "</b></div>").join("");
     const tools = Object.entries(byTool).sort((a, b) => b[1] - a[1]);
     if (tools.length) {

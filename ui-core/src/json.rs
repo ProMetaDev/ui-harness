@@ -95,6 +95,18 @@ impl Json {
         }
     }
 
+    /// Drop a field, returning its value. Used when re-keying an event into a
+    /// new journal (envelope fields belong to the writer, not the payload).
+    pub fn remove(&mut self, key: &str) -> Option<Json> {
+        match self {
+            Json::Obj(items) => items
+                .iter()
+                .position(|(k, _)| k == key)
+                .map(|at| items.remove(at).1),
+            _ => None,
+        }
+    }
+
     pub fn to_compact(&self) -> String {
         let mut out = String::new();
         self.write_compact(&mut out);

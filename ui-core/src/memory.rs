@@ -315,7 +315,14 @@ impl Store {
             }
 
             let mut journal = Journal::open(&path)?;
-            let event = journal.append("memory/write", write_payload(&draft))?;
+            // 这里走 `append_raw`，是**故意**绕过落账那道门的：
+            // `.ui/memory.jsonl` 不是"记录"，它就是记忆库本体——这一条正文
+            // 会在之后每一步被召回进上下文，抹掉等于让模型记错东西。
+            // 补这一刀的不是门，是两头各一次：`ui remember` 在写之前就把
+            // 凭据形状拒掉（cmd_remember），`ui secrets` 在扫的时候把这个
+            // 文件一起算进来（来源标 `memory`）——手改过的、老版本写下的，
+            // 都还要能被指出来，不能"扫不到就等于不存在"。
+            let event = journal.append_raw("memory/write", write_payload(&draft))?;
             let seq = event.u64_at("seq").unwrap_or(0);
             drop(journal);
             latest.refresh().map_err(io_data)?;
