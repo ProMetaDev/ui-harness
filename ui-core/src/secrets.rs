@@ -294,7 +294,7 @@ mod tests {
             ("tool", J::s("shell")),
             ("output", J::s("export API_KEY=abcdef0123456789; make")),
             ("args", J::obj(vec![("apiKey", J::s("abc12345"))])),
-            ("effects", J::Arr(vec![J::s("fs.read /ws/sk-proj-verylongvalue1234")])),
+            ("effects", J::Arr(vec![J::s("fs.read /ws/sk-proj-verylongvalue1234")])), // 测试夹具：密钥形状，非真凭据（allowlist secret）
         ]);
         let n = redact_json(&mut ev);
         assert_eq!(n, 3, "值形状 1 + 字段名 1 + 嵌套值里的形状 1");
@@ -345,9 +345,9 @@ mod tests {
     #[test]
     fn well_known_token_shapes_need_no_key_name() {
         for sample in [
-            "key sk-proj-verylongvalue1234 end",
+            "key sk-proj-verylongvalue1234 end", // 测试夹具：密钥形状，非真凭据（allowlist secret）
             "ghp_A1b2C3d4E5f6G7h8I9j0 done",
-            "AKIA1234567890ABCDEF",
+            "AKIA1234567890ABCDEF", // 测试夹具：密钥形状，非真凭据（allowlist secret）
             "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
             "glpat-AbCdEf123456",
             "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn overlapping_spans_are_merged_not_double_replaced() {
         // 两个键名 + 一个前缀同时命中同一段文本：下标必须还能对上原文
-        let line = "AUTH_TOKEN=\"sk-proj-verylongvalue1234\"; echo ok";
+        let line = "AUTH_TOKEN=\"sk-proj-verylongvalue1234\"; echo ok"; // 测试夹具：密钥形状，非真凭据（allowlist secret）
         let (clean, n) = redact(line);
         assert!(clean.contains("echo ok"), "{}", clean);
         assert!(!clean.contains("verylongvalue"), "{}", clean);

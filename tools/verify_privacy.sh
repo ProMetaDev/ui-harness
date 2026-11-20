@@ -25,7 +25,7 @@ yesno() { if [ "$2" -eq 0 ]; then pass=$((pass+1)); echo "  ✓ $1"; else fail=$
 # 三种 canary 各自只被一档挡住——这样才能看出哪一档真的在工作：
 #  AKIA…/ghp_… 有凭据形状 → 模式脱敏负责
 #  OPAQUE…   没有形状      → 只有"它从哪来"能救（清单档）
-K1=AKIAIOSFODNN7EXAMPLE
+K1=AKIAIOSFODNN7EXAMPLE  # 测试夹具：密钥形状，非真凭据（allowlist secret）
 K2=ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 PRIVATE=OPAQUE-CONFIG-88231-not-a-key-shape
 
