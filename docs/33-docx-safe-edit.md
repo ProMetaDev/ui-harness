@@ -64,6 +64,34 @@ word/_rels/document.xml.rels
 
 这不是 bug，是取舍。不能接受时，拆成更小的 run 级替换，或让用户确认。
 
+### 3.1 页眉 / 页脚
+
+`replace` 默认只改 `word/document.xml`；加 `--part` 可改指定 XML：
+
+```bash
+unzip -l report.docx | grep -E 'word/(header|footer)'
+python3 docx_safe.py replace report.edit-....docx \
+  --part word/header1.xml --find "旧标题" --replace "新标题"
+```
+
+只重写该 part，其他 part 逐字节复制。正文与页眉互不串改。
+
+### 3.2 日期 / 金额格式化
+
+```json
+{"key":"活动时间","value":"2026-12-05 14:00|2026-12-05 16:00","format":"zh-date-range"}
+{"key":"参与人数","value":"1234","format":"thousands"}
+```
+
+支持：
+
+- `zh-date`：`2026-12-05` → `2026年12月5日`
+- `zh-datetime`：保留时间
+- `zh-date-range`：两个 ISO 日期用 `|` 或 `~` 分隔；同一天会自动压缩成 `14:00—16:00`
+- `thousands` / `cny`：数字格式
+
+解析失败就拒绝，不猜。
+
 ## 4. 表格：fill 而不是 overwrite
 
 表格不能按“整格文本赋值”处理，否则 `w:tcPr` 的边框/底纹/边距/宽度、`w:trPr` 的行高、`w:tblPr` 的表格样式都可能被重写。
@@ -224,9 +252,9 @@ ui run --task test --mock scenario.json --yes
 
 ## 9. 下一步
 
-1. 给脚本加 `--part word/header1.xml`，覆盖页眉页脚；
-2. 加 `--run-wise` 模式：按 run 分段替换，保留内部格式；
-3. 用 LibreOffice 转 PDF/PNG 做视觉抽查；
+1. 加 `--run-wise` 模式：按 run 分段替换，保留被替换文本内部格式；
+2. 用 LibreOffice 转 PDF/PNG 做视觉抽查；
+3. 表格按表头名 + 行 key 定位（当前是标签右邻格）；
 4. 把“原件未变/结构守恒”写进 `ui verify` 的审计事件。
 
 ## 10. 真实申报表对比（2026-11-21）

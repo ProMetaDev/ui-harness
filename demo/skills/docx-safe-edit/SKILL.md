@@ -74,9 +74,29 @@ python3 <skill>/scripts/docx_safe.py replace report.edit-....docx \
 脚本行为：
 
 - 只在副本上操作，写入临时文件后原子替换副本；
-- 只改 `word/document.xml`；styles、numbering、media、rels、页眉页脚全部逐字节复制；
+- 默认只改 `word/document.xml`；styles、numbering、media、rels、页眉页脚全部逐字节复制；
 - 支持跨 `<w:r>` 的短语：替换文本落在起始 run，后续 run 清空；
 - 不处理跨段落短语；找不到就退出，不写文件。
+
+页眉/页脚先确认 part 名：
+
+```bash
+unzip -l report.docx | grep -E 'word/(header|footer)'
+python3 <skill>/scripts/docx_safe.py replace report.edit-....docx \
+  --part word/header1.xml --find "旧标题" --replace "新标题"
+```
+
+`--part` 只重写指定的 XML，其他 part 仍逐字节复制。**页眉替换不会自动改正文，反之亦然。**
+
+日期/金额不要手写格式，用 `format`：
+
+```json
+{"key":"活动时间","value":"2026-12-05 14:00|2026-12-05 16:00","format":"zh-date-range"}
+{"key":"参与人数","value":"1234","format":"thousands"}
+```
+
+支持 `zh-date` / `zh-datetime` / `zh-date-range` / `thousands` / `cny`。  
+格式化是确定性的；解析失败就拒绝，不做模糊猜测。
 
 ## 3.5 表格：只填值，不重建单元格
 

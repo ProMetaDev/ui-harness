@@ -204,17 +204,20 @@ def replace_in_paragraph(p, find, repl, do_all):
     return len(positions)
 
 
-def rewrite_doc(src, dst, mutate):
+def rewrite_part(src, dst, part, mutate):
     etree = load_lxml()
     with zipfile.ZipFile(src) as zin:
-        doc = parse_part(zin, "word/document.xml")
+        names = set(zin.namelist())
+        if part not in names:
+            die(f"DOCX 里没有 part: {part}")
+        doc = parse_part(zin, part)
         result = mutate(doc)
         if not result:
             die("没有发生任何改动；未写入任何文件")
         data = etree.tostring(doc, xml_declaration=True, encoding="UTF-8", standalone=None)
         with zipfile.ZipFile(dst, "w") as zout:
             for info in zin.infolist():
-                if info.filename == "word/document.xml":
+                if info.filename == part:
                     zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                     zi.compress_type = info.compress_type
                     zi.external_attr = info.external_attr
@@ -222,6 +225,10 @@ def rewrite_doc(src, dst, mutate):
                 else:
                     zout.writestr(info, zin.read(info.filename))
     return result
+
+
+def rewrite_doc(src, dst, mutate):
+    return rewrite_part(src, dst, "word/document.xml", mutate)
 
 
 def rewrite_document(src, dst, find, repl, do_all):
@@ -233,13 +240,13 @@ def rewrite_document(src, dst, find, repl, do_all):
     return rewrite_doc(src, dst, mutate)
 
 
-def edit_atomic(target, mutate):
+def edit_atomic(target, mutate, part="word/document.xml"):
     tmpdir = target.parent / ".ui" / "tmp"
     tmpdir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="docx-safe-", suffix=".docx", dir=str(tmpdir))
     os.close(fd)
     try:
-        result = rewrite_doc(target, tmp, mutate)
+        result = rewrite_part(target, tmp, part, mutate)
         os.replace(tmp, target)
         return result
     finally:
@@ -439,9 +446,11 @@ def cmd_replace(args):
     require_edit_copy(target, args.force)
     if args.dry_run:
         with zipfile.ZipFile(target) as zf:
-            doc = parse_part(zf, "word/document.xml")
+            if args.part not in zf.namelist():
+                die(f"DOCX 里没有 part: {args.part}")
+            doc = parse_part(zf, args.part)
             hits = sum(paragraph_text(p).count(args.find) for p in doc.iter(W + "p"))
-        print(json.dumps({"dryRun": True, "matches": hits, "find": args.find}, ensure_ascii=False))
+        print(json.dumps({"dryRun": True, "matches": hits, "find": args.find, "part": args.part}, ensure_ascii=False))
         return 0 if hits else 1
     def mutate(doc):
         total = 0
@@ -449,9 +458,61 @@ def cmd_replace(args):
             total += replace_in_paragraph(p, args.find, args.replace, args.all)
         return total
 
-    count = edit_atomic(target, mutate)
-    print(json.dumps({"replaced": count, "file": str(target.resolve())}, ensure_ascii=False))
+    count = edit_atomic(target, mutate, args.part)
+    print(json.dumps({"replaced": count, "part": args.part, "file": str(target.resolve())}, ensure_ascii=False))
     return 0
+
+
+def parse_date(text):
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2}))?", text.strip())
+    if not m:
+        die(f"不是 ISO 日期: {text!r}")
+    y, mo, d, h, mi = m.groups()
+    return int(y), int(mo), int(d), (int(h), mi) if h else None
+
+
+def zh_date(text, with_time):
+    y, mo, d, hm = parse_date(text)
+    out = f"{y}年{mo}月{d}日"
+    if with_time and hm:
+        out += f" {hm[0]:02d}:{hm[1]}"
+    return out
+
+
+def format_value(value, fmt):
+    if not fmt:
+        return value
+    text = str(value)
+    if fmt == "zh-date":
+        return zh_date(text, False)
+    if fmt == "zh-datetime":
+        return zh_date(text, True)
+    if fmt == "zh-date-range":
+        parts = re.split(r"\s*(?:\||~)\s*", text)
+        if len(parts) != 2:
+            die(f"zh-date-range 需要 两个日期用 | 或 ~ 分隔: {text!r}")
+        a, b = parts
+        ya, ma, da, hma = parse_date(a)
+        yb, mb, db, hmb = parse_date(b)
+        left = f"{ya}年{ma}月{da}日" + (f" {hma[0]:02d}:{hma[1]}" if hma else "")
+        if (ya, ma, da) == (yb, mb, db) and hma and hmb:
+            right = f"{hmb[0]:02d}:{hmb[1]}"
+        else:
+            right = f"{yb}年{mb}月{db}日" + (f" {hmb[0]:02d}:{hmb[1]}" if hmb else "")
+        return left + "—" + right
+    if fmt == "thousands":
+        try:
+            n = float(text.replace(",", ""))
+        except ValueError:
+            die(f"thousands 需要数字: {text!r}")
+        return f"{n:,.0f}" if n.is_integer() else f"{n:,.2f}"
+    if fmt == "cny":
+        try:
+            n = float(text.replace(",", "").replace("¥", ""))
+        except ValueError:
+            die(f"cny 需要数字: {text!r}")
+        return "¥" + f"{n:,.2f}"
+    die(f"未知 format: {fmt!r}")
 
 
 def cmd_table_fill(args):
@@ -469,9 +530,12 @@ def cmd_table_fill(args):
             row, col = resolve_key_target(find_table(doc, args.table), args.key, col)
         if row is None or col is None:
             die("需要 --row/--col，或 --key")
-        info = table_fill(doc, args.table, row, col, args.value, args.overwrite)
+        value = format_value(args.value, args.format)
+        info = table_fill(doc, args.table, row, col, value, args.overwrite)
         if args.key:
             info["key"] = args.key
+        if args.format:
+            info["format"] = args.format
         return info
 
     info = edit_atomic(target, mutate)
@@ -525,6 +589,12 @@ def cmd_table_fill_map(args):
                 value = str(f["value"])
             else:
                 die(f"fill 条目缺少 value 或 paragraphs: {f!r}")
+            fmt = f.get("format")
+            if fmt:
+                if isinstance(value, list):
+                    value = [format_value(v, fmt) for v in value]
+                else:
+                    value = format_value(value, fmt)
             style_cell = None
             if ref_doc is not None:
                 ref_table = find_table(ref_doc, table)
@@ -539,6 +609,8 @@ def cmd_table_fill_map(args):
             info = table_fill(doc, table, row, col, value, bool(f.get("overwrite")), style_cell)
             if key:
                 info["key"] = key
+            if fmt:
+                info["format"] = fmt
             results.append(info)
         return results
 
@@ -593,6 +665,7 @@ def main():
     p.add_argument("--replace", required=True)
     p.add_argument("--all", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--part", default="word/document.xml", help="要修改的 XML part，例如 word/header1.xml")
     p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_replace)
 
@@ -603,6 +676,7 @@ def main():
     p.add_argument("--col", type=int, help="第几个逻辑列（1 起，跨列表格按逻辑列）")
     p.add_argument("--key", help="按标签文本找行，默认填标签右边一格；可用 --col 覆盖目标列")
     p.add_argument("--value", required=True)
+    p.add_argument("--format", help="zh-date / zh-datetime / zh-date-range / thousands / cny")
     p.add_argument("--overwrite", action="store_true", help="允许覆盖已有内容；默认只填空/占位符")
     p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_table_fill)
