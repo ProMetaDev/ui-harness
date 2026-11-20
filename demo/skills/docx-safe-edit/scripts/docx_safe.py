@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -624,6 +625,41 @@ def cmd_table_fill_map(args):
     return 0
 
 
+def cmd_render(args):
+    """可选：用 LibreOffice 转 PDF 做人工视觉抽查；没有就如实失败。"""
+    target = Path(args.file)
+    if not target.is_file():
+        die(f"文件不存在: {target}")
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        print(json.dumps({
+            "ok": False,
+            "reason": "没有 LibreOffice/soffice；无法做视觉渲染，结构校验仍可用",
+        }, ensure_ascii=False, indent=2))
+        return 2
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        outdir = out.parent
+    else:
+        outdir = target.parent / ".ui" / "render"
+        outdir.mkdir(parents=True, exist_ok=True)
+        out = outdir / (target.stem + ".pdf")
+    proc = subprocess.run(
+        [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(outdir), str(target)],
+        capture_output=True, text=True
+    )
+    if proc.returncode != 0 or not out.exists():
+        print(json.dumps({
+            "ok": False,
+            "reason": "LibreOffice 转换失败",
+            "stderr": proc.stderr[-500:],
+        }, ensure_ascii=False, indent=2))
+        return 1
+    print(json.dumps({"ok": True, "pdf": str(out.resolve())}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_validate(args):
     a = inspect(args.original)
     b = inspect(args.copy)
@@ -686,6 +722,11 @@ def main():
     p.add_argument("--map", required=True, help="JSON：{table, fills:[{row,col,value}]}")
     p.add_argument("--force", action="store_true", help="允许修改非 .edit 文件；默认拒绝")
     p.set_defaults(fn=cmd_table_fill_map)
+
+    p = sub.add_parser("render")
+    p.add_argument("file")
+    p.add_argument("--out", help="输出 PDF 路径；默认 .ui/render/<stem>.pdf")
+    p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("validate")
     p.add_argument("original")

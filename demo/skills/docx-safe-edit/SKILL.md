@@ -196,6 +196,14 @@ python3 <skill>/scripts/docx_safe.py validate report.docx report.edit-....docx
 
 > 结构校验通过，但未做版面渲染抽查；请在 Word 里打开副本确认。
 
+有 LibreOffice 时可以转 PDF 抽查：
+
+```bash
+python3 <skill>/scripts/docx_safe.py render report.edit-....docx
+```
+
+没有 `soffice` 就返回 `ok:false` 和 `exit 2`，不要假装视觉校验通过。
+
 ## 5. 交付
 
 默认只交副本：

@@ -250,14 +250,22 @@ ui run --task test --mock scenario.json --yes
 - 原件 sha256 未变，表格仍 1 个；
 - 已知代价：跨 run 的 `world` 粗体折叠到起始 run。
 
-## 9. 下一步
+## 9. 可选视觉抽查
+
+```bash
+python3 docx_safe.py render report.edit-....docx
+```
+
+有 LibreOffice 时转成 `.ui/render/<stem>.pdf`；没有 `soffice` 返回 exit 2，不把结构校验冒充视觉校验。
+
+## 10. 下一步
 
 1. 加 `--run-wise` 模式：按 run 分段替换，保留被替换文本内部格式；
 2. 用 LibreOffice 转 PDF/PNG 做视觉抽查；
 3. 表格按表头名 + 行 key 定位（当前是标签右邻格）；
 4. 把“原件未变/结构守恒”写进 `ui verify` 的审计事件。
 
-## 10. 真实申报表对比（2026-11-21）
+## 11. 真实申报表对比（2026-11-21）
 
 拿同一张《南昌大学第二课堂活动申报表》做了对比：
 
@@ -298,7 +306,7 @@ ui run --task test --mock scenario.json --yes
 }
 ```
 
-## 11. 参考
+## 12. 参考
 
 - [Editing existing DOCX via OOXML](https://github.com/openkursar/hello-halo/blob/a1b6d395e9c3609d33cefa0fd2fb99d280bfb4e0/resources/builtin-skills/docx/references/editing.md)
 - [docx-official/edit.md](https://github.com/xiaomimimo/mimo-code/blob/5a538cb4f97b9c4c8eb09a845ec06c1e5f1f3e8f/packages/cli/src/skill/builtin/.bundle/docx-official/edit.md)
