@@ -386,9 +386,17 @@ impl Agent {
             let _ = std::fs::create_dir_all(dir);
         }
         let journal = crate::journal::Journal::open(path)?;
-        let events = crate::journal::Journal::read(path)
-            .map(|(e, _)| e)
-            .unwrap_or_default();
+        let events = match crate::journal::Journal::read(path) {
+            Ok((events, None)) => events,
+            Ok((events, Some(c))) if c.torn => events,
+            Ok((_, Some(c))) => {
+                return Err(AgentError::Journal(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("会话日志损坏：{}", c.reason),
+                )))
+            }
+            Err(e) => return Err(AgentError::Journal(e)),
+        };
         let mut history: Vec<crate::prompt::Message> = Vec::new();
         for e in &events {
             match e.str_at("kind") {
@@ -436,6 +444,9 @@ impl Agent {
         let redact = self.journal.redacting();
         self.journal = journal;
         self.journal.set_redact(redact);
+        // turn 编号来自日志，不是全局 run 计数；换日志必须跟着换，否则
+        // 空会话第一轮可能从 57 开始，切回来又会重复 4、5。
+        self.turn = self.journal.turn_count();
         self.history = history;
         self.begin_run();
         Ok(())
@@ -450,6 +461,9 @@ impl Agent {
     /// 且上一任务的「已取消」绝不能污染下一任务。
     pub fn begin_run_with_cancel(&mut self, cancel: Option<Cancel>) {
         let cancel = cancel.unwrap_or_else(Cancel::new);
+        // TUI 复用同一个 token：上一轮的 Esc 不能粘到这一轮。hard cancel
+        // （父进程死亡）在 reset 里不会被清掉。
+        cancel.reset();
         self.active_cancel = cancel.clone();
         self.cancel = cancel;
         self.budget.reset();
@@ -1078,7 +1092,19 @@ impl Agent {
                         final_text: "(已取消)".to_string(),
                     });
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // 不允许 turn/start 悬挂：模型错误也要写 turn/end，
+                    // 否则 verify/doctor 会把这一轮当成崩溃未完成。
+                    self.log_event(
+                        "turn/end",
+                        Json::obj(vec![
+                            ("turn", Json::from(turn)),
+                            ("reason", Json::from("model_error")),
+                            ("error", Json::from(e.to_string())),
+                        ]),
+                    )?;
+                    return Err(e);
+                }
             };
             if self.active_cancel.is_cancelled() {
                 return self.finish(turn, "cancelled", steps, tool_calls, last_text);
@@ -1114,6 +1140,21 @@ impl Agent {
 
             if let Some(usage) = response.usage_tokens {
                 self.budget.reconcile_tokens(snapshot.tokens, usage);
+                let rate = self.budget.limits.usd_per_mtok;
+                if rate > 0.0 {
+                    let cost = usage as f64 * rate / 1_000_000.0;
+                    if let Err(e) = self.budget.charge(Dim::Usd, cost) {
+                        self.log_event(
+                            "turn/end",
+                            Json::obj(vec![
+                                ("turn", Json::from(turn)),
+                                ("reason", Json::from("budget")),
+                                ("error", Json::from(e.to_string())),
+                            ]),
+                        )?;
+                        return Err(AgentError::Budget(e));
+                    }
+                }
             }
             if !response.content.is_empty() {
                 last_text = response.content.clone();
@@ -1149,7 +1190,21 @@ impl Agent {
                 if self.active_cancel.is_cancelled() {
                     return self.finish(turn, "cancelled", steps, tool_calls, last_text);
                 }
-                let (result, name) = self.dispatch(call, hooks)?;
+                let (result, name) = match self.dispatch(call, hooks) {
+                    Ok(v) => v,
+                    Err(AgentError::Budget(e)) => {
+                        self.log_event(
+                            "turn/end",
+                            Json::obj(vec![
+                                ("turn", Json::from(turn)),
+                                ("reason", Json::from("budget")),
+                                ("error", Json::from(e.to_string())),
+                            ]),
+                        )?;
+                        return Err(AgentError::Budget(e));
+                    }
+                    Err(e) => return Err(e),
+                };
                 tool_calls += 1;
                 hooks.on_tool(&name, &call.args, &result);
 
@@ -1228,7 +1283,10 @@ impl Agent {
                     ]),
                 )?;
                 if attempts > self.max_repairs {
-                    return Ok(response);
+                    return Err(AgentError::Model(format!(
+                        "协议错误重试次数用尽：{}",
+                        err
+                    )));
                 }
                 let note = format!(
                     "你上一条输出不是约定的 JSON 对象（{}）。请只输出一个 JSON 对象：\
@@ -1257,9 +1315,11 @@ impl Agent {
             )?;
 
             if attempts > self.max_repairs {
-                // Keep going: the structured failure becomes a tool result the
-                // model can read next step, instead of killing the turn.
-                return Ok(response);
+                // 不能让“永远输出坏 JSON”的模型以一条散文回复结束并 exit 0。
+                return Err(AgentError::Model(format!(
+                    "工具参数 JSON 修复次数用尽：{}",
+                    error
+                )));
             }
             let note = format!(
                 "上一个工具调用的参数不是合法 JSON（{}）。请重新输出完整、合法的 JSON 参数，不要截断。",
@@ -1421,7 +1481,9 @@ impl Agent {
                 reason,
             };
         }
-        if verdict.decision == Decision::Allow {
+        if verdict.decision != Decision::Deny {
+            // Ask 也必须做真实路径检查：Strict 会把 Allow 抬成 Ask，如果只检查
+            // Allow，strict 反而成了绕过 symlink 越界检查的模式。
             // 一个工具可能声明多个 fs.* 效果（fs_mv 的 from / to 就是两个）。
             // 只检查第一个等于默认相信第二个：`to` 经符号链接指向工作区外时
             // 会被 `escapes_workspace` 漏掉，而 `run_mv` 自己的字面检查看不出来。
@@ -1570,7 +1632,6 @@ impl Agent {
         }
 
         if let Err(e) = self.budget.charge(Dim::ToolCalls, 1.0) {
-            let result = ToolResult::err(e.to_string());
             self.log_event(
                 "tool/end",
                 Json::obj(vec![
@@ -1580,7 +1641,9 @@ impl Agent {
                     ("error", Json::from("BUDGET")),
                 ]),
             )?;
-            return Ok((result, name));
+            // 不能用 Ok(tool_error) 混过去：那会让模型继续转，最后以 "done"
+            // 和 exit 0 结束。预算失败是这一轮失败。
+            return Err(AgentError::Budget(e));
         }
 
         self.log_event(
@@ -2108,21 +2171,33 @@ mod tests {
             tool_calls: 2,
             wall_ms: 60_000,
             usd: 1.0,
+            usd_per_mtok: 0.0,
             max_steps: 24,
         };
         let mut agent = Agent::new(journal, model(&script), ws, limits);
         let mut hooks = NullHooks;
-        let report = agent.run_turn("循环", &mut hooks).unwrap();
+        let err = agent.run_turn("循环", &mut hooks).unwrap_err();
+        assert!(
+            matches!(err, AgentError::Budget(_)),
+            "tool-call budget exhaustion must abort the turn, got {:?}",
+            err
+        );
 
-        // Calls past the limit never run; they come back as structured errors so
-        // the model can see the wall instead of the harness dying.
+        // The call that crosses the limit gets a tool/end BUDGET, then the turn ends.
         let denied = agent
             .journal
             .events
             .iter()
             .filter(|e| e.str_at("error") == Some("BUDGET"))
             .count();
-        assert_eq!(denied, 8);
+        assert_eq!(denied, 1);
+        assert!(
+            agent.journal.events.iter().any(|e| {
+                e.str_at("kind") == Some("turn/end")
+                    && e.str_at("reason") == Some("budget")
+            }),
+            "budget exhaustion must close the turn with reason=budget"
+        );
         assert_eq!(
             agent
                 .journal
@@ -2133,7 +2208,21 @@ mod tests {
             2,
             "only the first two calls may actually execute"
         );
-        assert_eq!(report.reason, "done");
+    }
+
+    #[test]
+    fn switch_journal_resets_the_turn_counter() {
+        let ws = workspace("switch-turn");
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![Json::obj(vec![("content", Json::from("ok"))])])),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws.clone(), Limits::default());
+        let other = ws.join(".ui").join("other.jsonl");
+        Journal::open(&other).unwrap();
+        agent.switch_journal(&other).unwrap();
+        assert_eq!(agent.turn_number(), 0, "空会话的 turn 必须从 0 开始");
     }
 
     #[test]

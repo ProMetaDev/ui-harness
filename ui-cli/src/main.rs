@@ -261,6 +261,21 @@ fn resolve_journal(args: &Args, ws: &Path) -> PathBuf {
     }
 }
 
+/// 交互/单次 run 打开已有会话时恢复历史。
+///
+/// 之前只有 `ui serve` 的 `switch_journal` 会重建历史，`ui run --session demo`
+/// 却是空历史继续往同一个 journal 追加：模型看不到上一轮，日志却把它记成
+/// 同一会话的下一轮。这里复用同一条重建路径。
+fn restore_session_history(agent: &mut Agent, jp: &Path) -> Result<(), String> {
+    let nonempty = Journal::read(jp)
+        .map(|(events, _)| !events.is_empty())
+        .unwrap_or(false);
+    if nonempty {
+        agent.switch_journal(jp).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// `ui sessions`：列出会话（名字、事件数、更新时间）；`--new NAME` 新建。
 fn cmd_sessions(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
@@ -959,18 +974,14 @@ fn provider_model(args: &Args) -> Option<Result<Box<dyn Model + Send>, String>> 
 }
 
 /// `ui providers`：列出配置里的 provider（不启动任何进程）。
-/// `.ui/plugins.json` 或 `--plugins FILE`：加载本地插件（能力声明必须显式）。
+/// 本地插件必须显式 `--plugins FILE` 加载。
+///
+/// 不再自动信任工作区里的 `.ui/plugins.json`：仓库可以自带这个文件，
+/// 而插件调用本身是本地代码执行；自动加载等于把“克隆仓库”变成“执行仓库”。
 fn attach_plugins(agent: &mut Agent, args: &Args) -> Result<(), String> {
-    let ws = agent.workspace.clone();
     let path = match args.get("plugins") {
         Some(p) => std::path::PathBuf::from(p),
-        None => {
-            let p = ws.join(".ui").join("plugins.json");
-            if !p.exists() {
-                return Ok(());
-            }
-            p
-        }
+        None => return Ok(()),
     };
     let set = ui_core::plugin::Set::load(&path)?;
     ui_core::prompt::add_extra_tools(set.catalog());
@@ -1055,6 +1066,7 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     let jp = resolve_journal(args, &ws);
     let journal = Journal::open(&jp).map_err(|e| e.to_string())?;
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
+    restore_session_history(&mut agent, &jp)?;
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
     agent.mode = mode_from(args);
@@ -1705,6 +1717,9 @@ fn limits_from(args: &Args) -> Limits {
     if let Some(v) = args.get("max-usd").and_then(|v| v.parse().ok()) {
         limits.usd = v;
     }
+    if let Some(v) = args.get("usd-per-mtok").and_then(|v| v.parse().ok()) {
+        limits.usd_per_mtok = v;
+    }
     // 长任务需要更多步：默认 24 步对"跑一小时"远远不够
     if let Some(v) = args.get("max-steps").and_then(|v| v.parse().ok()) {
         limits.max_steps = v;
@@ -1736,6 +1751,10 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     println!("journal   {}", jp.display());
 
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
+    // 默认 `ui run` 仍是一次独立运行；只有显式 `--session` 才恢复该会话历史。
+    if args.get("session").is_some() {
+        restore_session_history(&mut agent, &jp)?;
+    }
     // run 边界：Agent::new 之后第一件事就是划它。晚一步，`--skills` 预加载
     // 的正文和 knowledge 命中会被 reset 抹掉；早一步也没有意义（新对象本来就是
     // 干净状态），真正要紧的是别在 `agent.cancel.clone()` 之后才划——那样
@@ -2956,7 +2975,11 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
         .map_err(|e| format!("写文件失败: {}", e))?;
 
     let src = File::open(&jp).map_err(|e| format!("{}: {}", jp.display(), e))?;
-    let mut reader = BufReader::new(src);
+    // 只复制 verify_stream 已经验证过的那段字节。不能在 verify 之后重新按
+    // 行读到 EOF：活写者可能在这期间追加，导出就会混入未验证事件；撕裂尾行
+    // 也会被原样写进 __UI_DATA__，让整个查看器变成非法 JSON。
+    let limit = report.good_bytes as u64;
+    let mut reader = BufReader::new(src).take(limit);
     let mut buf = String::new();
     let mut first = true;
     loop {

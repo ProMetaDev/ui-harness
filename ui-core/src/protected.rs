@@ -340,11 +340,36 @@ pub fn is_private_path(workspace: &Path, path: &Path) -> bool {
         .any(|pre| abs.starts_with(pre))
 }
 
+/// 解析“最近的存在祖先”，再拼回不存在的尾部。
+///
+/// 写新文件时目标本身不存在，`canonicalize(path)` 必然失败；但父目录可能
+/// 是一个指向 `.git`/`.ui`/`secrets` 的符号链接。只返回 `false` 会让
+/// `blocked_write` 漏掉这类目标。
+fn canonicalize_with_missing(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = path.canonicalize() {
+        return Some(real);
+    }
+    let mut ancestor = path.parent();
+    while let Some(parent) = ancestor {
+        if let Ok(real) = parent.canonicalize() {
+            let mut out = real;
+            if let Ok(rest) = path.strip_prefix(parent) {
+                for comp in rest.components() {
+                    out.push(comp.as_os_str());
+                }
+            }
+            return Some(out);
+        }
+        ancestor = parent.parent();
+    }
+    None
+}
+
 /// 解析真实路径后再判一次，挡住符号链接别名。
 pub fn is_private_real_path(workspace: &Path, path: &Path) -> bool {
-    let real = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return false,
+    let real = match canonicalize_with_missing(path) {
+        Some(p) => p,
+        None => return false,
     };
     let ws = workspace
         .canonicalize()
@@ -461,9 +486,9 @@ pub fn is_protected_path(workspace: &Path, path: &Path) -> bool {
 /// 目标不存在（例如写新文件）时返回 `false`；写目标由策略层和
 /// `agent::escapes_workspace` 负责。
 pub fn is_protected_real_path(workspace: &Path, path: &Path) -> bool {
-    let real = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return false,
+    let real = match canonicalize_with_missing(path) {
+        Some(p) => p,
+        None => return false,
     };
     let ws = workspace
         .canonicalize()

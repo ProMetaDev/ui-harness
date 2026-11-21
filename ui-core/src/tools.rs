@@ -11,13 +11,34 @@ use crate::protected::{
     private_dir_names, private_entries,
 };
 use crate::skill::Catalog;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const MAX_OUTPUT_BYTES: usize = 16_000;
+/// 单条子进程输出在**读取阶段**的硬上限。不能等 read_to_string 读完再 cap：
+/// `yes` / `cat /dev/zero` 会先把这个进程撑爆。8 MiB 足够容纳正常构建日志，
+/// 超出部分明确标记并丢弃。
+pub const MAX_CHILD_CAPTURE: u64 = 8 * 1024 * 1024;
+
+fn read_capped<R: Read>(reader: R, max: u64) -> String {
+    let mut buf = Vec::new();
+    let mut limited = reader.take(max + 1);
+    let _ = limited.read_to_end(&mut buf);
+    let truncated = buf.len() as u64 > max;
+    if truncated {
+        buf.truncate(max as usize);
+    }
+    let mut s = String::from_utf8_lossy(&buf).to_string();
+    if truncated {
+        s.push_str(&format!("\n…[输出超过 {} MiB，已截断]", max / 1024 / 1024));
+    }
+    s
+}
 
 pub struct Ctx {
     pub workspace: PathBuf,
@@ -579,6 +600,36 @@ impl Matcher {
     }
 }
 
+fn sensitive_env_name(name: &str) -> bool {
+    matches!(
+        name,
+        "SSH_AUTH_SOCK"
+            | "SSH_ASKPASS"
+            | "KUBECONFIG"
+            | "DOCKER_CONFIG"
+            | "GIT_ASKPASS"
+            | "NETRC"
+    )
+}
+
+/// 去掉 URL 里的 user:password@，保留其余部分。
+fn scrub_env_value(value: &OsString) -> OsString {
+    let text = value.to_string_lossy();
+    let Some(scheme_end) = text.find("://") else {
+        return value.clone();
+    };
+    let rest = &text[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return value.clone();
+    };
+    let authority = &rest[..at];
+    if !authority.contains(':') {
+        return value.clone();
+    }
+    let scrubbed = format!("{}://***@{}", &text[..scheme_end], &rest[at + 1..]);
+    OsString::from(scrubbed)
+}
+
 fn shell_effects(args: &Json, _ctx: &Ctx) -> Vec<Effect> {
     vec![Effect::new(PROC_EXEC, args.str_at("command").unwrap_or(""))]
 }
@@ -667,16 +718,23 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     // 让子进程继承整个父环境等于把 operator 的凭据交给模型调用的命令。
     let mut scrubbed = 0usize;
     if ctx.env_scrub {
-        let keep: Vec<(String, String)> = std::env::vars().collect();
+        // vars_os：Linux 环境变量可以不是 UTF-8；vars() 遇到这种值会 panic，
+        // 等于让一条命令把整个 agent 打死。
+        let keep: Vec<(OsString, OsString)> = std::env::vars_os().collect();
         cmd.env_clear();
         for (k, v) in keep {
-            // 判据与导出脱敏、`ui secrets` 共用 `secrets::key_is_secret`：
-            // 这里换一份名单，就等于「命令环境里挡住了，导出时漏出去」。
-            if crate::secrets::key_is_secret(&k) {
+            let key = k.to_string_lossy();
+            // 判据与导出脱敏、`ui secrets` 共用 `secrets::key_is_secret`；
+            // 再加一组“名字不像密钥、但实际是凭据通道”的变量。
+            if crate::secrets::key_is_secret(&key) || sensitive_env_name(&key) {
                 scrubbed += 1;
                 continue;
             }
-            cmd.env(k, v);
+            let value = scrub_env_value(&v);
+            if value != v {
+                scrubbed += 1;
+            }
+            cmd.env(k, value);
         }
     }
 
@@ -701,26 +759,34 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
                 Some(j)
             }
             Err(e) => {
-                // 失败说清楚：我们仍然有 taskkill 兜底，但保证弱一档
-                sandbox_label = format!("job-unavailable({})", e);
-                None
+                // 与 Linux Landlock 一致：要沙箱却拿不到沙箱时，命令不能跑。
+                let _ = child.kill();
+                kill_tree(child.id());
+                let _ = child.wait();
+                return ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!(
+                        "Windows Job Object 不可用（{}）；拒绝在无进程树约束的情况下执行",
+                        e
+                    )),
+                    meta: Json::obj(vec![("sandbox", Json::from("unavailable"))]),
+                };
             }
         }
     } else {
         None
     };
 
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        s
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = out_tx.send(read_capped(stdout, MAX_CHILD_CAPTURE));
     });
-    let err_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
+    std::thread::spawn(move || {
+        let _ = err_tx.send(read_capped(stderr, MAX_CHILD_CAPTURE));
     });
 
     let deadline = started + timeout;
@@ -760,8 +826,14 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
         j.terminate();
     }
 
-    let out = out_handle.join().unwrap_or_default();
-    let err = err_handle.join().unwrap_or_default();
+    // 不 join：杀掉 -pgid 后仍可能有 setsid 的孙进程持有 stdout 写端，
+    // join 会无限等，等于让 timeoutMs 失效。这里最多等 2 秒，拿不到就
+    // 明确标记输出未完全回收，而不是把整个 turn 卡死。
+    let out_res = out_rx.recv_timeout(Duration::from_secs(2));
+    let err_res = err_rx.recv_timeout(Duration::from_secs(2));
+    let output_drained = out_res.is_ok() && err_res.is_ok();
+    let out = out_res.unwrap_or_default();
+    let err = err_res.unwrap_or_default();
     let duration = started.elapsed().as_millis() as u64;
     let combined = [out, err]
         .into_iter()
@@ -785,6 +857,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             ("status", Json::from(code)),
             ("durationMs", Json::from(duration)),
             ("timedOut", Json::Bool(timed_out)),
+            ("outputDrained", Json::Bool(output_drained)),
             // 审计用：这条命令拿到的环境里，有几个密钥类变量被剔掉了
             ("envScrubbed", Json::from(scrubbed)),
             // 沙箱状态进 meta：事后能回答"这条命令当时被限制到什么程度"
@@ -933,10 +1006,10 @@ pub fn registry() -> Vec<Tool> {
                 }
                 let set = match &ctx.plugins {
                     Some(s) => s,
-                    None => return ToolResult::err("没有配置插件（.ui/plugins.json）"),
+                    None => return ToolResult::err("没有配置插件（需 --plugins FILE 显式加载）"),
                 };
                 let payload = args.get("args").cloned().unwrap_or(Json::Obj(vec![]));
-                match set.call(plugin, tool, &payload) {
+                match set.call(plugin, tool, &payload, ctx.env_scrub) {
                     Ok(text) => ToolResult::ok(text),
                     Err(e) => ToolResult::err(e),
                 }
@@ -1555,6 +1628,10 @@ fn run_patch(args: &Json, ctx: &Ctx) -> ToolResult {
         return ToolResult::err("patch 需要 path 与 diff");
     }
     let path = ctx.resolve(rel);
+    // patch 既读又写，必须按写入口挡住 `.git`/`.ui`/`secrets` 及其符号链接别名。
+    if blocked_write(ctx, &path) {
+        return ToolResult::err(protected_error(&path));
+    }
     let raw = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => return ToolResult::err(format!("读不到 {}: {}", rel, e)),
@@ -1792,6 +1869,9 @@ fn run_mv(args: &Json, ctx: &Ctx) -> ToolResult {
     let to = ctx.resolve(args.str_at("to").unwrap_or(""));
     if !from.starts_with(&ctx.workspace) || !to.starts_with(&ctx.workspace) {
         return ToolResult::err("源和目标都必须在工作区内");
+    }
+    if blocked_write(ctx, &from) || blocked_write(ctx, &to) {
+        return ToolResult::err("源或目标落在受保护目录（含符号链接别名）");
     }
     if !from.exists() {
         return ToolResult::err(format!("源不存在: {}", from.display()));

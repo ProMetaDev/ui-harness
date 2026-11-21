@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use ui_core::budget::estimate_tokens;
 use ui_core::json::Json;
 use ui_core::journal::Journal;
 
@@ -175,8 +176,8 @@ fn remember_then_run_injects_the_memory() {
     );
     assert_eq!(
         used[0].u64_at("tokens"),
-        Some((text.len() as u64) / 4),
-        "tokens 口径 = 正文长度 / 4"
+        Some(estimate_tokens(text)),
+        "tokens 口径必须与注入预算/snapshot 使用同一个估算器"
     );
 
     // 4) 记忆链里也有一条使用记录（hits 由它重放）。

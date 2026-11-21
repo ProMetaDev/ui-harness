@@ -121,14 +121,20 @@ impl Set {
                 workspace.join(target).to_string_lossy().to_string()
             }
         };
-        match self.find(plugin, tool) {
-            Some(spec) => spec
-                .effects
-                .iter()
-                .map(|e| Effect::new(&e.kind, resolve(&e.target)))
-                .collect(),
-            None => vec![Effect::new("proc.exec", format!("plugin:{}:{}", plugin, tool))],
+        // 插件声明的效果只能“加严”，不能替代执行事实。任何插件调用都至少是
+        // 一次 proc.exec：否则声明 `effects: []` 就能绕过默认的 proc.exec → Ask。
+        let mut effects = vec![Effect::new(
+            "proc.exec",
+            format!("plugin:{}:{}", plugin, tool),
+        )];
+        if let Some(spec) = self.find(plugin, tool) {
+            effects.extend(
+                spec.effects
+                    .iter()
+                    .map(|e| Effect::new(&e.kind, resolve(&e.target))),
+            );
         }
+        effects
     }
 
     /// 给提示词用的清单
@@ -145,7 +151,7 @@ impl Set {
         out
     }
 
-    pub fn call(&self, plugin: &str, tool: &str, args: &Json) -> Result<String, String> {
+    pub fn call(&self, plugin: &str, tool: &str, args: &Json, scrub_env: bool) -> Result<String, String> {
         let p = self
             .plugins
             .iter()
@@ -161,12 +167,22 @@ impl Set {
         ]);
         use std::io::Write;
         use std::process::{Command, Stdio};
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&p.cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if scrub_env {
+            let keep: Vec<(String, String)> = std::env::vars().collect();
+            cmd.env_clear();
+            for (k, v) in keep {
+                if !crate::secrets::key_is_secret(&k) {
+                    cmd.env(k, v);
+                }
+            }
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("启动插件 {} 失败: {}", plugin, e))?;
         {
@@ -174,6 +190,24 @@ impl Set {
             stdin
                 .write_all(payload.to_compact().as_bytes())
                 .map_err(|e| format!("写插件失败: {}", e))?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("插件 {} 超时（30s）", plugin));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    return Err(format!("等待插件 {} 失败: {}", plugin, e));
+                }
+            }
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -187,5 +221,45 @@ impl Set {
             ));
         }
         Ok(stdout.trim_end().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one(effects: Vec<Effect>) -> Set {
+        Set {
+            plugins: vec![Plugin {
+                name: "p".into(),
+                cmd: "true".into(),
+                tools: vec![ToolSpec {
+                    name: "t".into(),
+                    summary: String::new(),
+                    effects,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn empty_declared_effects_still_produce_proc_exec() {
+        let set = one(Vec::new());
+        let effects = set.effects_for("p", "t", Path::new("/ws"));
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.kind == "proc.exec" && e.target == "plugin:p:t"),
+            "插件声明 [] 不能变成零效果：{:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn declared_effects_are_additive_not_replacement() {
+        let set = one(vec![Effect::new("fs.write", "out.txt")]);
+        let effects = set.effects_for("p", "t", Path::new("/ws"));
+        assert!(effects.iter().any(|e| e.kind == "proc.exec"));
+        assert!(effects.iter().any(|e| e.kind == "fs.write"));
     }
 }

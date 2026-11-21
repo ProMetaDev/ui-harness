@@ -85,6 +85,9 @@ pub struct Limits {
     pub tool_calls: u64,
     pub wall_ms: u64,
     pub usd: f64,
+    /// 每百万 token 的美元价格；0 表示没配置价格（此时 Usd 维度不可计费）。
+    /// 由 `--usd-per-mtok` 显式给出，避免内核凭空猜一个模型价格。
+    pub usd_per_mtok: f64,
     /// 单轮的步数上限。默认 24 是为了"别让模型乱跑"，
     /// 但长任务（浸泡、批量处理）需要显式调大：--max-steps。
     pub max_steps: usize,
@@ -97,6 +100,7 @@ impl Default for Limits {
             tool_calls: 60,
             wall_ms: 30 * 60 * 1000,
             usd: 2.0,
+            usd_per_mtok: 0.0,
             max_steps: 24,
         }
     }
@@ -110,6 +114,7 @@ impl Limits {
             tool_calls: j.u64_at("maxToolCalls").unwrap_or(d.tool_calls),
             wall_ms: j.u64_at("maxWallMs").unwrap_or(d.wall_ms),
             usd: j.num_at("maxUsd").unwrap_or(d.usd),
+            usd_per_mtok: j.num_at("usdPerMtok").unwrap_or(d.usd_per_mtok),
             max_steps: j.u64_at("maxSteps").unwrap_or(d.max_steps as u64) as usize,
         }
     }
@@ -272,6 +277,7 @@ mod tests {
             tool_calls: 2,
             wall_ms: 60_000,
             usd: 1.0,
+            usd_per_mtok: 0.0,
             max_steps: 24,
         });
         b.charge(Dim::Tokens, 60.0).unwrap();

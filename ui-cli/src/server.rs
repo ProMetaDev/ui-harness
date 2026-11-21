@@ -33,6 +33,7 @@ const MAX_BODY: usize = 4 * 1024 * 1024;
 struct WebTask {
     id: String,
     text: String,
+    session: String,
     cancel: ui_core::Cancel,
 }
 
@@ -109,12 +110,24 @@ impl Hub {
         if hits > 0 {
             event.set("redacted", Json::from(hits as u64));
         }
+        // 每个事件带上产生它的会话：/snapshot 和前端据此丢弃切换前/切换后
+        // 串进来的旧会话事件。
+        let session = self.session.lock().unwrap().clone();
+        if !session.is_empty() {
+            event.set("session", Json::from(session.as_str()));
+        }
         let mut log = self.log.lock().unwrap();
         let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         event.set("seq", Json::from(n));
         event.set("ts", Json::from(ui_core::time::now_ms()));
         let line = event.to_compact();
         log.push((n, line.clone()));
+        // 日志不是内存泄漏：只保留最近一段，SSE 的 since 仍能补最近窗口。
+        const MAX_HUB_LOG: usize = 5000;
+        if log.len() > MAX_HUB_LOG {
+            let excess = log.len() - MAX_HUB_LOG;
+            log.drain(0..excess);
+        }
         let mut subs = self.subs.lock().unwrap();
         subs.retain(|tx| tx.send(line.clone()).is_ok());
     }
@@ -172,9 +185,12 @@ impl Hub {
     /// 排队用的新任务：一个 ID、一个只属于它的取消令牌。
     fn new_task(&self, text: String) -> WebTask {
         let n = self.task_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let pending = self.pending_session.lock().unwrap().clone();
+        let session = pending.unwrap_or_else(|| self.session.lock().unwrap().clone());
         WebTask {
             id: format!("t{}", n),
             text,
+            session,
             cancel: ui_core::Cancel::new(),
         }
     }
@@ -204,6 +220,7 @@ impl Hub {
         WebTask {
             id: String::new(),
             text: String::new(),
+            session: String::new(),
             cancel: ui_core::Cancel::new(),
         }
     }
@@ -665,22 +682,36 @@ pub fn serve(
                 };
                 hub.busy.store(true, Ordering::SeqCst);
                 agent.mode = *hub.mode.lock().unwrap();
-                // 会话切换：换日志 + 重建历史（不能把上一条会话的上下文带过来）
-                if let Some(name) = hub.pending_session.lock().unwrap().take() {
-                    let path = session_file(&hub.workspace, &name);
+                // 会话切换跟着任务走：任务入队时记录了它属于哪个会话。
+                // 用全局 pending 值会把切换前排队的旧任务一起搬到新会话。
+                let task_session = task.session.clone();
+                if !task_session.is_empty()
+                    && task_session != *hub.session.lock().unwrap()
+                {
+                    let path = session_file(&hub.workspace, &task_session);
                     match agent.switch_journal(&path) {
                         Ok(()) => {
-                            *hub.session.lock().unwrap() = name.clone();
+                            *hub.session.lock().unwrap() = task_session.clone();
+                            // 只清掉与本次任务相同的 pending，避免把更晚的切换吞掉。
+                            let mut pending = hub.pending_session.lock().unwrap();
+                            if pending.as_deref() == Some(task_session.as_str()) {
+                                *pending = None;
+                            }
+                            drop(pending);
                             hub.push(Json::obj(vec![
                                 ("type", Json::from("session-switched")),
-                                ("session", Json::from(name.as_str())),
+                                ("session", Json::from(task_session.as_str())),
                             ]));
                         }
                         Err(e) => {
+                            *hub.active.lock().unwrap() = None;
+                            hub.busy.store(false, Ordering::SeqCst);
                             hub.push(Json::obj(vec![
                                 ("type", Json::from("error")),
+                                ("taskId", Json::from(task.id.as_str())),
                                 ("message", Json::from(format!("切换会话失败: {}", e))),
                             ]));
+                            continue;
                         }
                     }
                 }
@@ -721,7 +752,24 @@ pub fn serve(
                     hub: Arc::clone(&hub),
                     auto_yes,
                 };
-                let report = agent.run_turn(&task.text, &mut hooks);
+                let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    agent.run_turn(&task.text, &mut hooks)
+                })) {
+                    Ok(report) => report,
+                    Err(_) => {
+                        // 一个坏工具/坏插件/坏模型输出不能把整个 worker 带走。
+                        // 清理 active/approval/busy，留下事件，继续接下一轮。
+                        *hub.active.lock().unwrap() = None;
+                        hub.clear_approval();
+                        hub.busy.store(false, Ordering::SeqCst);
+                        hub.push(Json::obj(vec![
+                            ("type", Json::from("error")),
+                            ("taskId", Json::from(task.id.as_str())),
+                            ("message", Json::from("worker panicked; turn aborted")),
+                        ]));
+                        continue;
+                    }
+                };
                 *hub.active.lock().unwrap() = None;
                 // 这一轮结束后不该再有人能回答它的审批
                 hub.clear_approval();
@@ -880,6 +928,17 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
 
     // 查询串：`since=<seq>` 用于断线重连只补新事件
     let query = raw_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    // CSRF：Cookie 是 SameSite=Lax，但 Lax 只保证 same-site，不保证 same-origin；
+    // 127.0.0.1 上另一个端口的页面也能带 Cookie 发简单 POST。浏览器会自动带
+    // Origin / Sec-Fetch-Site，必须在这里拒绝跨源写请求。
+    if method != "GET" && method != "HEAD" && !same_origin_request(&headers) {
+        return json_response_status(
+            &mut stream,
+            "403 Forbidden",
+            "{\"ok\":false,\"error\":\"cross-origin request rejected\"}",
+        );
+    }
 
     // ── 鉴权 ──
     // 绑的是 127.0.0.1，局域网进不来；真正的威胁是「本机其它程序」和
@@ -1352,6 +1411,25 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
 }
 
 /// 没有 token：不给页面、不给数据，也不泄露任何工作区信息。
+/// 浏览器跨源写请求防护。
+///
+/// 没有 Origin / Sec-Fetch-Site 的请求（curl、本地脚本）保持兼容；浏览器发起
+/// 的 fetch/表单一定会带其中一个，跨源值会被拒绝。
+fn same_origin_request(headers: &std::collections::HashMap<String, String>) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site") {
+        return matches!(site.as_str(), "same-origin" | "none");
+    }
+    let origin = match headers.get("origin") {
+        Some(o) => o,
+        None => return true,
+    };
+    let host = match headers.get("host") {
+        Some(h) => h,
+        None => return false,
+    };
+    origin == &format!("http://{}", host) || origin == &format!("https://{}", host)
+}
+
 fn unauthorized(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {
     if api {
         let body = "{\"error\":\"unauthorized\"}";
@@ -1506,11 +1584,22 @@ fn script_safe_json(json: &str) -> String {
 
 /// `/snapshot` 的完整页面：把事件日志与启动信息注入静态 HTML。
 fn snapshot_page(hub: &Hub) -> String {
+    let current = hub.session.lock().unwrap().clone();
     let boot = hub
         .log
         .lock()
         .unwrap()
         .iter()
+        .filter(|(_, line)| {
+            // 旧日志/测试事件没有 session 字段：保留，避免把兼容格式全过滤掉。
+            match ui_core::json::parse(line) {
+                Ok(event) => event
+                    .str_at("session")
+                    .map(|s| s == current)
+                    .unwrap_or(true),
+                Err(_) => true,
+            }
+        })
         .map(|(_, line)| line.clone())
         .collect::<Vec<_>>()
         .join(",");
@@ -1587,8 +1676,13 @@ fn file_error(stream: &mut TcpStream, message: &str) -> std::io::Result<()> {
 }
 
 fn json_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    json_response_status(stream, "200 OK", body)
+}
+
+fn json_response_status(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status,
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -2038,6 +2132,26 @@ mod tests {
                 body
             ),
         )
+    }
+
+    #[test]
+    fn cross_origin_post_is_rejected_before_it_reaches_the_agent() {
+        let ws = temp_workspace("csrf");
+        let hub = hub_for(&ws);
+        let body = "{\"text\":\"rm -rf\"}";
+        let raw = format!(
+            "POST /api/say HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: http://127.0.0.1:9999\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (head, body) = http_request(hub, &raw);
+        assert!(
+            head.contains("403"),
+            "cross-origin POST must be 403: {} body={}",
+            head,
+            body
+        );
+        assert!(body.contains("cross-origin"), "{}", body);
     }
 
     #[test]

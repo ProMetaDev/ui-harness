@@ -212,7 +212,7 @@ impl Message {
                 "[{}] {}: {}",
                 name,
                 if ok { "ok" } else { "error" },
-                truncate(content, 4000)
+                content
             ),
         }
     }
@@ -230,17 +230,6 @@ impl Message {
             other => format!("{}: {}", other, self.content),
         }
     }
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 fn render_tools(tools: &[Tool]) -> String {
@@ -495,6 +484,16 @@ mod tests {
         assert_eq!(a.id, b.id);
         assert!(a.tokens > 0);
         assert!(a.sections.iter().any(|s| s.id == "env"));
+    }
+
+    #[test]
+    fn tool_message_does_not_silently_truncate_at_4k() {
+        let body = "x".repeat(8_000);
+        let m = Message::tool("fs_read", true, &body);
+        assert!(
+            m.content.contains(&body),
+            "Message::tool 不能把 8KB 输出静默截成 4KB"
+        );
     }
 
     #[test]

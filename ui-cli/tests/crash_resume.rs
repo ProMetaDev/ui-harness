@@ -130,6 +130,10 @@ fn a_killed_side_effect_is_reconciled_not_lost() {
         after.open_tools.is_empty(),
         "nothing may remain open after resume"
     );
+    assert!(
+        after.open_turn.is_none(),
+        "resume must close the interrupted turn even though it writes a new writer id"
+    );
 }
 
 #[test]

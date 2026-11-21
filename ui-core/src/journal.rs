@@ -198,12 +198,31 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
             break;
         }
         if buf.last() != Some(&b'\n') {
-            corrupt = Some(Corrupt {
-                seq: None,
-                reason: format!("第 {} 行没有结尾换行（崩溃残留）", lines + 1),
-                torn: true,
-                good_bytes: good as usize,
-            });
+            // 崩溃窗口有两种：半条记录（坏）和“记录完整、只差换行”（好）。
+            // 后者必须保留，否则它可能是已提交的 tool/start / turn/start，
+            // 下一次 resume 就会把副作用重放一遍。
+            let prev_hash = if last.is_empty() {
+                GENESIS.to_string()
+            } else {
+                parse_line(&last)
+                    .and_then(|e| e.str_at("hash").map(str::to_string))
+                    .unwrap_or_else(|| GENESIS.to_string())
+            };
+            if verify_record(&buf, &prev_hash).is_some() {
+                if contains(&buf, b"\"kind\":\"turn/start\"") {
+                    turns += 1;
+                }
+                offset += n as u64;
+                good = offset;
+                std::mem::swap(&mut last, &mut buf);
+            } else {
+                corrupt = Some(Corrupt {
+                    seq: None,
+                    reason: format!("第 {} 行没有结尾换行且校验失败（崩溃残留）", lines + 1),
+                    torn: true,
+                    good_bytes: good as usize,
+                });
+            }
             break;
         }
         // 空行（外部工具插进来的）不是记录：不能让它成为"最后一条"，
@@ -263,6 +282,23 @@ fn parse_line(line: &[u8]) -> Option<Json> {
         return None;
     }
     json::parse(text).ok()
+}
+
+/// 校验一条记录：JSON 可解析、prev 接得上、hash 对得上。
+fn verify_record(line: &[u8], expected_prev: &str) -> Option<Json> {
+    let record = parse_line(line)?;
+    if record.str_at("prev")? != expected_prev {
+        return None;
+    }
+    let declared = record.str_at("hash")?.to_string();
+    let mut without_hash = record.clone();
+    if let Json::Obj(items) = &mut without_hash {
+        items.retain(|(k, _)| k != "hash");
+    }
+    if sha256::hex(without_hash.to_compact().as_bytes()) != declared {
+        return None;
+    }
+    Some(record)
 }
 
 impl Journal {
@@ -420,7 +456,13 @@ impl Journal {
         let mut consumed = 0usize;
         for line in tail.split_inclusive(|b| *b == b'\n') {
             if !line.ends_with(b"\n") {
-                break; // 半条记录：不动，等它写完
+                // 半条记录绝对不能再往后追加：那会把两个 JSON 粘成一行，
+                // 下一次 open 只能把整段当尾部损坏截掉。让调用方重开日志，
+                // 由 open 在锁内做“保留合法无换行记录 / 截断坏尾”的修复。
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "日志尾部有未完成记录；不要继续追加，先重新打开日志修复",
+                ));
             }
             let text = match std::str::from_utf8(line) {
                 Ok(t) => t,
@@ -547,6 +589,7 @@ impl Journal {
         };
         let mut events: Vec<Json> = Vec::new();
         let mut prev = GENESIS.to_string();
+        let mut expected_seq = 1u64;
         // split 保留最后一段：文件以 `\n` 结尾时它是空段。
         let raw: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
         let mut offset = 0usize;
@@ -584,6 +627,16 @@ impl Journal {
                     return Ok((events, Some(fail(None, format!("unparsable line: {}", e)))))
                 }
             };
+            let seq = record.u64_at("seq").unwrap_or(0);
+            if seq != expected_seq {
+                return Ok((
+                    events,
+                    Some(fail(
+                        Some(seq),
+                        format!("seq 不连续：期望 {}，实际 {}", expected_seq, seq),
+                    )),
+                ));
+            }
             let recorded_prev = record.str_at("prev").unwrap_or("").to_string();
             if recorded_prev != prev {
                 return Ok((
@@ -603,6 +656,7 @@ impl Journal {
                 ));
             }
             prev = declared;
+            expected_seq += 1;
             events.push(record);
         }
         Ok((events, None))
@@ -677,7 +731,18 @@ pub fn analyze_incomplete(events: &[Json]) -> Incomplete {
                 open.insert((writer.clone(), e.u64_at("turn").unwrap_or(0)), e.clone());
             }
             "turn/end" => {
-                open.remove(&(writer, e.u64_at("turn").unwrap_or(0)));
+                let turn_no = e.u64_at("turn").unwrap_or(0);
+                if open.remove(&(writer.clone(), turn_no)).is_none() {
+                    // resume/旧版本可能用新的 writer id 写 turn/end；按 turn
+                    // 编号兜底关闭，否则 doctor 会永远报“有未完成 turn”。
+                    if let Some(key) = open
+                        .keys()
+                        .find(|(_, t)| *t == turn_no)
+                        .cloned()
+                    {
+                        open.remove(&key);
+                    }
+                }
             }
             "prompt/snapshot" => last_snapshot = Some(e.clone()),
             "tool/start" => {

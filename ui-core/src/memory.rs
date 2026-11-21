@@ -563,7 +563,9 @@ pub fn id_for(mem_kind: MemKind, scope: &str, key: &str, text: &str) -> String {
 /// 正文的计价口径：字节数 / 4（与 `knowledge::Card::budget_tokens` 一致）。
 /// `memory/used.tokens` 用这个值。
 pub fn budget_tokens(text: &str) -> u64 {
-    (text.len() as u64) / 4
+    // 与注入预算、snapshot 计价共用同一套脚本感知估算；按字节/4 会把
+    // 中文记忆少算 1.3–1.7 倍。
+    estimate_tokens(text)
 }
 
 pub fn write_payload(draft: &Draft) -> Json {

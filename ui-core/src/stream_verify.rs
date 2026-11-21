@@ -100,11 +100,16 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
         }
         line_no += 1;
 
-        // 没有结尾换行 = 尾部撕裂（崩溃残留），不是篡改
-        if buf.last() != Some(&b'\n') {
-            corrupt!(true, Some(report.last_seq), format!("第 {} 行没有结尾换行（崩溃残留）", line_no));
-        }
-        let line = &buf[..buf.len() - 1];
+        // 没有结尾换行只可能是文件的最后一行；但“没有换行”不等于“内容坏了”。
+        // 先按正常记录校验：hash/seq/prev 都通过就是一条合法记录（只是缺换行），
+        // 由 Journal::open 负责补换行；只有校验失败才是可修复的尾部撕裂。
+        let had_newline = buf.last() == Some(&b'\n');
+        let torn_tail = !had_newline;
+        let line = if had_newline {
+            &buf[..buf.len() - 1]
+        } else {
+            &buf[..]
+        };
         if line.iter().all(|b| b.is_ascii_whitespace()) {
             good_bytes += n;
             continue;
@@ -113,7 +118,7 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
         // hash 是最后一个字段：按字节切掉 `,"hash":"…"}` 再算，不能重新序列化
         let (cut, want) = match trailing_hash(line) {
             Some(v) => v,
-            None => corrupt!(true, Some(report.last_seq), format!("第 {} 行不是完整记录", line_no)),
+            None => corrupt!(torn_tail, Some(report.last_seq), format!("第 {} 行不是完整记录", line_no)),
         };
         let mut preimage = Vec::with_capacity(cut + 1);
         preimage.extend_from_slice(&line[..cut]);
@@ -129,7 +134,7 @@ pub fn verify_stream(path: &Path) -> std::io::Result<StreamReport> {
 
         let text = match std::str::from_utf8(line) {
             Ok(t) => t,
-            Err(_) => corrupt!(true, Some(report.last_seq), format!("第 {} 行不是合法 UTF-8（撕裂）", line_no)),
+            Err(_) => corrupt!(torn_tail, Some(report.last_seq), format!("第 {} 行不是合法 UTF-8", line_no)),
         };
 
         // 只取四个字段（seq/prev/kind/callId），不解析整条事件。
@@ -451,6 +456,59 @@ fn skip_value(line: &[u8], start: usize) -> Option<usize> {
             }
             Some(i)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::Journal;
+    use crate::json::Json;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ui-stream-verify-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn two_events(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("journal.jsonl");
+        let mut j = Journal::open(&path).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("first"))]))
+            .unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("second"))]))
+            .unwrap();
+        drop(j);
+        path
+    }
+
+    #[test]
+    fn a_valid_final_record_without_newline_is_not_corruption() {
+        let dir = scratch("no-newline");
+        let path = two_events(&dir);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.trim_end_matches('\n')).unwrap();
+        let r = verify_stream(&path).unwrap();
+        assert!(r.corrupt.is_none(), "合法尾记录不能报 torn: {:?}", r.corrupt);
+        assert_eq!(r.events, 2);
+    }
+
+    #[test]
+    fn middle_damage_is_not_a_repairable_tail() {
+        let dir = scratch("middle");
+        let path = two_events(&dir);
+        let text = std::fs::read_to_string(&path).unwrap();
+        // 改第一条的正文但不重算 hash：位置在文件中间。
+        let broken = text.replacen("first", "FIRST", 1);
+        std::fs::write(&path, broken).unwrap();
+        let r = verify_stream(&path).unwrap();
+        let c = r.corrupt.expect("must detect");
+        assert!(!c.torn, "中间损坏不能标成可修复尾部");
     }
 }
 

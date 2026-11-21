@@ -195,8 +195,13 @@ fn an_unterminated_final_record_is_terminated_before_the_next_append() {
     let mut reopened = Journal::open(&path).expect("未终止的最后一条记录不应让日志打不开");
     assert_eq!(
         reopened.events.len(),
-        2,
-        "已经校验通过的两条记录都必须保留"
+        1,
+        "Journal::open 只保留最后一条事件；关键是第二条不能被删"
+    );
+    assert_eq!(
+        reopened.events[0].str_at("text"),
+        Some("second"),
+        "合法的无换行尾记录必须保留，不能被当成撕裂截掉"
     );
     reopened
         .append("note", Json::obj(vec![("text", Json::from("third"))]))
@@ -204,6 +209,7 @@ fn an_unterminated_final_record_is_terminated_before_the_next_append() {
 
     let events = Journal::load(&path).expect("修好结尾后整条哈希链必须仍然可验证");
     assert_eq!(events.len(), 3, "第三条记录不能把第二条一起弄丢：{:?}", events);
+    assert_eq!(events[1].str_at("text"), Some("second"));
     assert_eq!(events[2].str_at("text"), Some("third"));
 }
 
@@ -339,6 +345,7 @@ fn zero_limit_means_no_spending_not_unlimited() {
         tool_calls: 0,
         wall_ms: 0,
         usd: 0.0,
+        usd_per_mtok: 0.0,
         max_steps: 24,
     });
     assert!(
@@ -663,6 +670,26 @@ fn a_symlink_cannot_smuggle_reads_out_of_the_workspace() {
         "符号链接指向工作区外时必须拒绝"
     );
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[cfg(unix)]
+#[test]
+fn nonexistent_child_of_a_symlinked_protected_dir_is_still_protected() {
+    let tmp = scratch("protected-symlink");
+    let ws = tmp.join("ws");
+    fs::create_dir_all(ws.join(".git").join("hooks")).unwrap();
+    std::os::unix::fs::symlink(".git", ws.join("g")).unwrap();
+
+    let target = ws.join("g").join("hooks").join("pre-commit");
+    assert!(
+        ui_core::protected::is_private_real_path(&ws, &target),
+        "g -> .git 的不存在子文件必须仍被判为受保护"
+    );
+    assert!(
+        ui_core::protected::is_protected_real_path(&ws, &target),
+        "is_protected_real_path 也必须解析到最近存在祖先"
+    );
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[cfg(unix)]

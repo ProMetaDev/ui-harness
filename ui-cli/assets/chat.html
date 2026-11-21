@@ -2257,6 +2257,8 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   }
 
   function handle(ev) {
+    // 切换会话后，旧会话里还在跑的 turn 仍可能广播事件；不要把它们画到新会话。
+    if (ev.session && window.__uiSessionName && ev.session !== window.__uiSessionName && ev.type !== 'session-switched') return;
     // 断线重连时服务端可能重发历史：按 seq 去重，页面不会出现两遍
     if (ev.seq) {
       if (ev.seq <= lastSeq) return;

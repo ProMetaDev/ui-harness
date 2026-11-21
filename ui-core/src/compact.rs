@@ -169,17 +169,28 @@ pub fn compact_with(
         return None; // 太短，折叠没意义
     }
 
+    // 当前轮的 user message 是任务合同：路径、约束、“不要动 X”都在里面。
+    // 不能因为它滑出 keep_recent 窗口就被折成 40 字摘要。折叠范围最多到
+    // 最后一条 user message 之前。
     let cut = history.len() - keep_recent;
+    let first_user = first_user_index(history);
     let anchor = if policy.keep_first_user {
-        first_user_index(history).filter(|i| *i < cut)
+        first_user.filter(|i| *i < cut)
     } else {
         None
     };
+    // 当前轮 user message 必须原样保留，但它后面的工具结果可以折叠。
+    // 不能把 cut 直接压到 user 下标：那会把当前轮所有工具结果都留下，
+    // 等于拒绝压缩；也不能把它折进 40 字摘要。
+    let protect = history
+        .iter()
+        .rposition(|m| m.role == "user")
+        .filter(|i| *i < cut && Some(*i) != anchor);
 
     let dropped: Vec<Message> = history
         .iter()
         .enumerate()
-        .filter(|(i, _)| Some(*i) != anchor && *i < cut)
+        .filter(|(i, _)| Some(*i) != anchor && Some(*i) != protect && *i < cut)
         .map(|(_, m)| m.clone())
         .collect();
 
@@ -198,8 +209,11 @@ pub fn compact_with(
             Err(e) => (digest, "digest", Some(e)),
         },
     };
-    let mut next: Vec<Message> = Vec::with_capacity(keep_recent + 2);
+    let mut next: Vec<Message> = Vec::with_capacity(keep_recent + 3);
     if let Some(i) = anchor {
+        next.push(history[i].clone());
+    }
+    if let Some(i) = protect {
         next.push(history[i].clone());
     }
     next.push(Message::note(digest.clone()));
@@ -325,7 +339,7 @@ mod tests {
             h.push(agent(&"a".repeat(200)));
             h.push(tool("fs_read", true, &"b".repeat(200)));
         }
-        let out = compact(
+        compact(
             &mut h,
             &CompactPolicy {
                 max_history_tokens: 300,
@@ -335,9 +349,8 @@ mod tests {
         )
         .expect("compact");
         assert!(
-            out.digest.contains("小林"),
-            "摘要丢了用户事实: {}",
-            out.digest
+            h.iter().any(|m| m.content.contains("小林")),
+            "当前轮用户事实必须原样留在历史里，而不是只进 40 字摘要"
         );
     }
 
