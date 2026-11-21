@@ -584,87 +584,32 @@ impl Journal {
     }
 
     /// Read-only view of a journal, verifying every link in the chain.
+    ///
+    /// 判定必须与 `stream_verify` 完全一致：后者按原始字节校验 hash，
+    /// 这里如果重新序列化再算 hash，就会出现“verify 说坏、read 说好”
+    /// （或者反过来）的两套事实。这里先走同一个流式 verifier，再只解析
+    /// 它确认过的那段字节。
     pub fn read(path: impl AsRef<Path>) -> io::Result<(Vec<Json>, Option<Corrupt>)> {
-        // 按字节读：崩溃可能把一个多字节 UTF-8 字符撕成两半，`read_to_string`
-        // 会让整份日志打不开——尾部撕裂的修复路径直接失效。
-        let data = match fs::read(path.as_ref()) {
+        let path = path.as_ref();
+        let report = crate::stream_verify::verify_stream(path)?;
+        let data = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
             Err(e) => return Err(e),
         };
+        let end = report.good_bytes.min(data.len());
         let mut events: Vec<Json> = Vec::new();
-        let mut prev = GENESIS.to_string();
-        let mut expected_seq = 1u64;
-        // split 保留最后一段：文件以 `\n` 结尾时它是空段。
-        let raw: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
-        let mut offset = 0usize;
-        for (idx, line) in raw.iter().enumerate() {
-            let line_start = offset;
-            offset += line.len();
-            let terminated = idx + 1 < raw.len();
-            if terminated {
-                offset += 1;
-            }
+        for line in data[..end].split(|b| *b == b'\n') {
             if line_is_blank(line) {
-                // 空行不算记录，但属于已验证前缀，截断时要保留。
                 continue;
             }
-            let is_last = raw[idx + 1..].iter().all(|l| line_is_blank(l));
-            let fail = |seq: Option<u64>, reason: String| Corrupt {
-                seq,
-                reason,
-                torn: is_last,
-                good_bytes: line_start,
-            };
-
-            let text = match std::str::from_utf8(line) {
-                Ok(t) => t,
-                Err(e) => {
-                    return Ok((
-                        events,
-                        Some(fail(None, format!("invalid utf-8 in line: {}", e))),
-                    ))
+            if let Ok(text) = std::str::from_utf8(line) {
+                if let Ok(event) = json::parse(text.trim()) {
+                    events.push(event);
                 }
-            };
-            let record = match json::parse(text) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Ok((events, Some(fail(None, format!("unparsable line: {}", e)))))
-                }
-            };
-            let seq = record.u64_at("seq").unwrap_or(0);
-            if seq != expected_seq {
-                return Ok((
-                    events,
-                    Some(fail(
-                        Some(seq),
-                        format!("seq 不连续：期望 {}，实际 {}", expected_seq, seq),
-                    )),
-                ));
             }
-            let recorded_prev = record.str_at("prev").unwrap_or("").to_string();
-            if recorded_prev != prev {
-                return Ok((
-                    events,
-                    Some(fail(record.u64_at("seq"), "broken hash chain".to_string())),
-                ));
-            }
-            let declared = record.str_at("hash").unwrap_or("").to_string();
-            let mut without_hash = record.clone();
-            if let Json::Obj(items) = &mut without_hash {
-                items.retain(|(k, _)| k != "hash");
-            }
-            if sha256::hex(without_hash.to_compact().as_bytes()) != declared {
-                return Ok((
-                    events,
-                    Some(fail(record.u64_at("seq"), "hash mismatch".to_string())),
-                ));
-            }
-            prev = declared;
-            expected_seq += 1;
-            events.push(record);
         }
-        Ok((events, None))
+        Ok((events, report.corrupt))
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Vec<Json>> {
