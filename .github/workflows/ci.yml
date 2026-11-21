@@ -174,7 +174,7 @@ jobs:
           $scenario = Join-Path $ws "scenario.json"
           @'
           {"model":"scripted","steps":[
-            {"content":"run","toolCalls":[{"name":"shell","args":{"command":"cmd /C echo job-ok"}}]},
+            {"content":"run","toolCalls":[{"name":"shell","args":{"command":"cmd /C \"echo job-ok & start /b ping -n 30 127.0.0.1\""}}]},
             {"content":"done"}]}
           '@ | Set-Content -Encoding utf8 $scenario
 
@@ -182,6 +182,7 @@ jobs:
           $out | Out-String | Write-Host
           if ($LASTEXITCODE -ne 0) { throw "ui run failed: $LASTEXITCODE" }
           if (($out | Out-String) -notmatch "job-ok") { throw "shell output missing" }
-          # 进程树不应在命令结束后继续存活。
-          $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq "cmd.exe" -and $_.StartTime -gt (Get-Date).AddMinutes(-2) }
-          if ($left) { throw "leaked cmd.exe process(es): $($left.Id -join ',')" }
+          # start /b 的 ping 孙进程必须在 shell 返回时被 Job 一起收掉。
+          Start-Sleep -Milliseconds 300
+          $left = Get-Process ping -ErrorAction SilentlyContinue
+          if ($left) { throw "leaked ping process(es): $($left.Id -join ',')" }
