@@ -94,6 +94,12 @@ struct Hub {
     busy: AtomicBool,
 }
 
+fn hub_lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // 一个 panic 不该把整个 Web 服务永久变成 500：锁里的状态可能只是
+    // 半更新的，但继续提供只读/后续任务比全部 unwrap 连锁失败好。
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Hub {
     /// 网页端**唯一**的脱敏点。
     ///
@@ -116,11 +122,11 @@ impl Hub {
         }
         // 每个事件带上产生它的会话：/snapshot 和前端据此丢弃切换前/切换后
         // 串进来的旧会话事件。
-        let session = self.session.lock().unwrap().clone();
+        let session = hub_lock(&self.session).clone();
         if !session.is_empty() {
             event.set("session", Json::from(session.as_str()));
         }
-        let mut log = self.log.lock().unwrap();
+        let mut log = hub_lock(&self.log);
         let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         event.set("seq", Json::from(n));
         event.set("ts", Json::from(ui_core::time::now_ms()));
@@ -132,20 +138,20 @@ impl Hub {
             let excess = log.len() - MAX_HUB_LOG;
             log.drain(0..excess);
         }
-        let mut subs = self.subs.lock().unwrap();
+        let mut subs = hub_lock(&self.subs);
         subs.retain(|tx| tx.send(line.clone()).is_ok());
     }
 
     /// 原子地复制待补事件并注册实时订阅。调用方释放锁后再写 backlog。
     fn subscribe(&self, since: u64) -> (Vec<String>, std::sync::mpsc::Receiver<String>) {
-        let log = self.log.lock().unwrap();
+        let log = hub_lock(&self.log);
         let backlog = log
             .iter()
             .filter(|(n, _)| *n > since)
             .map(|(_, line)| line.clone())
             .collect();
         let (tx, rx) = channel::<String>();
-        self.subs.lock().unwrap().push(tx);
+        hub_lock(&self.subs).push(tx);
         (backlog, rx)
     }
 
@@ -293,7 +299,7 @@ impl Hub {
     /// 先放锁再 push——`push` 拿的是 log/subs 两把锁，别在 approval 的
     /// 临界区里广播，锁顺序留一条就够（log → subs）。
     fn clear_approval(&self) {
-        let pending = self.approval.lock().unwrap().take();
+        let pending = hub_lock(&self.approval).take();
         if let Some(pending) = pending {
             self.push(Json::obj(vec![
                 ("type", Json::from("approval-stale")),
@@ -696,19 +702,19 @@ pub fn serve(
                     None => continue,
                 };
                 hub.busy.store(true, Ordering::SeqCst);
-                agent.mode = *hub.mode.lock().unwrap();
+                agent.mode = *hub_lock(&hub.mode);
                 // 会话切换跟着任务走：任务入队时记录了它属于哪个会话。
                 // 用全局 pending 值会把切换前排队的旧任务一起搬到新会话。
                 let task_session = task.session.clone();
                 if !task_session.is_empty()
-                    && task_session != *hub.session.lock().unwrap()
+                    && task_session != *hub_lock(&hub.session)
                 {
                     let path = session_file(&hub.workspace, &task_session);
                     match agent.switch_journal(&path) {
                         Ok(()) => {
-                            *hub.session.lock().unwrap() = task_session.clone();
+                            *hub_lock(&hub.session) = task_session.clone();
                             // 只清掉与本次任务相同的 pending，避免把更晚的切换吞掉。
-                            let mut pending = hub.pending_session.lock().unwrap();
+                            let mut pending = hub_lock(&hub.pending_session);
                             if pending.as_deref() == Some(task_session.as_str()) {
                                 *pending = None;
                             }
@@ -719,7 +725,7 @@ pub fn serve(
                             ]));
                         }
                         Err(e) => {
-                            *hub.active.lock().unwrap() = None;
+                            *hub_lock(&hub.active) = None;
                             hub.busy.store(false, Ordering::SeqCst);
                             hub.push(Json::obj(vec![
                                 ("type", Json::from("error")),
@@ -740,7 +746,7 @@ pub fn serve(
                 // 刚认领就被撤：`take_queued` 已经把它记成 active，所以这一路也会走到这儿。
                 // 同样是"没开始"，账要照记，active 要清掉，否则停止按钮下次点到旧任务。
                 if task.cancel.is_cancelled() {
-                    *hub.active.lock().unwrap() = None;
+                    *hub_lock(&hub.active) = None;
                     let _ = agent.log_event(
                         "turn/skipped",
                         Json::obj(vec![
@@ -781,7 +787,7 @@ pub fn serve(
                     Err(_) => {
                         // 一个坏工具/坏插件/坏模型输出不能把整个 worker 带走。
                         // 清理 active/approval/busy，留下事件，继续接下一轮。
-                        *hub.active.lock().unwrap() = None;
+                        *hub_lock(&hub.active) = None;
                         hub.clear_approval();
                         hub.busy.store(false, Ordering::SeqCst);
                         hub.push(Json::obj(vec![
@@ -792,7 +798,7 @@ pub fn serve(
                         continue;
                     }
                 };
-                *hub.active.lock().unwrap() = None;
+                *hub_lock(&hub.active) = None;
                 // 这一轮结束后不该再有人能回答它的审批
                 hub.clear_approval();
                 match report {
@@ -1605,11 +1611,8 @@ fn script_safe_json(json: &str) -> String {
 
 /// `/snapshot` 的完整页面：把事件日志与启动信息注入静态 HTML。
 fn snapshot_page(hub: &Hub) -> String {
-    let current = hub.session.lock().unwrap().clone();
-    let boot = hub
-        .log
-        .lock()
-        .unwrap()
+    let current = hub_lock(&hub.session).clone();
+    let boot = hub_lock(&hub.log)
         .iter()
         .filter(|(_, line)| {
             // 旧日志/测试事件没有 session 字段：保留，避免把兼容格式全过滤掉。
@@ -2480,6 +2483,18 @@ mod tests {
         }
         assert!(root.contains("\"src\""), "正常目录仍要能列出: {root}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn poisoning_the_hub_log_does_not_kill_future_pushes() {
+        let hub = Arc::new(Hub::default());
+        let h = Arc::clone(&hub);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = h.log.lock().unwrap();
+            panic!("intentional lock poison");
+        }));
+        hub.push(Json::obj(vec![("type", Json::from("note"))]));
+        assert_eq!(hub_lock(&hub.log).len(), 1);
     }
 
     #[test]

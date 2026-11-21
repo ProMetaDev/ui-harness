@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::time::Duration;
 
 use crate::json::{self, Json};
@@ -152,7 +152,9 @@ impl Hub {
                 .map_err(|e| format!("启动 MCP server {} 失败: {}", name, e))?;
             let stdin = child.stdin.take().ok_or("拿不到 MCP stdin")?;
             let stdout: ChildStdout = child.stdout.take().ok_or("拿不到 MCP stdout")?;
-            let (tx, rx) = channel::<String>();
+            // 有界通道：server 疯狂输出时最多堆 100 行，不能把整段输出
+            // 无上限塞进内存。
+            let (tx, rx) = sync_channel::<String>(100);
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines() {

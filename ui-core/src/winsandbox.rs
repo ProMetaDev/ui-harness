@@ -25,8 +25,18 @@ extern "system" {
     fn CloseHandle(h: *mut c_void) -> c_int;
 }
 
+// 用 NtResumeProcess 而不是 ResumeThread：std::process::Child 不暴露主线程
+// 句柄，而 CREATE_SUSPENDED 挂起的正是主线程。NtResumeProcess 是 ntdll 的
+// 稳定接口，按进程恢复所有线程，正好覆盖这个场景。
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtResumeProcess(process: *mut c_void) -> i32;
+}
+
 const PROCESS_SET_QUOTA: u32 = 0x0100;
 const PROCESS_TERMINATE: u32 = 0x0001;
+const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
 
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: c_int = 9;
 const JOB_OBJECT_BASIC_UI_RESTRICTIONS_CLASS: c_int = 4;
@@ -190,6 +200,26 @@ impl Job {
             }
 
             Ok(Job { handle })
+        }
+    }
+
+    /// 恢复一个用 CREATE_SUSPENDED 启动的进程。必须在 AssignProcessToJobObject
+    /// 成功之后调用；调用方负责在失败时 kill/terminate。
+    pub fn resume(pid: u32) -> io::Result<()> {
+        unsafe {
+            let proc = OpenProcess(PROCESS_SUSPEND_RESUME, 1, pid);
+            if proc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let status = NtResumeProcess(proc);
+            CloseHandle(proc);
+            if status < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("NtResumeProcess failed: 0x{:08x}", status as u32),
+                ));
+            }
+            Ok(())
         }
     }
 

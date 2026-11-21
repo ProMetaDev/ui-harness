@@ -1798,7 +1798,27 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                 )?;
                 needs_human.push(format!("{}: 工具 {} 已不存在", call_id, tool_name));
             }
-            Some((_, run_fn, true)) => {
+            Some((effects_fn, run_fn, true)) => {
+                let effects = effects_fn(&args, &ctx);
+                let verdict = agent.policy.decide(&effects);
+                if verdict.decision != Decision::Allow {
+                    agent.log_event(
+                        "effect/unknown",
+                        Json::obj(vec![
+                            ("callId", Json::from(call_id.as_str())),
+                            ("tool", Json::from(tool_name.as_str())),
+                            ("reason", Json::from(format!(
+                                "可重放工具当前策略不允许重跑：{}",
+                                verdict.reason
+                            ))),
+                        ]),
+                    )?;
+                    needs_human.push(format!(
+                        "{}: {} 当前策略不是 allow，未重放",
+                        call_id, tool_name
+                    ));
+                    continue;
+                }
                 let result = run_fn(&args, &ctx);
                 agent.log_event(
                     "effect/rerun",
@@ -2207,6 +2227,34 @@ mod tests {
                 .count(),
             2,
             "only the first two calls may actually execute"
+        );
+    }
+
+    #[test]
+    fn usd_budget_is_charged_from_provider_usage() {
+        let ws = workspace("usd-budget");
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![Json::obj(vec![
+                    ("content", Json::from("done")),
+                    ("usageTokens", Json::from(1_000_000u64)),
+                ])]),
+            ),
+        ]);
+        let limits = Limits {
+            usd: 0.5,
+            usd_per_mtok: 1.0,
+            ..Limits::default()
+        };
+        let mut agent = Agent::new(journal, model(&script), ws, limits);
+        let err = agent.run_turn("花钱", &mut NullHooks).unwrap_err();
+        assert!(
+            matches!(err, AgentError::Budget(_)),
+            "1M tokens × $1/M 必须超过 $0.5 预算，got {:?}",
+            err
         );
     }
 

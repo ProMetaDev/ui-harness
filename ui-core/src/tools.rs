@@ -648,6 +648,11 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
         let mut c = Command::new("cmd");
         // raw_arg：命令里带引号时，Command::arg 的转义会让 cmd.exe 解析失败
         c.arg("/C").raw_arg(&command);
+        // 先挂起再 spawn：给 Job Object assign 留出窗口，避免 start /b 的
+        // 孙进程在 assign 之前逃出 job。只有启用沙箱时才挂起，否则没人恢复。
+        if ctx.sandbox.fs {
+            c.creation_flags(crate::winsandbox::CREATE_SUSPENDED);
+        }
         c
     };
     #[cfg(not(windows))]
@@ -755,6 +760,19 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     let job = if ctx.sandbox.fs {
         match crate::winsandbox::Job::assign(child.id(), &crate::winsandbox::Limits::from_env()) {
             Ok(j) => {
+                // assign 成功后才恢复主线程；assign 失败时子进程仍挂起，直接杀。
+                if let Err(e) = crate::winsandbox::Job::resume(child.id()) {
+                    j.terminate();
+                    let _ = child.kill();
+                    kill_tree(child.id());
+                    let _ = child.wait();
+                    return ToolResult {
+                        ok: false,
+                        content: String::new(),
+                        error: Some(format!("Windows Job 已建立但恢复进程失败: {}", e)),
+                        meta: Json::obj(vec![("sandbox", Json::from("resume-failed"))]),
+                    };
+                }
                 sandbox_label = format!("job:{}", child.id());
                 Some(j)
             }
@@ -843,11 +861,14 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     let code = status.and_then(|s| s.code()).unwrap_or(-1);
     ToolResult {
         ok: code == 0,
-        content: cap(if combined.is_empty() {
-            "(无输出)"
+        // 不在工具层再 cap 到 16KB：那会把 spill 的“全文”也变成截断文本。
+        // 捕获阶段已有 8MiB 硬上限，完整内容交给 Agent 的 retain_tool_output
+        // 决定“进上下文多少、落盘多少”。
+        content: if combined.is_empty() {
+            "(无输出)".to_string()
         } else {
-            &combined
-        }),
+            combined
+        },
         error: if code == 0 {
             None
         } else {
