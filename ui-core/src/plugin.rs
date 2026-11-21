@@ -151,7 +151,15 @@ impl Set {
         out
     }
 
-    pub fn call(&self, plugin: &str, tool: &str, args: &Json, scrub_env: bool) -> Result<String, String> {
+    pub fn call(
+        &self,
+        plugin: &str,
+        tool: &str,
+        args: &Json,
+        scrub_env: bool,
+        workspace: &Path,
+        sandbox: &crate::sandbox::Config,
+    ) -> Result<String, String> {
         let p = self
             .plugins
             .iter()
@@ -181,6 +189,21 @@ impl Set {
                 if !crate::secrets::key_is_secret(&k.to_string_lossy()) {
                     cmd.env(k, v);
                 }
+            }
+        }
+        // 插件是本地进程，和 shell 一样必须有沙箱；Linux 用 Landlock。
+        // Windows 的 Job Object 由 shell 路径单独处理，插件这里至少不继承 env。
+        #[cfg(target_os = "linux")]
+        if sandbox.fs {
+            use std::os::unix::process::CommandExt;
+            let ws = workspace.to_string_lossy().to_string();
+            match crate::sandbox::pre_exec(&ws, sandbox) {
+                Ok(hook) => {
+                    unsafe {
+                        cmd.pre_exec(hook);
+                    }
+                }
+                Err(e) => return Err(format!("插件沙箱不可用: {}", e)),
             }
         }
         let mut child = cmd

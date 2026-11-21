@@ -1009,7 +1009,14 @@ pub fn registry() -> Vec<Tool> {
                     None => return ToolResult::err("没有配置插件（需 --plugins FILE 显式加载）"),
                 };
                 let payload = args.get("args").cloned().unwrap_or(Json::Obj(vec![]));
-                match set.call(plugin, tool, &payload, ctx.env_scrub) {
+                match set.call(
+                    plugin,
+                    tool,
+                    &payload,
+                    ctx.env_scrub,
+                    &ctx.workspace,
+                    &ctx.sandbox,
+                ) {
                     Ok(text) => ToolResult::ok(text),
                     Err(e) => ToolResult::err(e),
                 }
