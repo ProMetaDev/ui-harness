@@ -1033,35 +1033,6 @@ impl Agent {
                 return Err(AgentError::Budget(e));
             }
             self.log_event("prompt/snapshot", snapshot.to_json())?;
-            // 只在第一份快照落盘之后写一次：一轮一条记录，不按步重复。
-            // 每条命中各一条 `memory/used`（字段只有 id/reason/tokens）。
-            if !memory_logged && !self.memory_hits.is_empty() {
-                let used: Vec<(String, String, u64)> = self
-                    .memory_hits
-                    .iter()
-                    .map(|hit| {
-                        (
-                            hit.entry.id.clone(),
-                            hit.reason.clone(),
-                            crate::memory::budget_tokens(&hit.entry.text),
-                        )
-                    })
-                    .collect();
-                for (id, reason, tokens) in used {
-                    let payload = crate::memory::used_payload(&id, &reason, tokens);
-                    self.log_event("memory/used", payload.clone())?;
-                    // 网页端靠这条看见"这次用了哪条记忆"。`on_event` 是通用钩子：
-                    // 新增事件子类型不需要再改 Hooks trait。
-                    hooks.on_event(&Json::obj(vec![
-                        ("kind", Json::from("memory/used")),
-                        ("payload", payload),
-                    ]));
-                    self.memory
-                        .record_used(&id, &reason, tokens)
-                        .map_err(AgentError::Memory)?;
-                }
-                memory_logged = true;
-            }
             hooks.on_snapshot(&snapshot);
             hooks.on_budget(
                 self.budget.used(Dim::Tokens) as u64,
@@ -1106,6 +1077,35 @@ impl Agent {
                     return Err(e);
                 }
             };
+            // 记忆命中只有在模型真的收到这一份快照后才记账。之前放在
+            // call_model 之前：取消/模型失败也会写 memory/used，命中计数
+            // 会奖励一份模型从未读到的上下文。
+            if !memory_logged && !self.memory_hits.is_empty() {
+                let used: Vec<(String, String, u64)> = self
+                    .memory_hits
+                    .iter()
+                    .map(|hit| {
+                        (
+                            hit.entry.id.clone(),
+                            hit.reason.clone(),
+                            crate::memory::budget_tokens(&hit.entry.text),
+                        )
+                    })
+                    .collect();
+                for (id, reason, tokens) in used {
+                    let payload = crate::memory::used_payload(&id, &reason, tokens);
+                    self.log_event("memory/used", payload.clone())?;
+                    hooks.on_event(&Json::obj(vec![
+                        ("kind", Json::from("memory/used")),
+                        ("payload", payload),
+                    ]));
+                    self.memory
+                        .record_used(&id, &reason, tokens)
+                        .map_err(AgentError::Memory)?;
+                }
+                memory_logged = true;
+            }
+
             if self.active_cancel.is_cancelled() {
                 return self.finish(turn, "cancelled", steps, tool_calls, last_text);
             }

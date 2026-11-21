@@ -1496,6 +1496,19 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     cmd.arg("--").arg(pattern).arg(path);
     cmd.current_dir(&ctx.workspace);
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(target_os = "linux")]
+    if ctx.sandbox.fs {
+        use std::os::unix::process::CommandExt;
+        let ws = ctx.workspace.to_string_lossy().to_string();
+        match crate::sandbox::pre_exec(&ws, &ctx.sandbox) {
+            Ok(hook) => {
+                unsafe {
+                    cmd.pre_exec(hook);
+                }
+            }
+            Err(e) => return ToolResult::err(format!("grep 沙箱不可用: {}", e)),
+        }
+    }
     if ctx.env_scrub {
         let keep: Vec<(OsString, OsString)> = std::env::vars_os().collect();
         cmd.env_clear();

@@ -1660,7 +1660,7 @@ fn attach_mcp(agent: &mut Agent, args: &Args) -> Result<(), String> {
     };
     let text = std::fs::read_to_string(path).map_err(|e| format!("读 MCP 配置失败: {}", e))?;
     let cfg = json::parse(&text).map_err(|e| format!("MCP 配置不是 JSON: {}", e))?;
-    let hub = ui_core::mcp::Hub::start(&cfg)?;
+    let hub = ui_core::mcp::Hub::start(&cfg, &agent.workspace, &agent.sandbox)?;
     ui_core::prompt::set_extra_tools(hub.catalog());
     agent.mcp = Some(std::sync::Arc::new(std::sync::Mutex::new(hub)));
     Ok(())

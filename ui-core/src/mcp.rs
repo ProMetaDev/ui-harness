@@ -98,7 +98,11 @@ pub struct Hub {
 
 impl Hub {
     /// 按配置拉起 server 并握手。任何一个失败都返回错误——静默降级会让人以为工具在，其实不在。
-    pub fn start(config: &Json) -> Result<Hub, String> {
+    pub fn start(
+        config: &Json,
+        workspace: &std::path::Path,
+        sandbox: &crate::sandbox::Config,
+    ) -> Result<Hub, String> {
         let list = config.arr_at("servers").cloned().unwrap_or_default();
         if list.is_empty() {
             return Err("MCP 配置里没有 servers".to_string());
@@ -128,6 +132,19 @@ impl Hub {
             for (k, v) in keep {
                 if !crate::secrets::key_is_secret(&k.to_string_lossy()) {
                     cmd.env(k, v);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if sandbox.fs {
+                use std::os::unix::process::CommandExt;
+                let ws = workspace.to_string_lossy().to_string();
+                match crate::sandbox::pre_exec(&ws, sandbox) {
+                    Ok(hook) => {
+                        unsafe {
+                            cmd.pre_exec(hook);
+                        }
+                    }
+                    Err(e) => return Err(format!("MCP 沙箱不可用: {}", e)),
                 }
             }
             let mut child = cmd
