@@ -190,7 +190,10 @@ impl Set {
         };
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // 插件和 shell 一样以 workspace 为 cwd：相对路径 `out.txt` 必须
+            // 落进工作区，而不是进程启动目录（否则会被 Landlock 拒绝）。
+            .current_dir(workspace);
         #[cfg(windows)]
         if sandbox.fs {
             use std::os::windows::process::CommandExt;
