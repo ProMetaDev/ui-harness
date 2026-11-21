@@ -13,6 +13,11 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
 > 用 1.0 是给用户错误信号。版本号规则与 1.0 的准入条件见 [docs/34](docs/34-versioning.md)。
 
+企业单租户的长期路线、Phase 0 架构和运维 runbook 在
+[docs/35](docs/35-enterprise-roadmap.md) / [docs/36](docs/36-enterprise-phase0.md) /
+[docs/37](docs/37-enterprise-runbook.md)。这些是**目标设计**，不是已交付的企业能力；
+门禁只验证设计契约齐全，不把文档当成实现。
+
 ## 它解决什么问题
 
 大多数 coding agent 的日志是**调试输出**：出事之后才知道它做过什么，而且只能看它自己愿意说的部分。
