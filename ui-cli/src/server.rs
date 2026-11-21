@@ -53,6 +53,8 @@ struct Hub {
     log: Mutex<Vec<(u64, String)>>,
     /// 事件序号
     seq: std::sync::atomic::AtomicU64,
+    /// 当前 log 里最早还保留的 seq；客户端 since 更旧时明确告知丢了窗口
+    min_seq: std::sync::atomic::AtomicU64,
     /// 进程启动标识：客户端重连时据此发现服务端已经重启、seq 从 0 重来
     epoch: u64,
     /// 每个 SSE 连接一个发送端
@@ -115,6 +117,11 @@ impl Hub {
 
     fn clear_log(&self) {
         hub_lock(&self.log).clear();
+        self.min_seq.store(0, Ordering::SeqCst);
+    }
+
+    fn min_seq(&self) -> u64 {
+        self.min_seq.load(Ordering::SeqCst)
     }
 
     fn push(&self, mut event: Json) {
@@ -141,6 +148,9 @@ impl Hub {
         if log.len() > MAX_HUB_LOG {
             let excess = log.len() - MAX_HUB_LOG;
             log.drain(0..excess);
+        }
+        if let Some((first, _)) = log.first() {
+            self.min_seq.store(*first, Ordering::SeqCst);
         }
         let mut subs = hub_lock(&self.subs);
         subs.retain(|tx| tx.send(line.clone()).is_ok());
@@ -1079,7 +1089,12 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         ("GET", "/bg/light.jpg") => image(&mut stream, BG_LIGHT, "image/jpeg"),
         // 静态快照：事件内嵌，不开 SSE。可分享、可截图、可离线打开。
         ("GET", "/snapshot") => {
-            let page = snapshot_page(&hub);
+            let limit = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0);
+            let page = snapshot_page(&hub, limit);
             html(&mut stream, &page)
         }
         ("GET", "/api/ready") => {
@@ -1330,6 +1345,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             let state = vec![
                 ("busy", Json::Bool(hub.busy.load(Ordering::SeqCst))),
                 ("seq", Json::from(hub.seq.load(Ordering::SeqCst))),
+                ("minSeq", Json::from(hub.min_seq())),
                 ("epoch", Json::from(hub.epoch)),
                 (
                     "taskId",
@@ -1690,9 +1706,9 @@ fn script_safe_json(json: &str) -> String {
 }
 
 /// `/snapshot` 的完整页面：把事件日志与启动信息注入静态 HTML。
-fn snapshot_page(hub: &Hub) -> String {
+fn snapshot_page(hub: &Hub, limit: Option<usize>) -> String {
     let current = hub_lock(&hub.session).clone();
-    let boot = hub_lock(&hub.log)
+    let mut lines: Vec<String> = hub_lock(&hub.log)
         .iter()
         .filter(|(_, line)| {
             // 旧日志/测试事件没有 session 字段：保留，避免把兼容格式全过滤掉。
@@ -1705,8 +1721,12 @@ fn snapshot_page(hub: &Hub) -> String {
             }
         })
         .map(|(_, line)| line.clone())
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
+    if let Some(limit) = limit {
+        let start = lines.len().saturating_sub(limit.min(5_000));
+        lines.drain(0..start);
+    }
+    let boot = lines.join(",");
     let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
     let inject = format!(
         "<script>window.__UI_BOOT__=[{}];window.__UI_BUSY__={};window.__UI_READY__={};</script>\n</head>",
@@ -1806,6 +1826,20 @@ fn sse(stream: &mut TcpStream, hub: Arc<Hub>, query: &str) -> std::io::Result<()
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
     )?;
     let (backlog, rx) = hub.subscribe(since);
+    // since 早于当前保留窗口时，先明确告诉客户端“前面已经丢了”，
+    // 不要让页面以为这就是完整历史。
+    let min_seq = hub.min_seq();
+    if min_seq > 0 && since + 1 < min_seq {
+        let notice = Json::obj(vec![
+            ("type", Json::from("events-dropped")),
+            ("from", Json::from(since + 1)),
+            ("to", Json::from(min_seq - 1)),
+            ("minSeq", Json::from(min_seq)),
+        ]);
+        if write!(stream, "data: {}\n\n", notice.to_compact()).is_err() {
+            return Ok(());
+        }
+    }
     for line in backlog {
         if write!(stream, "data: {}\n\n", line).is_err() {
             return Ok(());
@@ -2563,6 +2597,24 @@ mod tests {
         }
         assert!(root.contains("\"src\""), "正常目录仍要能列出: {root}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn hub_log_is_capped_and_reports_the_missing_window() {
+        let hub = Arc::new(Hub::default());
+        for i in 0..5_050u64 {
+            hub.push(Json::obj(vec![
+                ("type", Json::from("note")),
+                ("i", Json::from(i)),
+            ]));
+        }
+        let log = hub_lock(&hub.log);
+        assert_eq!(log.len(), 5_000);
+        let first = log.first().map(|(n, _)| *n).unwrap();
+        let last = log.last().map(|(n, _)| *n).unwrap();
+        assert_eq!(first, 51);
+        assert_eq!(last, 5_050);
+        assert_eq!(hub.min_seq(), first);
     }
 
     #[test]

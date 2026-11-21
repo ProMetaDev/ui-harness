@@ -27,7 +27,7 @@
 | **权限边界** | 策略 + realpath + 观测式效果 + **Linux Landlock 写沙箱**（fail closed）；Windows 无对等机制 | **90%** |
 | **隐私与落账** | 落账前脱敏门 ＋ 来源扣留 ＋ 两个落盘目录（0600/0700）＋ 保留期与 run 边界自动清 ＋ **网页端同门脱敏**（SSE/快照/工具全文库）＋ `ui spill`/`ui secrets`/`doctor` 三处可见；缺读路径拦截 | **88%** |
 | **多 provider** | 中继/DeepSeek 都能用；**前沿模型已能真正调工具** + 失败重试 | **78%** |
-| **工具面** | 内置清单只有一份：`ui-core/src/tools.rs:942` 的 `registry()`；Windows 无 grep 时退化；无 LSP | **70%** |
+| **工具面** | 内置清单只有一份：`ui-core/src/tools.rs:883` 的 `registry()`；Windows 无 grep 时退化；无 LSP | **70%** |
 | **多智能体** | 拆解→隔离→验收→不自动落地；缺 DAG/仲裁 | **70%** |
 | **工程化/分发** | CI 双 job、发布包 + sha256 自校验、bootstrap/preflight/密钥扫描 | **70%** |
 | **文档** | README（使用者向）+ `docs/` 三十余篇设计笔记；隐私与沙箱的说法由 `tools/verify_docs.sh` 对着代码查 | **70%** |

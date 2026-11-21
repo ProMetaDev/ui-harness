@@ -591,25 +591,94 @@ impl Journal {
     /// 它确认过的那段字节。
     pub fn read(path: impl AsRef<Path>) -> io::Result<(Vec<Json>, Option<Corrupt>)> {
         let path = path.as_ref();
-        let report = crate::stream_verify::verify_stream(path)?;
         let data = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
             Err(e) => return Err(e),
         };
-        let end = report.good_bytes.min(data.len());
+        // 一次扫描同时完成 byte-level hash 校验和事件物化。之前先走
+        // stream_verify 再 fs::read 解析，是大日志上的双读；这里保持与
+        // stream_verify 同样的字节预映像规则，但只读一遍。
+        let raw: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
         let mut events: Vec<Json> = Vec::new();
-        for line in data[..end].split(|b| *b == b'\n') {
+        let mut prev = GENESIS.to_string();
+        let mut expected_seq = 1u64;
+        let mut offset = 0usize;
+
+        for (idx, line) in raw.iter().enumerate() {
+            let line_start = offset;
+            offset += line.len();
+            let terminated = idx + 1 < raw.len();
+            if terminated {
+                offset += 1;
+            }
             if line_is_blank(line) {
                 continue;
             }
-            if let Ok(text) = std::str::from_utf8(line) {
-                if let Ok(event) = json::parse(text.trim()) {
-                    events.push(event);
+            let is_last = raw[idx + 1..].iter().all(|l| line_is_blank(l));
+            let torn = is_last && !terminated;
+            let fail = |seq: Option<u64>, reason: String| Corrupt {
+                seq,
+                reason,
+                torn,
+                good_bytes: line_start,
+            };
+
+            let (cut, want) = match crate::stream_verify::trailing_hash(line) {
+                Some(v) => v,
+                None => {
+                    return Ok((
+                        events,
+                        Some(fail(None, "not a complete record".to_string())),
+                    ))
                 }
+            };
+            let mut preimage = Vec::with_capacity(cut + 1);
+            preimage.extend_from_slice(&line[..cut]);
+            preimage.push(b'}');
+            if sha256::hex(&preimage) != want {
+                return Ok((events, Some(fail(None, "hash mismatch".to_string()))));
             }
+            let text = match std::str::from_utf8(line) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Ok((
+                        events,
+                        Some(fail(None, format!("invalid utf-8: {}", e))),
+                    ))
+                }
+            };
+            let record = match json::parse(text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok((
+                        events,
+                        Some(fail(None, format!("unparsable line: {}", e))),
+                    ))
+                }
+            };
+            let seq = record.u64_at("seq").unwrap_or(0);
+            if seq != expected_seq {
+                return Ok((
+                    events,
+                    Some(fail(
+                        Some(seq),
+                        format!("seq 不连续：期望 {}，实际 {}", expected_seq, seq),
+                    )),
+                ));
+            }
+            let recorded_prev = record.str_at("prev").unwrap_or("").to_string();
+            if recorded_prev != prev {
+                return Ok((
+                    events,
+                    Some(fail(record.u64_at("seq"), "broken hash chain".to_string())),
+                ));
+            }
+            prev = want;
+            expected_seq += 1;
+            events.push(record);
         }
-        Ok((events, report.corrupt))
+        Ok((events, None))
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Vec<Json>> {

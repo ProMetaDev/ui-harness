@@ -138,7 +138,7 @@ cite() {
 cite "agent.rs:842" "append_raw"
 cite "agent.rs:495" "append_raw"
 cite "memory.rs:325" "append_raw"
-cite "tools.rs:942" "pub fn registry"
+cite "tools.rs:883" "pub fn registry"
 
 # 行号锚点的脆弱性：往文件里插 14 行，三个"证据"全红——而代码其实没错。
 # 所以对**动得频繁**的函数/路由改用符号存在性：行号会漂，符号不会。

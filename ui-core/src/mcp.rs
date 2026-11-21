@@ -125,28 +125,9 @@ impl Hub {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
-            // MCP server 也是本地进程：不能把 operator 的密钥环境原样继承。
-            let keep: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-                std::env::vars_os().collect();
-            cmd.env_clear();
-            for (k, v) in keep {
-                if !crate::secrets::key_is_secret(&k.to_string_lossy()) {
-                    cmd.env(k, v);
-                }
-            }
-            #[cfg(target_os = "linux")]
-            if sandbox.fs {
-                use std::os::unix::process::CommandExt;
-                let ws = workspace.to_string_lossy().to_string();
-                match crate::sandbox::pre_exec(&ws, sandbox) {
-                    Ok(hook) => {
-                        unsafe {
-                            cmd.pre_exec(hook);
-                        }
-                    }
-                    Err(e) => return Err(format!("MCP 沙箱不可用: {}", e)),
-                }
-            }
+            // MCP server 也是本地进程：统一走 exec 层的环境清理与沙箱。
+            crate::exec::scrub_env(&mut cmd);
+            crate::exec::apply_linux_sandbox(&mut cmd, workspace, sandbox)?;
             let mut child = cmd
                 .spawn()
                 .map_err(|e| format!("启动 MCP server {} 失败: {}", name, e))?;

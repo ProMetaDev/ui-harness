@@ -2273,6 +2273,9 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
         }
         if (ev.workspace) hintEl.textContent = '工作区 ' + ev.workspace + ' · 工具调用都会先过策略与审批';
         break;
+      case 'events-dropped':
+        addSystem('会话事件窗口已截断：' + ev.from + '–' + ev.to + ' 已不在内存中；日志原文仍在 journal', ev.ts);
+        break;
       case 'user':
         hideEmpty();
         if (isBusy) {

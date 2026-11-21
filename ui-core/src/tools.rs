@@ -11,7 +11,6 @@ use crate::protected::{
     private_dir_names, private_entries,
 };
 use crate::skill::Catalog;
-use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -600,36 +599,6 @@ impl Matcher {
     }
 }
 
-fn sensitive_env_name(name: &str) -> bool {
-    matches!(
-        name,
-        "SSH_AUTH_SOCK"
-            | "SSH_ASKPASS"
-            | "KUBECONFIG"
-            | "DOCKER_CONFIG"
-            | "GIT_ASKPASS"
-            | "NETRC"
-    )
-}
-
-/// 去掉 URL 里的 user:password@，保留其余部分。
-fn scrub_env_value(value: &OsString) -> OsString {
-    let text = value.to_string_lossy();
-    let Some(scheme_end) = text.find("://") else {
-        return value.clone();
-    };
-    let rest = &text[scheme_end + 3..];
-    let Some(at) = rest.find('@') else {
-        return value.clone();
-    };
-    let authority = &rest[..at];
-    if !authority.contains(':') {
-        return value.clone();
-    }
-    let scrubbed = format!("{}://***@{}", &text[..scheme_end], &rest[at + 1..]);
-    OsString::from(scrubbed)
-}
-
 fn shell_effects(args: &Json, _ctx: &Ctx) -> Vec<Effect> {
     vec![Effect::new(PROC_EXEC, args.str_at("command").unwrap_or(""))]
 }
@@ -671,28 +640,16 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     #[cfg(target_os = "linux")]
     let sandbox_label = {
         if ctx.sandbox.fs {
-            let ws = ctx.workspace.to_string_lossy().to_string();
-            match crate::sandbox::pre_exec(&ws, &ctx.sandbox) {
-                Ok(hook) => {
-                    use std::os::unix::process::CommandExt;
-                    unsafe {
-                        cmd.pre_exec(hook);
-                    }
-                    format!("landlock:{}", crate::sandbox::abi_version().unwrap_or(0))
-                }
-                Err(e) => {
-                    return ToolResult {
-                        ok: false,
-                        content: String::new(),
-                        error: Some(format!(
-                            "沙箱不可用（{}）。要么升级内核，要么显式设置 UI_SANDBOX=0 关闭限制——\
-                             我们不会假装有沙箱地把命令跑掉。",
-                            e
-                        )),
-                        meta: Json::obj(vec![("sandbox", Json::from("unavailable"))]),
-                    }
-                }
+            if let Err(e) =
+                crate::exec::apply_linux_sandbox(&mut cmd, &ctx.workspace, &ctx.sandbox)
+            {
+                return ToolResult::err(format!(
+                    "沙箱不可用（{}）。要么升级内核，要么显式设置 UI_SANDBOX=0 关闭限制——\
+                     我们不会假装有沙箱地把命令跑掉。",
+                    e
+                ));
             }
+            format!("landlock:{}", crate::sandbox::abi_version().unwrap_or(0))
         } else {
             "off".to_string()
         }
@@ -721,27 +678,11 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     // 密钥卫生：默认清掉「看起来是密钥」的环境变量再交给子进程。
     // 竞品里只有 dsh 做到这一条（headless-harness-bench 的 T5 实测），
     // 让子进程继承整个父环境等于把 operator 的凭据交给模型调用的命令。
-    let mut scrubbed = 0usize;
-    if ctx.env_scrub {
-        // vars_os：Linux 环境变量可以不是 UTF-8；vars() 遇到这种值会 panic，
-        // 等于让一条命令把整个 agent 打死。
-        let keep: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-        cmd.env_clear();
-        for (k, v) in keep {
-            let key = k.to_string_lossy();
-            // 判据与导出脱敏、`ui secrets` 共用 `secrets::key_is_secret`；
-            // 再加一组“名字不像密钥、但实际是凭据通道”的变量。
-            if crate::secrets::key_is_secret(&key) || sensitive_env_name(&key) {
-                scrubbed += 1;
-                continue;
-            }
-            let value = scrub_env_value(&v);
-            if value != v {
-                scrubbed += 1;
-            }
-            cmd.env(k, value);
-        }
-    }
+    let scrubbed = if ctx.env_scrub {
+        crate::exec::scrub_env(&mut cmd)
+    } else {
+        0
+    };
 
     let mut child = match cmd
         .current_dir(&ctx.workspace)
@@ -1517,27 +1458,13 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     cmd.arg("--").arg(pattern).arg(path);
     cmd.current_dir(&ctx.workspace);
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    #[cfg(target_os = "linux")]
     if ctx.sandbox.fs {
-        use std::os::unix::process::CommandExt;
-        let ws = ctx.workspace.to_string_lossy().to_string();
-        match crate::sandbox::pre_exec(&ws, &ctx.sandbox) {
-            Ok(hook) => {
-                unsafe {
-                    cmd.pre_exec(hook);
-                }
-            }
-            Err(e) => return ToolResult::err(format!("grep 沙箱不可用: {}", e)),
+        if let Err(e) = crate::exec::apply_linux_sandbox(&mut cmd, &ctx.workspace, &ctx.sandbox) {
+            return ToolResult::err(format!("grep 沙箱不可用: {}", e));
         }
     }
     if ctx.env_scrub {
-        let keep: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-        cmd.env_clear();
-        for (k, v) in keep {
-            if !crate::secrets::key_is_secret(&k.to_string_lossy()) && !sensitive_env_name(&k.to_string_lossy()) {
-                cmd.env(k, v);
-            }
-        }
+        crate::exec::scrub_env(&mut cmd);
     }
 
     match cmd.output() {
