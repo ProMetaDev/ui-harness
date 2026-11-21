@@ -2596,6 +2596,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   }
 
   let lastSeq = 0;
+  let serverEpoch = 0;
   let es = null;
   const shotMode = location.search.includes('shot=1');
 
@@ -2658,14 +2659,22 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   fetch('/api/state')
     .then((r) => r.json())
     .then((s) => {
-      if (Number(s.seq || 0) >= lastSeq) {
-        if (s.seq) lastSeq = Number(s.seq);
-        setBusy(!!s.busy);
-        // 刷新之后「在跑哪条 / 队列里还有谁」以服务端为准：自己数的会骗人
-        queuedTaskIds.length = 0;
-        (s.queued || []).forEach((id) => queuedTaskIds.push(String(id)));
-        activeTaskId = s.taskId ? String(s.taskId) : '';
+      // 不要把 lastSeq 跳到 /api/state 的 seq：SSE 的 ?since=0 回放可能
+      // 先开始、这个更小的响应后到；跳过去会把整段历史事件丢掉。
+      const epoch = Number(s.epoch || 0);
+      if (epoch && serverEpoch && epoch !== serverEpoch) {
+        // 服务端重启后 seq 从 0 重来；旧 since 会让页面永远收不到事件。
+        lastSeq = 0;
+        serverEpoch = epoch;
+        if (es) { es.close(); connect(); }
+      } else if (epoch) {
+        serverEpoch = epoch;
       }
+      setBusy(!!s.busy);
+      // 刷新之后「在跑哪条 / 队列里还有谁」以服务端为准：自己数的会骗人
+      queuedTaskIds.length = 0;
+      (s.queued || []).forEach((id) => queuedTaskIds.push(String(id)));
+      activeTaskId = s.taskId ? String(s.taskId) : '';
     })
     .catch(() => {});
 })();

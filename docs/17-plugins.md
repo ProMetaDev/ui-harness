@@ -19,16 +19,20 @@
 ```
 
 ```bash
-ui plugins                 # 列出插件和它们声明的能力（不启动任何进程）
-ui run --task "..." --plugins other.json
+ui plugins --plugins .ui/plugins.json   # 列出插件和声明的能力（不启动进程）
+ui run --task "..." --plugins .ui/plugins.json
 ```
 
 插件协议：stdin 收一行 `{plugin, tool, args}`，stdout 写文本结果，非零退出码算失败。
 
+**不会自动加载工作区里的 `.ui/plugins.json`。** 插件调用就是本地代码执行；
+自动信任一个仓库自带的配置，等于把 `git clone` 变成 `git clone && run`。
+
 ## 三条硬规矩
 
 1. **`effects` 必须显式出现**，哪怕是 `[]`。"没写"和"没有副作用"必须能区分——
-   前者加载失败，后者才是真空效果集。
+   前者加载失败，后者才是真空效果集。即便是 `[]`，每次调用仍会隐式带一条
+   `proc.exec plugin:<name>:<tool>`，所以不会绕过默认审批。
 2. **效果类型必须已知**（`fs.read` / `fs.write` / `proc.exec` / `net.fetch` / `secret.read`）。
    写错一个字母就加载失败，不会悄悄变成 allow。
 3. **相对目标按工作区解析**。声明 `fs.write out.txt` 指的是工作区里的 `out.txt`；

@@ -174,10 +174,11 @@ impl Set {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if scrub_env {
-            let keep: Vec<(String, String)> = std::env::vars().collect();
+            let keep: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+                std::env::vars_os().collect();
             cmd.env_clear();
             for (k, v) in keep {
-                if !crate::secrets::key_is_secret(&k) {
+                if !crate::secrets::key_is_secret(&k.to_string_lossy()) {
                     cmd.env(k, v);
                 }
             }

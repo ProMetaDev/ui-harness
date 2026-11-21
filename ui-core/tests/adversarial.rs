@@ -214,6 +214,36 @@ fn an_unterminated_final_record_is_terminated_before_the_next_append() {
 }
 
 #[test]
+fn a_live_writer_refuses_to_append_after_a_partial_line() {
+    let dir = scratch("partial-tail-live");
+    let path = dir.join("journal.jsonl");
+    let mut j = Journal::open(&path).unwrap();
+    j.append("note", Json::obj(vec![("text", Json::from("first"))]))
+        .unwrap();
+
+    // 另一个写者刚写了一半就崩了（没有换行）。活着的 Journal 不能在它后面
+    // 直接 append，否则两个 JSON 会粘成一行。
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(b"{\"seq\":2,\"kind\":\"note\"").unwrap();
+    drop(f);
+
+    assert!(
+        j.append("note", Json::obj(vec![("text", Json::from("third"))]))
+            .is_err(),
+        "尾部半条记录时必须 fail closed，而不是粘行"
+    );
+    // 重新 open 会把坏尾截掉，链仍然可读。
+    let reopened = Journal::open(&path).unwrap();
+    assert_eq!(reopened.turn_count(), 0);
+    let events = Journal::load(&path).unwrap();
+    assert!(events.iter().all(|e| e.str_at("text") != Some("third")));
+}
+
+#[test]
 fn a_torn_tail_that_splits_a_utf8_character_is_repairable() {
     let dir = scratch("torn-utf8");
     let path = dir.join("journal.jsonl");

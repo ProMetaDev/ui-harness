@@ -53,6 +53,8 @@ struct Hub {
     log: Mutex<Vec<(u64, String)>>,
     /// 事件序号
     seq: std::sync::atomic::AtomicU64,
+    /// 进程启动标识：客户端重连时据此发现服务端已经重启、seq 从 0 重来
+    epoch: u64,
     /// 每个 SSE 连接一个发送端
     subs: Mutex<Vec<Sender<String>>>,
     /// 等待浏览器回答的审批
@@ -633,6 +635,7 @@ pub fn serve(
         None => std::path::Path::new(ready.str_at("workspace").unwrap_or(".")).join("experiments"),
     };
     hub0.workspace = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or("."));
+    hub0.epoch = ui_core::time::now_ms();
     *hub0.session.lock().unwrap() = session_arg.unwrap_or("default").to_string();
     let hub = Arc::new(hub0);
     // 通道只是「队列里有活」的信号：真正执行哪个任务以 hub.queue 为准，
@@ -715,6 +718,13 @@ pub fn serve(
                         }
                     }
                 }
+                // 会话已经切到 task.session，现在发 user 事件；前端不会因为
+                // 随后的 session-switched 清空而丢掉第一条消息。
+                hub.push(Json::obj(vec![
+                    ("type", Json::from("user")),
+                    ("taskId", Json::from(task.id.as_str())),
+                    ("text", Json::from(task.text.as_str())),
+                ]));
                 // 刚认领就被撤：`take_queued` 已经把它记成 active，所以这一路也会走到这儿。
                 // 同样是"没开始"，账要照记，active 要清掉，否则停止按钮下次点到旧任务。
                 if task.cancel.is_cancelled() {
@@ -1222,6 +1232,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             let state = vec![
                 ("busy", Json::Bool(hub.busy.load(Ordering::SeqCst))),
                 ("seq", Json::from(hub.seq.load(Ordering::SeqCst))),
+                ("epoch", Json::from(hub.epoch)),
                 (
                     "taskId",
                     match active {
@@ -1338,11 +1349,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             }
             let task = hub.new_task(text.clone());
             let task_id = task.id.clone();
-            hub.push(Json::obj(vec![
-                ("type", Json::from("user")),
-                ("taskId", Json::from(task_id.as_str())),
-                ("text", Json::from(text.as_str())),
-            ]));
+            // user 事件不在 HTTP 线程发：如果这次入队前有会话切换，worker 会先
+            // 发 session-switched，前端会清空 DOM；这里先发 user 就会被清掉。
+            // 由 worker 在切换完成后再发，保证“先切会话，再显示这条消息”。
             // 先入队再发信号：worker 只看队列，反序会让一条消息永远没人捡。
             let position = hub.enqueue(&task);
             let _ = task_tx.send(task);
