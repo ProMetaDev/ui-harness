@@ -358,11 +358,13 @@ impl Hub {
             None => result.content.clone(),
         });
         let hits = ui_core::secrets::redact_json(&mut text);
+        let session = hub_lock(&self.session).clone();
         tools.push(Json::obj(vec![
             ("name", Json::from(name)),
             ("ok", Json::Bool(result.ok)),
             ("text", text),
             ("redacted", Json::from(hits as u64)),
+            ("session", Json::from(session.as_str())),
         ]));
         // 完整输出也必须有上限：一个长会话不能让所有历史工具输出永久驻留。
         const MAX_TOOLS: usize = 500;
@@ -377,7 +379,12 @@ impl Hub {
     fn tool(&self, id: u64) -> Option<Json> {
         let base = *self.tool_base.lock().unwrap();
         let idx = id.checked_sub(base + 1)?;
-        self.tools.lock().unwrap().get(idx as usize).cloned()
+        let item = self.tools.lock().unwrap().get(idx as usize).cloned()?;
+        let current = hub_lock(&self.session).clone();
+        if item.str_at("session") != Some(current.as_str()) {
+            return None;
+        }
+        Some(item)
     }
 }
 
@@ -2597,6 +2604,20 @@ mod tests {
         }
         assert!(root.contains("\"src\""), "正常目录仍要能列出: {root}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn tool_cache_is_isolated_by_session() {
+        let hub = Arc::new(Hub::default());
+        *hub.session.lock().unwrap() = "a".into();
+        let id = hub.store_tool("shell", &ToolResult::ok("secret-output"));
+        *hub.session.lock().unwrap() = "b".into();
+        assert!(
+            hub.tool(id).is_none(),
+            "切到 b 后不能按 id 读到 a 的工具全文"
+        );
+        *hub.session.lock().unwrap() = "a".into();
+        assert!(hub.tool(id).is_some());
     }
 
     #[test]

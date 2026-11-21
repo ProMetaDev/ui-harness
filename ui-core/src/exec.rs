@@ -63,6 +63,52 @@ pub fn scrub_env(cmd: &mut Command) -> usize {
     scrubbed
 }
 
+#[cfg(unix)]
+extern "C" {
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// 让子进程自成进程组，超时/取消时能一次收掉后代。
+pub fn isolate_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// 杀掉整棵进程树。Unix 用负 pid 杀进程组；Windows 用 taskkill /T。
+pub fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        kill(-(pid as i32), 9);
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
 pub struct Captured {
     pub status: Option<ExitStatus>,
     pub stdout: String,
@@ -117,6 +163,7 @@ pub fn wait_capped(mut child: Child, timeout: Duration, max: u64) -> Captured {
             Ok(None) => {
                 timed_out = true;
                 let _ = child.kill();
+                kill_tree(child.id());
                 break child.wait().ok();
             }
             Err(_) => break None,
@@ -172,5 +219,23 @@ mod tests {
         assert!(sensitive_env_name("SSH_AUTH_SOCK"));
         assert!(sensitive_env_name("KUBECONFIG"));
         assert!(!sensitive_env_name("PATH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_capped_times_out_and_kills_the_process_group() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 5");
+        isolate_group(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        let pid = child.id();
+        let out = wait_capped(child, Duration::from_millis(100), 1024);
+        assert!(out.timed_out, "sleep 5 must time out");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{}", pid)).exists(),
+            "timed out child {} must be reaped",
+            pid
+        );
     }
 }

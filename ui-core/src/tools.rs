@@ -157,48 +157,6 @@ pub struct Tool {
     pub run: fn(&Json, &Ctx) -> ToolResult,
 }
 
-#[cfg(unix)]
-extern "C" {
-    fn setpgid(pid: i32, pgid: i32) -> i32;
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-
-/// 让命令自成进程组：超时/取消时能一次杀掉它和它的所有后代。
-///
-/// 只 kill 直接子进程时，`sleep 3 & wait` 这类命令会活到自然结束——
-/// 超时这个硬约束就被一个后台进程绕过去了。
-#[cfg(unix)]
-fn isolate_group(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            if setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn isolate_group(_cmd: &mut Command) {}
-
-/// 杀掉整棵进程树。负 pid 是「整个进程组」的约定。
-fn kill_tree(pid: u32) {
-    #[cfg(unix)]
-    unsafe {
-        kill(-(pid as i32), 9);
-    }
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
 fn cap(text: &str) -> String {
     if text.len() <= MAX_OUTPUT_BYTES {
         return text.to_string();
@@ -633,7 +591,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     };
 
     // 自成进程组，超时/取消时才能连后代一起收掉
-    isolate_group(&mut cmd);
+    crate::exec::isolate_group(&mut cmd);
 
     // OS 沙箱：在子进程 exec 之前上锁。
     // **fail closed**：要沙箱却拿不到沙箱时，命令直接失败，绝不静默降级成无沙箱执行。
@@ -705,7 +663,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
                 if let Err(e) = crate::winsandbox::Job::resume(child.id()) {
                     j.terminate();
                     let _ = child.kill();
-                    kill_tree(child.id());
+                    crate::exec::kill_tree(child.id());
                     let _ = child.wait();
                     return ToolResult {
                         ok: false,
@@ -720,7 +678,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             Err(e) => {
                 // 与 Linux Landlock 一致：要沙箱却拿不到沙箱时，命令不能跑。
                 let _ = child.kill();
-                kill_tree(child.id());
+                crate::exec::kill_tree(child.id());
                 let _ = child.wait();
                 return ToolResult {
                     ok: false,
@@ -756,7 +714,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
             if let Some(j) = &job {
                 j.terminate();
             }
-            kill_tree(child.id());
+            crate::exec::kill_tree(child.id());
             let _ = child.wait();
             return ToolResult::err("cancelled：用户取消了这条命令");
         }
@@ -769,7 +727,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
                     if let Some(j) = &job {
                         j.terminate();
                     }
-                    kill_tree(child.id());
+                    crate::exec::kill_tree(child.id());
                     break child.wait().ok();
                 }
                 std::thread::sleep(Duration::from_millis(15));
@@ -1466,6 +1424,7 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     if ctx.env_scrub {
         crate::exec::scrub_env(&mut cmd);
     }
+    crate::exec::isolate_group(&mut cmd);
 
     let child = match cmd.spawn() {
         Ok(c) => c,

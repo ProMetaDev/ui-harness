@@ -23,6 +23,8 @@ struct Client {
     stdin: ChildStdin,
     rx: Receiver<String>,
     next_id: u64,
+    #[cfg(windows)]
+    job: Option<crate::winsandbox::Job>,
 }
 
 impl Client {
@@ -50,7 +52,13 @@ impl Client {
                 Err(e) => {
                     // 超时后不能留一个永远挂着的 MCP 子进程；杀掉，下一次
                     // 调用会明确失败，而不是悄悄复用半死连接。
+                    #[cfg(windows)]
+                    if let Some(job) = &self.job {
+                        job.terminate();
+                    }
+                    let pid = self.child.id();
                     let _ = self.child.kill();
+                    crate::exec::kill_tree(pid);
                     let _ = self.child.wait();
                     return Err(e);
                 }
@@ -128,9 +136,36 @@ impl Hub {
             // MCP server 也是本地进程：统一走 exec 层的环境清理与沙箱。
             crate::exec::scrub_env(&mut cmd);
             crate::exec::apply_linux_sandbox(&mut cmd, workspace, sandbox)?;
+            crate::exec::isolate_group(&mut cmd);
+            #[cfg(windows)]
+            if sandbox.fs {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(crate::winsandbox::CREATE_SUSPENDED);
+            }
             let mut child = cmd
                 .spawn()
                 .map_err(|e| format!("启动 MCP server {} 失败: {}", name, e))?;
+            #[cfg(windows)]
+            let job = if sandbox.fs {
+                let job = match crate::winsandbox::Job::assign(
+                    child.id(),
+                    &crate::winsandbox::Limits::from_env(),
+                ) {
+                    Ok(job) => job,
+                    Err(e) => {
+                        let _ = child.kill();
+                        return Err(format!("MCP Job Object 不可用: {}", e));
+                    }
+                };
+                if let Err(e) = crate::winsandbox::Job::resume(child.id()) {
+                    job.terminate();
+                    let _ = child.kill();
+                    return Err(format!("MCP Job 恢复失败: {}", e));
+                }
+                Some(job)
+            } else {
+                None
+            };
             let stdin = child.stdin.take().ok_or("拿不到 MCP stdin")?;
             let stdout: ChildStdout = child.stdout.take().ok_or("拿不到 MCP stdout")?;
             // 有界通道：server 疯狂输出时最多堆 100 行，不能把整段输出
@@ -154,6 +189,8 @@ impl Hub {
                 stdin,
                 rx,
                 next_id: 0,
+                #[cfg(windows)]
+                job,
             };
             client.request(
                 "initialize",
@@ -234,7 +271,13 @@ impl Hub {
 impl Drop for Hub {
     fn drop(&mut self) {
         for s in &mut self.servers {
+            #[cfg(windows)]
+            if let Some(job) = &s.client.job {
+                job.terminate();
+            }
+            let pid = s.client.child.id();
             let _ = s.client.child.kill();
+            crate::exec::kill_tree(pid);
         }
     }
 }

@@ -181,14 +181,39 @@ impl Set {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        if sandbox.fs {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(crate::winsandbox::CREATE_SUSPENDED);
+        }
         if scrub_env {
             crate::exec::scrub_env(&mut cmd);
         }
         // 插件是本地进程，和 shell 一样必须有沙箱；统一走 exec 层。
         crate::exec::apply_linux_sandbox(&mut cmd, workspace, sandbox)?;
+        crate::exec::isolate_group(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("启动插件 {} 失败: {}", plugin, e))?;
+        #[cfg(windows)]
+        let _job = if sandbox.fs {
+            let job = crate::winsandbox::Job::assign(
+                child.id(),
+                &crate::winsandbox::Limits::from_env(),
+            )
+            .map_err(|e| {
+                let _ = child.kill();
+                format!("插件 Job Object 不可用: {}", e)
+            })?;
+            crate::winsandbox::Job::resume(child.id()).map_err(|e| {
+                job.terminate();
+                let _ = child.kill();
+                format!("插件 Job 恢复失败: {}", e)
+            })?;
+            Some(job)
+        } else {
+            None
+        };
         {
             let mut stdin = child.stdin.take().ok_or("拿不到插件 stdin")?;
             stdin
