@@ -212,7 +212,7 @@ impl Hub {
     /// 按钮按下去没反应，比报错更难查。
     fn take_queued(&self) -> Option<WebTask> {
         let task = {
-            let mut q = self.queue.lock().unwrap();
+            let mut q = hub_lock(&self.queue);
             if q.is_empty() {
                 None
             } else {
@@ -220,7 +220,7 @@ impl Hub {
             }
         };
         if let Some(t) = &task {
-            *self.active.lock().unwrap() = Some(t.clone());
+            *hub_lock(&self.active) = Some(t.clone());
         }
         task
     }
@@ -242,11 +242,8 @@ impl Hub {
 
     /// 当前在跑的任务 + 排队中的任务 ID（给 /api/state 与页面用）。
     fn task_view(&self) -> (Option<String>, Vec<String>) {
-        let active = self.active.lock().unwrap().as_ref().map(|t| t.id.clone());
-        let queued = self
-            .queue
-            .lock()
-            .unwrap()
+        let active = hub_lock(&self.active).as_ref().map(|t| t.id.clone());
+        let queued = hub_lock(&self.queue)
             .iter()
             .map(|t| t.id.clone())
             .collect();
