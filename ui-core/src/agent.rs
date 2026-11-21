@@ -2273,6 +2273,63 @@ mod tests {
         assert_eq!(agent.turn_number(), 0, "空会话的 turn 必须从 0 开始");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shell_output_is_spilled_in_full_not_capped_before_spill() {
+        let ws = workspace("shell-spill");
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![
+                        ("content", Json::from("跑")),
+                        (
+                            "toolCalls",
+                            Json::Arr(vec![Json::obj(vec![
+                                ("name", Json::from("shell")),
+                                (
+                                    "args",
+                                    Json::obj(vec![(
+                                        "command",
+                                        Json::from("python3 -c 'print(\"x\" * 20000)'"),
+                                    )]),
+                                ),
+                            ])]),
+                        ),
+                    ]),
+                    Json::obj(vec![("content", Json::from("好了"))]),
+                ]),
+            ),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws.clone(), Limits::default());
+        agent.tool_chars = 200;
+        let mut hooks = Recorder {
+            answer: ApprovalResponse::allow_once(),
+            asks: Vec::new(),
+        };
+        agent.run_turn("跑长输出", &mut hooks).unwrap();
+
+        let dir = ws.join(".ui").join("tool-output");
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_file())
+            .expect("长 shell 输出必须落盘");
+        let full = std::fs::read_to_string(file).unwrap();
+        assert!(
+            full.len() >= 20_000,
+            "spill 必须是完整输出，不是 16KB cap 后的片段: {}",
+            full.len()
+        );
+        assert!(
+            agent.history.iter().any(|m| m.role == "tool" && m.content.contains("完整内容在")),
+            "模型上下文必须有 spill 指针"
+        );
+    }
+
     #[test]
     fn history_carries_across_turns() {
         let ws = workspace("history");
