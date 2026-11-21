@@ -149,6 +149,7 @@ run "观测是下界（理论结论 A）" bash tools/verify_observation_lower_bo
 run "干净检出的 HEAD 可构建" bash tools/verify_head_clean.sh
 run "Windows 构建 fail-closed（失败必须非零）" bash tools/verify_build_failclosed.sh
 run "Windows target 下测试代码可编译" bash tools/verify_win_tests_compile.sh
+run "soak（短跑：多轮 run + verify）" bash tools/verify_soak.sh
 run "导出查看器并校验" check_viewer
 
 echo
