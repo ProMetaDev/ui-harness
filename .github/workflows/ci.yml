@@ -142,3 +142,46 @@ jobs:
           name: ui-windows
           path: ${{ github.workspace }}/target/x86_64-pc-windows-gnu/release/ui.exe
           if-no-files-found: error
+
+  windows-runtime:
+    # 交叉编译只能证明“能编译”，证明不了 Job Object 的
+    # CREATE_SUSPENDED → assign → resume 真的能回收进程树。
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/target
+          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-runtime-
+
+      - name: 构建 ui.exe
+        run: cargo build --release -p ui-cli
+
+      - name: 真实 Windows 运行：shell + Job Object
+        shell: pwsh
+        run: |
+          $ws = Join-Path $env:RUNNER_TEMP "ui-win-runtime"
+          New-Item -ItemType Directory -Force -Path $ws | Out-Null
+          $scenario = Join-Path $ws "scenario.json"
+          @'
+          {"model":"scripted","steps":[
+            {"content":"run","toolCalls":[{"name":"shell","args":{"command":"cmd /C echo job-ok"}}]},
+            {"content":"done"}]}
+          '@ | Set-Content -Encoding utf8 $scenario
+
+          $out = & ".\target\release\ui.exe" run --workspace $ws --task smoke --mock $scenario --yes 2>&1
+          $out | Out-String | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "ui run failed: $LASTEXITCODE" }
+          if (($out | Out-String) -notmatch "job-ok") { throw "shell output missing" }
+          # 进程树不应在命令结束后继续存活。
+          $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq "cmd.exe" -and $_.StartTime -gt (Get-Date).AddMinutes(-2) }
+          if ($left) { throw "leaked cmd.exe process(es): $($left.Id -join ',')" }

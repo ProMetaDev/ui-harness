@@ -294,6 +294,8 @@ pub struct Agent {
     /// 上一次按保留策略扫落盘原文（两个目录）的时刻（毫秒）。
     /// 归零意味着"还没扫过"，第一次 run 边界一定会扫。
     spill_pruned_at: u64,
+    /// 本次 model 调用（含 repair 重试）实际计入的估算 token，用于对账。
+    last_model_estimated: u64,
     turn: u64,
     approval_seq: u64,
 }
@@ -468,6 +470,7 @@ impl Agent {
         self.cancel = cancel;
         self.budget.reset();
         self.tool_seq = 0;
+        self.last_model_estimated = 0;
         self.approval_seq = 0;
         self.policy.reset_session_rules();
         self.loaded_skills.clear();
@@ -581,6 +584,7 @@ impl Agent {
             mcp: None,
             tool_seq: 0,
             spill_pruned_at: 0,
+            last_model_estimated: 0,
             turn,
             approval_seq: 0,
         }
@@ -1039,6 +1043,7 @@ impl Agent {
                 self.budget.used(Dim::ToolCalls) as u64,
             );
 
+            self.last_model_estimated = snapshot.tokens as u64;
             let mut response = match self.call_model(&snapshot, hooks) {
                 Ok(r) => r,
                 Err(AgentError::Model(e)) if self.active_cancel.is_cancelled() => {
@@ -1062,6 +1067,17 @@ impl Agent {
                             .unwrap_or(0),
                         final_text: "(已取消)".to_string(),
                     });
+                }
+                Err(AgentError::Budget(e)) => {
+                    self.log_event(
+                        "turn/end",
+                        Json::obj(vec![
+                            ("turn", Json::from(turn)),
+                            ("reason", Json::from("budget")),
+                            ("error", Json::from(e.to_string())),
+                        ]),
+                    )?;
+                    return Err(AgentError::Budget(e));
                 }
                 Err(e) => {
                     // 不允许 turn/start 悬挂：模型错误也要写 turn/end，
@@ -1139,7 +1155,8 @@ impl Agent {
             )?;
 
             if let Some(usage) = response.usage_tokens {
-                self.budget.reconcile_tokens(snapshot.tokens, usage);
+                self.budget
+                    .reconcile_tokens(self.last_model_estimated, usage);
                 let rate = self.budget.limits.usd_per_mtok;
                 if rate > 0.0 {
                     let cost = usage as f64 * rate / 1_000_000.0;
@@ -1240,6 +1257,21 @@ impl Agent {
         }
     }
 
+    /// 把一次逻辑 model 调用（可能包含 repair 重试）的 usage 和估算合并。
+    fn finish_model_response(
+        &mut self,
+        mut response: crate::model::ModelResponse,
+        total_usage: u64,
+        usage_seen: bool,
+        estimated: u64,
+    ) -> crate::model::ModelResponse {
+        if usage_seen {
+            response.usage_tokens = Some(total_usage);
+        }
+        self.last_model_estimated = estimated;
+        response
+    }
+
     fn call_model(
         &mut self,
         snapshot: &Snapshot,
@@ -1247,6 +1279,9 @@ impl Agent {
     ) -> Result<crate::model::ModelResponse, AgentError> {
         let mut repair_note: Option<String> = None;
         let mut attempts = 0usize;
+        let mut total_usage = 0u64;
+        let mut usage_seen = false;
+        let mut estimated = snapshot.tokens as u64;
         loop {
             let response = match self.model.respond_stream(
                 snapshot,
@@ -1262,6 +1297,11 @@ impl Agent {
                     return Err(AgentError::Model(e));
                 }
             };
+
+            if let Some(usage) = response.usage_tokens {
+                total_usage = total_usage.saturating_add(usage);
+                usage_seen = true;
+            }
 
             let broken: Vec<&ToolCall> = response
                 .tool_calls
@@ -1280,6 +1320,8 @@ impl Agent {
                         ("tool", Json::from("(protocol)")),
                         ("error", Json::from(err.as_str())),
                         ("raw", Json::from(response.content.as_str())),
+                        ("usage", response.usage_tokens.map(Json::from).unwrap_or(Json::Null)),
+                        ("estimatedTokens", Json::from(estimated)),
                     ]),
                 )?;
                 if attempts > self.max_repairs {
@@ -1293,13 +1335,23 @@ impl Agent {
                      {{\"content\": \"给用户看的话\", \"toolCalls\": [{{\"name\": \"工具名\", \"args\": {{}}}}]}}。",
                     err
                 );
+                let extra = snapshot.tokens as u64 + crate::budget::estimate_tokens(&note);
+                if let Err(e) = self.budget.charge(Dim::Tokens, extra as f64) {
+                    return Err(AgentError::Budget(e));
+                }
+                estimated = estimated.saturating_add(extra);
                 self.history.push(Message::note(note.clone()));
                 repair_note = Some(note);
                 continue;
             }
 
             if broken.is_empty() {
-                return Ok(response);
+                return Ok(self.finish_model_response(
+                    response,
+                    total_usage,
+                    usage_seen,
+                    estimated,
+                ));
             }
 
             let error = broken[0].parse_error.clone().unwrap_or_default();
@@ -1311,6 +1363,8 @@ impl Agent {
                     ("tool", Json::from(broken[0].name.as_str())),
                     ("error", Json::from(error.as_str())),
                     ("raw", Json::from(broken[0].raw.clone().unwrap_or_default())),
+                    ("usage", response.usage_tokens.map(Json::from).unwrap_or(Json::Null)),
+                    ("estimatedTokens", Json::from(estimated)),
                 ]),
             )?;
 
@@ -1325,6 +1379,11 @@ impl Agent {
                 "上一个工具调用的参数不是合法 JSON（{}）。请重新输出完整、合法的 JSON 参数，不要截断。",
                 error
             );
+            let extra = snapshot.tokens as u64 + crate::budget::estimate_tokens(&note);
+            if let Err(e) = self.budget.charge(Dim::Tokens, extra as f64) {
+                return Err(AgentError::Budget(e));
+            }
+            estimated = estimated.saturating_add(extra);
             self.history.push(Message::note(note.clone()));
             repair_note = Some(note);
         }

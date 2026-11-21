@@ -1686,9 +1686,12 @@ fn mode_from(args: &Args) -> ui_core::Mode {
 }
 
 fn tool_chars(args: &Args) -> usize {
+    // 0 仍表示“显式关闭截断”，但不能是默认值：默认关闭会让一次 8MiB
+    // 的工具输出原样常驻 history。2000 与 Agent::new 的内核默认一致；
+    // 需要完整上下文时显式 `--tool-chars 0`。
     args.get("tool-chars")
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
+        .unwrap_or(2000)
 }
 
 /// 上下文折叠策略：`--compact-tokens N`（0 = 关闭）、`--keep-recent K`。

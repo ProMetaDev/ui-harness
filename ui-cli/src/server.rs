@@ -113,6 +113,10 @@ impl Hub {
         ui_core::secrets::redact_json(event)
     }
 
+    fn clear_log(&self) {
+        hub_lock(&self.log).clear();
+    }
+
     fn push(&self, mut event: Json) {
         // log → subs 是唯一锁顺序；取号也必须在 log 临界区内。
         // 否则并发事件可能乱序，订阅交接也可能同时收到 backlog 和 live 副本。
@@ -626,8 +630,71 @@ impl WebHooks {
     }
 }
 
+/// 把 journal 的事件翻译成页面消费的 UI 事件。
+///
+/// 只翻译“聊天里需要看见”的四类：user / assistant / tool / turn。
+/// 审批、快照、预算等内部事件不重放，避免重连时伪造一张已经过期的审批卡。
+fn replay_journal_into_hub(hub: &Hub, path: &std::path::Path) {
+    let events = match ui_core::Journal::read(path) {
+        Ok((events, _)) => events,
+        Err(_) => return,
+    };
+    for event in events {
+        let Some(kind) = event.str_at("kind") else {
+            continue;
+        };
+        let ui_event = match kind {
+            "turn/start" => event.str_at("prompt").map(|text| {
+                Json::obj(vec![
+                    ("type", Json::from("user")),
+                    ("text", Json::from(text)),
+                ])
+            }),
+            "model/response" => event.str_at("content").filter(|s| !s.is_empty()).map(|text| {
+                Json::obj(vec![
+                    ("type", Json::from("assistant")),
+                    ("text", Json::from(text)),
+                ])
+            }),
+            "tool/output" => {
+                let detail = event
+                    .str_at("text")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        event.str_at("file").map(|file| {
+                            format!(
+                                "输出 {} 字，原文在 {}（需要时用 fs_read）",
+                                event.u64_at("chars").unwrap_or(0),
+                                file
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                let clipped: String = detail.chars().take(4000).collect();
+                Some(Json::obj(vec![
+                    ("type", Json::from("tool")),
+                    ("name", Json::from(event.str_at("tool").unwrap_or("tool"))),
+                    ("ok", Json::Bool(event.bool_at("ok").unwrap_or(true))),
+                    ("detail", Json::from(clipped.as_str())),
+                ]))
+            }
+            "turn/end" => Some(Json::obj(vec![
+                ("type", Json::from("turn")),
+                ("reason", Json::from(event.str_at("reason").unwrap_or("done"))),
+                ("steps", Json::from(event.u64_at("steps").unwrap_or(0))),
+                ("calls", Json::from(event.u64_at("toolCalls").unwrap_or(0))),
+            ])),
+            _ => None,
+        };
+        if let Some(event) = ui_event {
+            hub.push(event);
+        }
+    }
+}
+
 pub fn serve(
-    agent: Agent,
+    mut agent: Agent,
     addr: &str,
     ready: Json,
     splash: bool,
@@ -651,8 +718,20 @@ pub fn serve(
     };
     hub0.workspace = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or("."));
     hub0.epoch = ui_core::time::now_ms();
-    *hub0.session.lock().unwrap() = session_arg.unwrap_or("default").to_string();
+    let initial_session = session_arg.unwrap_or("default").to_string();
+    *hub0.session.lock().unwrap() = initial_session.clone();
     let hub = Arc::new(hub0);
+    // 页面事件源同样从 journal 恢复：否则 `ui serve` 一重启，日志还在，
+    // 页面却是空的；切会话时目标历史也永远不会出现。
+    let initial_path = session_file(&hub.workspace, &initial_session);
+    if initial_path.exists() {
+        // 页面看到的历史必须和模型下一次看到的上下文一致；只 replay UI
+        // 不恢复 Agent 历史，会让用户以为它在续聊，模型其实失忆。
+        agent
+            .switch_journal(&initial_path)
+            .map_err(|e| format!("恢复初始会话失败: {}", e))?;
+    }
+    replay_journal_into_hub(&hub, &initial_path);
     // 通道只是「队列里有活」的信号：真正执行哪个任务以 hub.queue 为准，
     // 这样排队期间被取消（已从队列摘走）的任务不会被 worker 再捡起来。
     let (task_tx, task_rx) = channel::<WebTask>();
@@ -716,10 +795,14 @@ pub fn serve(
                                 *pending = None;
                             }
                             drop(pending);
+                            // 先清掉旧会话事件，再通知切会话，最后重放目标历史。
+                            // 顺序反了会让前端先清空、再被旧事件污染。
+                            hub.clear_log();
                             hub.push(Json::obj(vec![
                                 ("type", Json::from("session-switched")),
                                 ("session", Json::from(task_session.as_str())),
                             ]));
+                            replay_journal_into_hub(&hub, &path);
                         }
                         Err(e) => {
                             *hub_lock(&hub.active) = None;
@@ -2492,6 +2575,57 @@ mod tests {
         }));
         hub.push(Json::obj(vec![("type", Json::from("note"))]));
         assert_eq!(hub_lock(&hub.log).len(), 1);
+    }
+
+    #[test]
+    fn replays_journal_into_chat_events() {
+        let ws = temp_workspace("replay-journal");
+        let path = ws.join(".ui").join("journal.jsonl");
+        let mut journal = ui_core::Journal::open(&path).unwrap();
+        journal
+            .append("turn/start", Json::obj(vec![("prompt", Json::from("旧问题"))]))
+            .unwrap();
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("旧回答"))]),
+            )
+            .unwrap();
+        journal
+            .append(
+                "tool/output",
+                Json::obj(vec![
+                    ("tool", Json::from("fs_read")),
+                    ("ok", Json::Bool(true)),
+                    ("text", Json::from("文件内容")),
+                ]),
+            )
+            .unwrap();
+        journal
+            .append(
+                "turn/end",
+                Json::obj(vec![("reason", Json::from("done"))]),
+            )
+            .unwrap();
+        drop(journal);
+
+        let hub = hub_for(&ws);
+        *hub.session.lock().unwrap() = "default".into();
+        replay_journal_into_hub(&hub, &path);
+        let log = hub.log.lock().unwrap();
+        let types: Vec<String> = log
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .filter_map(|e| e.str_at("type").map(str::to_string))
+            .collect();
+        assert_eq!(
+            types,
+            vec!["user", "assistant", "tool", "turn"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
