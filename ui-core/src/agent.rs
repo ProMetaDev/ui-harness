@@ -2290,6 +2290,58 @@ mod tests {
     }
 
     #[test]
+    fn repair_attempts_are_billed_and_reconciled() {
+        let ws = workspace("repair-usage");
+        std::fs::write(ws.join("a.txt"), "hello").unwrap();
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![
+                        ("content", Json::from("bad")),
+                        ("usageTokens", Json::from(1_000u64)),
+                        (
+                            "toolCalls",
+                            Json::Arr(vec![Json::obj(vec![
+                                ("name", Json::from("fs_read")),
+                                ("argsRaw", Json::from("{")),
+                            ])]),
+                        ),
+                    ]),
+                    Json::obj(vec![("content", Json::from("done"))]),
+                ]),
+            ),
+            (
+                "repairs",
+                Json::Arr(vec![Json::obj(vec![
+                    ("content", Json::from("fixed")),
+                    ("usageTokens", Json::from(1_000u64)),
+                ])]),
+            ),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws, Limits::default());
+        let report = agent.run_turn("修一下", &mut NullHooks).unwrap();
+        assert_eq!(report.reason, "done");
+        assert_eq!(
+            agent.budget.used(Dim::Tokens),
+            2_000.0,
+            "两次尝试的 provider usage 都必须进账，不能只算最后一次 (estimated={})",
+            agent.last_model_estimated
+        );
+        assert!(
+            agent
+                .journal
+                .events
+                .iter()
+                .any(|e| e.str_at("kind") == Some("model/repair")
+                    && e.u64_at("usage") == Some(1_000)),
+            "repair 事件必须记录第一次尝试的 usage"
+        );
+    }
+
+    #[test]
     fn usd_budget_is_charged_from_provider_usage() {
         let ws = workspace("usd-budget");
         let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
