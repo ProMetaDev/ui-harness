@@ -1467,9 +1467,36 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
         crate::exec::scrub_env(&mut cmd);
     }
 
-    match cmd.output() {
-        Ok(out) if out.status.code() == Some(0) || out.status.code() == Some(1) => {
-            let text = String::from_utf8_lossy(&out.stdout);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => {
+            return match literal_search(
+                &ctx.workspace,
+                &root,
+                pattern,
+                include,
+                args.bool_at("ignoreCase") == Some(true),
+                max_hits as usize,
+            ) {
+                Ok(body) => ToolResult::ok(format!(
+                    "（本机没有 grep，已退化为字面匹配）\n{}",
+                    body
+                )),
+                Err(e) => ToolResult::err(e),
+            }
+        }
+    };
+    let out = crate::exec::wait_capped(
+        child,
+        Duration::from_secs(20),
+        crate::exec::MAX_CHILD_CAPTURE,
+    );
+    if out.timed_out {
+        return ToolResult::err("grep 超时（20s），已终止");
+    }
+    let code = out.status.as_ref().and_then(|s| s.code());
+    if code == Some(0) || code == Some(1) {
+            let text = &out.stdout;
             // `--exclude-dir` 只认名字：多段（`vendor/keys`）与绝对声明它排不掉。
             // 结果行按真实路径再判一次，否则"清单里加了目录，grep 照样把它捞出来"
             // ——边界必须取决于清单，不取决于哪条命令更快。
@@ -1493,17 +1520,12 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
                 body.push_str(&format!("\n…（共 {} 行，已截断到 {}）", total, max_hits));
             }
             ToolResult::ok(body)
-        }
-        Ok(out) => ToolResult::err(format!(
+    } else {
+        ToolResult::err(format!(
             "grep 失败（退出码 {:?}）：{}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        // Windows 上没有 GNU grep：退化成内置的字面匹配，并明确告诉调用方
-        Err(_) => match literal_search(&ctx.workspace, &root, pattern, include, args.bool_at("ignoreCase") == Some(true), max_hits as usize) {
-            Ok(body) => ToolResult::ok(format!("（本机没有 grep，已退化为字面匹配）\n{}", body)),
-            Err(e) => ToolResult::err(e),
-        },
+            code,
+            out.stderr.trim()
+        ))
     }
 }
 

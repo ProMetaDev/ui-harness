@@ -5,8 +5,14 @@
 //! plugin/MCP 仍是旁路。
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// 单个子进程输出在读取阶段的硬上限（8 MiB）。
+pub const MAX_CHILD_CAPTURE: u64 = 8 * 1024 * 1024;
 
 /// 名字不像密钥、但实际是凭据通道的环境变量。
 fn sensitive_env_name(name: &str) -> bool {
@@ -57,6 +63,75 @@ pub fn scrub_env(cmd: &mut Command) -> usize {
     scrubbed
 }
 
+pub struct Captured {
+    pub status: Option<ExitStatus>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+fn read_capped<R: Read>(reader: R, max: u64) -> String {
+    let mut buf = Vec::new();
+    let mut limited = reader.take(max + 1);
+    let _ = limited.read_to_end(&mut buf);
+    let truncated = buf.len() as u64 > max;
+    if truncated {
+        buf.truncate(max as usize);
+    }
+    let mut s = String::from_utf8_lossy(&buf).to_string();
+    if truncated {
+        s.push_str(&format!("\n…[输出超过 {} MiB，已截断]", max / 1024 / 1024));
+    }
+    s
+}
+
+/// 等待一个已 spawn 的子进程，带超时与有界 stdout/stderr。
+///
+/// `Child` 的 stdin 由调用方负责（plugin 要先写 payload）。这里不 close
+/// 父进程的 stdout 读端：即使超时，reader 线程最多再等 2 秒，不会把整个
+/// turn 卡死；进程树清理由各平台调用方负责。
+pub fn wait_capped(mut child: Child, timeout: Duration, max: u64) -> Captured {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(stdout) = stdout {
+        std::thread::spawn(move || {
+            let _ = out_tx.send(read_capped(stdout, max));
+        });
+    }
+    if let Some(stderr) = stderr {
+        std::thread::spawn(move || {
+            let _ = err_tx.send(read_capped(stderr, max));
+        });
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Ok(None) => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            Err(_) => break None,
+        }
+    };
+    let stdout = out_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    Captured {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+    }
+}
+
 /// Linux Landlock：在 exec 前挂上写限制。其他平台不假装有文件系统沙箱。
 pub fn apply_linux_sandbox(
     cmd: &mut Command,
@@ -80,4 +155,22 @@ pub fn apply_linux_sandbox(
         let _ = (cmd, workspace, cfg);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_userinfo_is_scrubbed_but_host_is_kept() {
+        let got = scrub_url_userinfo(OsStr::new("postgres://user:secret@db:5432/app"));
+        assert_eq!(got, OsString::from("postgres://***@db:5432/app"));
+    }
+
+    #[test]
+    fn known_credential_channels_are_sensitive_even_without_key_in_name() {
+        assert!(sensitive_env_name("SSH_AUTH_SOCK"));
+        assert!(sensitive_env_name("KUBECONFIG"));
+        assert!(!sensitive_env_name("PATH"));
+    }
 }

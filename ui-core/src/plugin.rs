@@ -195,36 +195,24 @@ impl Set {
                 .write_all(payload.to_compact().as_bytes())
                 .map_err(|e| format!("写插件失败: {}", e))?;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("插件 {} 超时（30s）", plugin));
-                }
-                Err(e) => {
-                    let _ = child.kill();
-                    return Err(format!("等待插件 {} 失败: {}", plugin, e));
-                }
-            }
+        let out = crate::exec::wait_capped(
+            child,
+            std::time::Duration::from_secs(30),
+            8 * 1024 * 1024,
+        );
+        if out.timed_out {
+            return Err(format!("插件 {} 超时（30s）", plugin));
         }
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
+        let ok = out.status.as_ref().map(|s| s.success()).unwrap_or(false);
+        if !ok {
             return Err(format!(
                 "插件 {} 退出码 {:?}: {}",
                 plugin,
-                out.status.code(),
-                err.trim()
+                out.status.as_ref().and_then(|s| s.code()),
+                out.stderr.trim()
             ));
         }
-        Ok(stdout.trim_end().to_string())
+        Ok(out.stdout.trim_end().to_string())
     }
 }
 

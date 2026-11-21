@@ -617,10 +617,10 @@ impl Journal {
             }
             let is_last = raw[idx + 1..].iter().all(|l| line_is_blank(l));
             let torn = is_last && !terminated;
-            let fail = |seq: Option<u64>, reason: String| Corrupt {
+            let fail = |seq: Option<u64>, reason: String, tail: bool| Corrupt {
                 seq,
                 reason,
-                torn,
+                torn: torn && tail,
                 good_bytes: line_start,
             };
 
@@ -629,7 +629,7 @@ impl Journal {
                 None => {
                     return Ok((
                         events,
-                        Some(fail(None, "not a complete record".to_string())),
+                        Some(fail(None, "not a complete record".to_string(), true)),
                     ))
                 }
             };
@@ -637,14 +637,17 @@ impl Journal {
             preimage.extend_from_slice(&line[..cut]);
             preimage.push(b'}');
             if sha256::hex(&preimage) != want {
-                return Ok((events, Some(fail(None, "hash mismatch".to_string()))));
+                return Ok((
+                    events,
+                    Some(fail(None, "hash mismatch".to_string(), false)),
+                ));
             }
             let text = match std::str::from_utf8(line) {
                 Ok(t) => t,
                 Err(e) => {
                     return Ok((
                         events,
-                        Some(fail(None, format!("invalid utf-8: {}", e))),
+                        Some(fail(None, format!("invalid utf-8: {}", e), true)),
                     ))
                 }
             };
@@ -653,7 +656,7 @@ impl Journal {
                 Err(e) => {
                     return Ok((
                         events,
-                        Some(fail(None, format!("unparsable line: {}", e))),
+                        Some(fail(None, format!("unparsable line: {}", e), false)),
                     ))
                 }
             };
@@ -664,6 +667,7 @@ impl Journal {
                     Some(fail(
                         Some(seq),
                         format!("seq 不连续：期望 {}，实际 {}", expected_seq, seq),
+                        false,
                     )),
                 ));
             }
@@ -671,7 +675,11 @@ impl Journal {
             if recorded_prev != prev {
                 return Ok((
                     events,
-                    Some(fail(record.u64_at("seq"), "broken hash chain".to_string())),
+                    Some(fail(
+                        record.u64_at("seq"),
+                        "broken hash chain".to_string(),
+                        false,
+                    )),
                 ));
             }
             prev = want;

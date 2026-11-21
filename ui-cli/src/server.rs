@@ -2681,6 +2681,25 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_limit_only_embeds_the_recent_window() {
+        let ws = temp_workspace("snapshot-limit");
+        let hub = hub_for(&ws);
+        for i in 0..10 {
+            hub.push(Json::obj(vec![
+                ("type", Json::from("note")),
+                ("i", Json::from(i)),
+            ]));
+        }
+        let page = snapshot_page(&hub, Some(3));
+        assert_eq!(
+            page.matches("\"type\":\"note\"").count(),
+            3,
+            "snapshot?limit=3 只应嵌入最近 3 条事件"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn snapshot_escapes_script_close_in_events() {
         // 回归：日志 JSON 直接插进 <script>，内容里的 </script> 会截断脚本
         //（快照打不开 + 存储型 XSS）。输出时必须转义成 \u003c/。
