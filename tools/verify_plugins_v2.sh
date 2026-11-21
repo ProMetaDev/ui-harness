@@ -33,12 +33,12 @@ cat > "$WS/sc.json" <<'EOF'
   {"content":"调插件","toolCalls":[{"name":"plugin_call","args":{"plugin":"demo","tool":"echo","args":{"text":"你好"}}}]},
   {"content":"完"}]}
 EOF
-out=$("$BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --yes 2>&1)
+out=$("$BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --plugins "$WS/.ui/plugins.json" --yes 2>&1)
 echo "$out" | grep -q 'echo: 你好' || fail "插件结果没回来：$out"
 echo "PASS 插件调用"
 
 echo
-echo "=== 无副作用的插件：效果集为空 ==="
+echo "=== 无副作用的插件：仍隐式带 proc.exec ==="
 python3 - "$WS/.ui/journal.jsonl" <<'PY'
 import json, sys
 for line in open(sys.argv[1], encoding="utf-8"):
@@ -46,7 +46,9 @@ for line in open(sys.argv[1], encoding="utf-8"):
     if ev.get("kind") == "tool/request" and ev.get("tool") == "plugin_call":
         eff = ev.get("effects") or []
         print("effects:", json.dumps(eff, ensure_ascii=False))
-        print("PASS 空声明 → 空效果集" if len(eff) == 0 else "FAIL 效果不对")
+        ok = any(e.get("kind") == "proc.exec" and e.get("target") == "plugin:demo:echo" for e in eff)
+        print("PASS 空声明仍有 proc.exec" if ok else "FAIL 效果不对")
+        assert ok
         break
 PY
 
@@ -58,7 +60,7 @@ cat > "$WS/sc2.json" <<'EOF'
   {"content":"完"}]}
 EOF
 rm -f "$WS/.ui/journal.jsonl"
-out=$("$BIN" run --task t --mock "$WS/sc2.json" --workspace "$WS" --yes 2>&1)
+out=$("$BIN" run --task t --mock "$WS/sc2.json" --workspace "$WS" --plugins "$WS/.ui/plugins.json" --yes 2>&1)
 echo "$out" | grep -q 'wrote out.txt' || fail "写操作没成功：$out"
 python3 - "$WS/.ui/journal.jsonl" <<'PY'
 import json, sys

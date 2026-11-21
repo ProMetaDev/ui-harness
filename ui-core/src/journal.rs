@@ -541,6 +541,11 @@ impl Journal {
         ]);
         if let (Json::Obj(extra), Json::Obj(items)) = (&payload, &mut event) {
             for (k, v) in extra {
+                // 这些字段属于 envelope；payload 里的同名键会把 seq/hash 挪到
+                // 行中间，让按字节切 hash 的校验器误判整条日志损坏。
+                if matches!(k.as_str(), "seq" | "ts" | "kind" | "w" | "prev" | "hash") {
+                    continue;
+                }
                 items.push((k.clone(), v.clone()));
             }
         }
