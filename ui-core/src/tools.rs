@@ -1489,6 +1489,15 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     cmd.arg("--").arg(pattern).arg(path);
     cmd.current_dir(&ctx.workspace);
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    if ctx.env_scrub {
+        let keep: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        cmd.env_clear();
+        for (k, v) in keep {
+            if !crate::secrets::key_is_secret(&k.to_string_lossy()) && !sensitive_env_name(&k.to_string_lossy()) {
+                cmd.env(k, v);
+            }
+        }
+    }
 
     match cmd.output() {
         Ok(out) if out.status.code() == Some(0) || out.status.code() == Some(1) => {

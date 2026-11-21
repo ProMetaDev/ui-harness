@@ -45,7 +45,16 @@ impl Client {
         writeln!(self.stdin, "{}", msg.to_compact()).map_err(|e| format!("写 MCP 失败: {}", e))?;
         self.stdin.flush().map_err(|e| e.to_string())?;
         loop {
-            let line = Self::read_line(&self.rx, Duration::from_secs(20))?;
+            let line = match Self::read_line(&self.rx, Duration::from_secs(20)) {
+                Ok(line) => line,
+                Err(e) => {
+                    // 超时后不能留一个永远挂着的 MCP 子进程；杀掉，下一次
+                    // 调用会明确失败，而不是悄悄复用半死连接。
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Err(e);
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -112,6 +121,15 @@ impl Hub {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
+            // MCP server 也是本地进程：不能把 operator 的密钥环境原样继承。
+            let keep: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+                std::env::vars_os().collect();
+            cmd.env_clear();
+            for (k, v) in keep {
+                if !crate::secrets::key_is_secret(&k.to_string_lossy()) {
+                    cmd.env(k, v);
+                }
+            }
             let mut child = cmd
                 .spawn()
                 .map_err(|e| format!("启动 MCP server {} 失败: {}", name, e))?;

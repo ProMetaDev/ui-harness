@@ -70,6 +70,8 @@ struct Hub {
     task_seq: std::sync::atomic::AtomicU64,
     /// 工具的完整输出（页面上点开再看）：按调用序号存
     tools: Mutex<Vec<Json>>,
+    /// tools 被裁剪后，第一条对应的全局 id
+    tool_base: Mutex<u64>,
     /// 启动检查结果：开机界面照它逐条点亮（真实结果，不是定时器）
     ready: Mutex<Option<Json>>,
     /// 是否播放开机动画（后台/脚本里关掉）
@@ -330,6 +332,7 @@ impl Hub {
 
     /// 存一份完整工具输出，返回给页面用的 id
     fn store_tool(&self, name: &str, result: &ToolResult) -> u64 {
+        let mut base = self.tool_base.lock().unwrap();
         let mut tools = self.tools.lock().unwrap();
         // 同一条判据：点开「展开」看到的是完整输出，它比摘要更容易带出凭据。
         let mut text = Json::from(match &result.error {
@@ -344,11 +347,20 @@ impl Hub {
             ("text", text),
             ("redacted", Json::from(hits as u64)),
         ]));
-        tools.len() as u64
+        // 完整输出也必须有上限：一个长会话不能让所有历史工具输出永久驻留。
+        const MAX_TOOLS: usize = 500;
+        if tools.len() > MAX_TOOLS {
+            let excess = tools.len() - MAX_TOOLS;
+            tools.drain(0..excess);
+            *base += excess as u64;
+        }
+        *base + tools.len() as u64
     }
 
     fn tool(&self, id: u64) -> Option<Json> {
-        self.tools.lock().unwrap().get((id as usize).checked_sub(1)?).cloned()
+        let base = *self.tool_base.lock().unwrap();
+        let idx = id.checked_sub(base + 1)?;
+        self.tools.lock().unwrap().get(idx as usize).cloned()
     }
 }
 
