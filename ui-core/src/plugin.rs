@@ -175,10 +175,20 @@ impl Set {
         ]);
         use std::io::Write;
         use std::process::{Command, Stdio};
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&p.cmd)
-            .stdin(Stdio::piped())
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            let mut c = Command::new("cmd");
+            c.arg("/C").raw_arg(&p.cmd);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&p.cmd);
+            c
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(windows)]
