@@ -141,6 +141,7 @@ run "子进程 env 清理（密钥不进子进程）" bash tools/verify_env_scru
 run "隐私两档实跑（脱敏门 + 来源扣留 + 落盘生命周期）" bash tools/verify_privacy.sh
 run "文档与代码一致（目录常量/开关名/行号锚点/口径）" bash tools/verify_docs.sh
 run "企业 Phase 0 设计基线" bash tools/verify_enterprise_plan.sh
+run "独立性（核心 std-only / 无 CDN / 无 npm）" bash tools/verify_independence.sh
 run "system prompt 追加 + 白名单进提示词" bash tools/verify_sysprompt.sh
 run "协作模式（拆解 → 并行隔离 → 汇总）" bash tools/verify_team.sh
 run "隔离副本 manifest（xxh 格式）" bash tools/verify_manifest.sh

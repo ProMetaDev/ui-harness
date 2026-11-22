@@ -3,6 +3,10 @@
 > 状态：设计基线。M1 之前不写“企业版”实现代码。
 >
 > 目标：把当前本地内核拆成 **API / Control Plane / Worker / Runner / Postgres / Object Store** 六个可独立部署的部分。
+>
+> 独立性：Postgres/OIDC/runner 是 L2 adapter，不链接进 `ui-core`；核心仍按
+> [docs/38-independence.md](38-independence.md) 保持 std-only。若要求全产品零外部程序，
+> 本设计的 M1/M2/M4 需要重新裁剪。
 
 ## 1. 目标与非目标
 

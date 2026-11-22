@@ -18,6 +18,9 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 [docs/37](docs/37-enterprise-runbook.md)。这些是**目标设计**，不是已交付的企业能力；
 门禁只验证设计契约齐全，不把文档当成实现。
 
+独立性约束见 [docs/38](docs/38-independence.md)：核心保持 Rust std-only，
+不引入 Cursor/VS Code/云端/npm/CDN 依赖；企业能力只能作为可选 adapter。
+
 ## 它解决什么问题
 
 大多数 coding agent 的日志是**调试输出**：出事之后才知道它做过什么，而且只能看它自己愿意说的部分。

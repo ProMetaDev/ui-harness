@@ -42,6 +42,15 @@
 - 有升级/回滚/密钥轮换 runbook；
 - 通过内部安全评审和 24h soak。
 
+### 独立性约束
+
+本路线不得破坏 [docs/38-independence.md](38-independence.md)：
+
+- `ui-core` / `ui-cli` 保持 Rust std-only；
+- Cursor/VS Code/云端/npm/CDN 不作为必需依赖；
+- Postgres/OIDC/容器 runner 只能作为可选 adapter；
+- 如果要求“全产品零外部程序”，M1/M2/M4 必须重新定义或放弃。
+
 ### 明确不做
 
 - 多租户计费；
