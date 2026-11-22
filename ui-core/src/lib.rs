@@ -16,6 +16,7 @@
 pub mod agent;
 pub mod budget;
 pub mod cancel;
+pub mod checkpoint;
 pub mod compact;
 pub mod exec;
 pub mod fasthash;

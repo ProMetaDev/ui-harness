@@ -22,6 +22,81 @@ fn scenario(dir: &std::path::Path) -> PathBuf {
 }
 
 #[test]
+fn checkpoint_diff_restore_end_to_end() {
+    let ws = temp_ws("checkpoint");
+    fs::write(ws.join("a.txt"), "one\ntwo\n").unwrap();
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(ws.join("src/b.txt"), "hello\n").unwrap();
+
+    let cp = Command::new(bin())
+        .args([
+            "checkpoint",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--label",
+            "before-edit",
+        ])
+        .output()
+        .expect("checkpoint");
+    assert!(cp.status.success(), "{}", String::from_utf8_lossy(&cp.stderr));
+
+    let listed = Command::new(bin())
+        .args(["checkpoints", "--workspace", ws.to_str().unwrap(), "--json"])
+        .output()
+        .expect("checkpoints");
+    assert!(listed.status.success());
+    let arr = ui_core::json::parse(String::from_utf8_lossy(&listed.stdout).trim()).unwrap();
+    let id = arr
+        .as_arr()
+        .and_then(|a| a.first())
+        .and_then(|e| e.str_at("id"))
+        .expect("checkpoint id")
+        .to_string();
+
+    fs::write(ws.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+    fs::write(ws.join("src/new.txt"), "new\n").unwrap();
+    fs::remove_file(ws.join("src/b.txt")).unwrap();
+
+    let diff = Command::new(bin())
+        .args([
+            "diff",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--checkpoint",
+            &id,
+            "--json",
+        ])
+        .output()
+        .expect("diff");
+    assert!(diff.status.success(), "{}", String::from_utf8_lossy(&diff.stderr));
+    let report = ui_core::json::parse(String::from_utf8_lossy(&diff.stdout).trim()).unwrap();
+    let change_rows = report.arr_at("changes").cloned().unwrap_or_default();
+    let kinds: Vec<&str> = change_rows
+        .iter()
+        .filter_map(|c| c.str_at("kind"))
+        .collect();
+    assert!(kinds.contains(&"modified"));
+    assert!(kinds.contains(&"added"));
+    assert!(kinds.contains(&"deleted"));
+
+    let restore = Command::new(bin())
+        .args([
+            "restore",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--checkpoint",
+            &id,
+            "--yes",
+        ])
+        .output()
+        .expect("restore");
+    assert!(restore.status.success(), "{}", String::from_utf8_lossy(&restore.stderr));
+    assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "one\ntwo\n");
+    assert_eq!(fs::read_to_string(ws.join("src/b.txt")).unwrap(), "hello\n");
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn journal_flag_redirects_the_log() {
     let ws = temp_ws("journal");
     let sc = scenario(&ws);

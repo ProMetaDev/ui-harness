@@ -364,6 +364,65 @@ fn cmd_sessions(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+fn cmd_checkpoint(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let label = args.get("label").unwrap_or("manual");
+    let cp = ui_core::checkpoint::create(&ws, label)?;
+    println!("{}", cp.to_pretty());
+    Ok(0)
+}
+
+fn cmd_checkpoints(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let rows = ui_core::checkpoint::list(&ws)?;
+    if args.flag("json") {
+        println!("{}", Json::Arr(rows).to_compact());
+        return Ok(0);
+    }
+    if rows.is_empty() {
+        println!("还没有 checkpoint。先运行：ui checkpoint --label before-edit");
+        return Ok(0);
+    }
+    println!("{:<32} {:>6}  label", "checkpoint", "files");
+    for row in rows {
+        println!(
+            "{:<32} {:>6}  {}",
+            row.str_at("id").unwrap_or("?"),
+            row.u64_at("files").unwrap_or(0),
+            row.str_at("label").unwrap_or("")
+        );
+    }
+    Ok(0)
+}
+
+fn cmd_diff(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let id = args.get("checkpoint");
+    let report = ui_core::checkpoint::diff(&ws, id)?;
+    if args.flag("json") {
+        println!("{}", report.to_json().to_compact());
+    } else {
+        print!("{}", report.render());
+    }
+    Ok(0)
+}
+
+fn cmd_restore(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let id = args
+        .get("checkpoint")
+        .ok_or_else(|| "restore 需要 --checkpoint <id>".to_string())?;
+    if !args.flag("yes") {
+        return Err(format!(
+            "restore 会把工作区文件写回 checkpoint {}；确认后加 --yes",
+            id
+        ));
+    }
+    let out = ui_core::checkpoint::restore(&ws, id)?;
+    println!("{}", out.to_pretty());
+    Ok(0)
+}
+
 /// 人话版的文件大小：`ui spill` 要说清"这里攒了多少原文"，字节数没人看得懂。
 fn human_bytes(n: u64) -> String {
     const K: u64 = 1024;
@@ -691,6 +750,10 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("providers") => cmd_providers(&args),
         Some("plugins") => cmd_plugins(&args),
         Some("sessions") => cmd_sessions(&args),
+        Some("checkpoint") => cmd_checkpoint(&args),
+        Some("checkpoints") => cmd_checkpoints(&args),
+        Some("diff") => cmd_diff(&args),
+        Some("restore") => cmd_restore(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
         Some("lab") => cmd_lab(&args),
@@ -700,7 +763,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("forget") => memory::cmd_forget(&args),
         Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|restore）",
             other
         )),
         None => {
@@ -786,6 +849,10 @@ fn help() -> String {
      ui memory list [--all]       列出记忆（默认只列有效；--all 含墓碑/过期）\n\
      ui memory check              校验记忆文件哈希链 + id/内容一致（损坏退 2）\n\
      ui prompt --memory-query \"...\"  单独渲染一次记忆检索（不写事件、不跑 turn）\n\
+     ui checkpoint [--label L]    给当前 workspace 存一个零依赖内容寻址快照\n\
+     ui checkpoints [--json]      列出 checkpoint\n\
+     ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
+     ui restore --checkpoint ID --yes   从 checkpoint 写回（写回前自动再存 pre-restore）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
