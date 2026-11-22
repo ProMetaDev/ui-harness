@@ -1,4 +1,4 @@
-# Checkpoint / Diff / Restore：零依赖变更审阅地基
+# Checkpoint / Diff / Review / Restore：零依赖变更审阅地基
 
 > 这是“Cursor 式变更审阅”的第一层，不是完整 IDE。
 >

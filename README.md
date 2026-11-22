@@ -21,7 +21,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 独立性约束见 [docs/38](docs/38-independence.md)：核心保持 Rust std-only，
 不引入 Cursor/VS Code/云端/npm/CDN 依赖；企业能力只能作为可选 adapter。
 
-变更审阅地基（checkpoint/diff/restore）见 [docs/39](docs/39-checkpoint-diff.md)。
+变更审阅地基（checkpoint/diff/review/restore）见 [docs/39](docs/39-checkpoint-diff.md)。
 
 ## 它解决什么问题
 

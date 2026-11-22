@@ -263,6 +263,10 @@ impl DiffReport {
             if !c.patch.ends_with('\n') {
                 out.push('\n');
             }
+            if !c.hunks.is_empty() {
+                let ids: Vec<&str> = c.hunks.iter().map(|h| h.id.as_str()).collect();
+                out.push_str(&format!("hunks: {}\n", ids.join(", ")));
+            }
         }
         out
     }
