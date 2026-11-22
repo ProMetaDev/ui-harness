@@ -702,6 +702,16 @@ fn replay_journal_into_hub(hub: &Hub, path: &std::path::Path) {
                 ("steps", Json::from(event.u64_at("steps").unwrap_or(0))),
                 ("calls", Json::from(event.u64_at("toolCalls").unwrap_or(0))),
             ])),
+            "review/apply" => Some(Json::obj(vec![
+                ("type", Json::from("review")),
+                (
+                    "checkpoint",
+                    Json::from(event.str_at("checkpoint").unwrap_or("")),
+                ),
+                ("written", Json::from(event.u64_at("written").unwrap_or(0))),
+                ("removed", Json::from(event.u64_at("removed").unwrap_or(0))),
+                ("actor", Json::from(event.str_at("actor").unwrap_or("unknown"))),
+            ])),
             _ => None,
         };
         if let Some(event) = ui_event {
@@ -1404,7 +1414,35 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
             match ui_core::checkpoint::review(&hub.workspace, checkpoint, &accepted) {
-                Ok(out) => json_response(&mut stream, &out.to_compact()),
+                Ok(mut out) => match audit_review(&hub, checkpoint, &accepted, &out) {
+                    Ok(seq) => {
+                        out.set("journalSeq", Json::from(seq));
+                        hub.push(Json::obj(vec![
+                            ("type", Json::from("review")),
+                            ("checkpoint", Json::from(checkpoint)),
+                            ("written", Json::from(out.u64_at("written").unwrap_or(0))),
+                            ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
+                            ("journalSeq", Json::from(seq)),
+                        ]));
+                        json_response(&mut stream, &out.to_compact())
+                    }
+                    Err(e) => json_response_status(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("applied", Json::Bool(true)),
+                            (
+                                "error",
+                                Json::from(format!(
+                                    "{}；文件已写回，但审计失败，需要人工补账",
+                                    e
+                                )),
+                            ),
+                        ])
+                        .to_compact(),
+                    ),
+                },
                 Err(e) => json_response_status(
                     &mut stream,
                     "400 Bad Request",
@@ -1731,6 +1769,39 @@ fn session_file(ws: &std::path::Path, name: &str) -> std::path::PathBuf {
 }
 
 /// 列出会话：名字、事件数、最后活动时间
+fn audit_review(
+    hub: &Hub,
+    checkpoint: &str,
+    accepted: &[String],
+    out: &Json,
+) -> Result<u64, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let mut journal =
+        ui_core::Journal::open(&path).map_err(|e| format!("写审计日志失败: {}", e))?;
+    let payload = Json::obj(vec![
+        ("actor", Json::from("web")),
+        ("checkpoint", Json::from(checkpoint)),
+        (
+            "accepted",
+            Json::Arr(accepted.iter().map(|a| Json::from(a.as_str())).collect()),
+        ),
+        ("written", Json::from(out.u64_at("written").unwrap_or(0))),
+        ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
+        (
+            "backup",
+            out.get("backup").cloned().unwrap_or(Json::Null),
+        ),
+    ]);
+    let event = journal
+        .append("review/apply", payload)
+        .map_err(|e| format!("写审计日志失败: {}", e))?;
+    Ok(event.u64_at("seq").unwrap_or(0))
+}
+
 fn session_list(ws: &std::path::Path, current: &str) -> Json {
     let mut rows: Vec<Json> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -2389,6 +2460,13 @@ mod tests {
         let (head, out) = http_post(hub, "/api/review", &body);
         assert!(head.contains("200 OK"), "{} {}", head, out);
         assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "one\nTWO\n");
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "review 审计日志不该损坏");
+        assert!(
+            events.iter().any(|e| e.str_at("kind") == Some("review/apply")),
+            "review 必须写进 journal 审计链"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -2793,6 +2871,17 @@ mod tests {
                 Json::obj(vec![("reason", Json::from("done"))]),
             )
             .unwrap();
+        journal
+            .append(
+                "review/apply",
+                Json::obj(vec![
+                    ("actor", Json::from("web")),
+                    ("checkpoint", Json::from("cp-test")),
+                    ("written", Json::from(1)),
+                    ("removed", Json::from(0)),
+                ]),
+            )
+            .unwrap();
         drop(journal);
 
         let hub = hub_for(&ws);
@@ -2806,7 +2895,7 @@ mod tests {
             .collect();
         assert_eq!(
             types,
-            vec!["user", "assistant", "tool", "turn"]
+            vec!["user", "assistant", "tool", "turn", "review"]
                 .into_iter()
                 .map(str::to_string)
                 .collect::<Vec<_>>()

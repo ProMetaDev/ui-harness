@@ -2357,6 +2357,12 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       case 'snapshot': renderSnapshot(ev); break;
       case 'decision': addDecision(ev); break;
       case 'journal': addJournal(ev, ev.ts); break;
+      case 'review':
+        addSystem(
+          '变更审阅 · 写入 ' + (ev.written || 0) + ' 个文件，删除 ' + (ev.removed || 0) + ' 个 · ' + (ev.actor || '') ,
+          ev.ts
+        );
+        break;
       case 'budget':
         tokEl.textContent = ev.tokens;
         callsEl.textContent = ev.calls;

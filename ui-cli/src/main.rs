@@ -430,7 +430,33 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let out = ui_core::checkpoint::review(&ws, report.checkpoint.as_str(), &accepted)?;
+    let mut out = ui_core::checkpoint::review(&ws, report.checkpoint.as_str(), &accepted)?;
+    let jp = resolve_journal(args, &ws);
+    let seq = match ui_core::Journal::open(&jp).and_then(|mut j| {
+        j.append(
+            "review/apply",
+            Json::obj(vec![
+                ("actor", Json::from("cli")),
+                ("checkpoint", Json::from(report.checkpoint.as_str())),
+                (
+                    "accepted",
+                    Json::Arr(accepted.iter().map(|a| Json::from(a.as_str())).collect()),
+                ),
+                ("written", Json::from(out.u64_at("written").unwrap_or(0))),
+                ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
+                ("backup", out.get("backup").cloned().unwrap_or(Json::Null)),
+            ]),
+        )
+    }) {
+        Ok(event) => event.u64_at("seq").unwrap_or(0),
+        Err(e) => {
+            return Err(format!(
+                "review 已写回文件，但审计失败: {}；需要人工补账",
+                e
+            ))
+        }
+    };
+    out.set("journalSeq", Json::from(seq));
     println!("{}", out.to_pretty());
     Ok(0)
 }

@@ -146,6 +146,10 @@ fn review_accepts_only_one_hunk_end_to_end() {
     assert!(got.contains("CHANGED-1"));
     assert!(!got.contains("CHANGED-18"));
     assert!(got.contains("line 18"));
+    let (events, corrupt) =
+        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(corrupt.is_none());
+    assert!(events.iter().any(|e| e.str_at("kind") == Some("review/apply")));
     let _ = fs::remove_dir_all(&ws);
 }
 
