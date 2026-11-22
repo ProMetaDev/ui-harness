@@ -60,7 +60,30 @@ ui restore --checkpoint cp-... --yes
 - 拒绝写符号链接或越出 workspace 的路径；
 - 必须显式 `--yes`。
 
-## 2. 数据布局
+## 2. Web 端
+
+聊天页顶部「变更」按钮：
+
+- 选择 checkpoint；
+- 查看文件级 diff；
+- 每个 hunk 一个复选框；
+- 「应用选中」走 `POST /api/review`，未选中的 hunk 回退；
+- 任务运行/排队时拒绝 review（409），避免和 agent 同时改文件；
+- diff 内容全部用 `textContent` 渲染，不把代码当 HTML。
+
+API：
+
+```text
+GET  /api/checkpoints
+GET  /api/diff?checkpoint=<id>
+POST /api/review
+     {"checkpoint":"cp-...","accepted":["src/main.rs#1"],"confirm":true}
+```
+
+`POST /api/review` 需要同源请求 + token + `confirm:true`；写盘前自动建
+`pre-review-<id>`。
+
+## 3. 数据布局
 
 ```text
 .ui/checkpoints/
@@ -83,14 +106,14 @@ manifest：
 }
 ```
 
-## 3. 为什么不用 git
+## 4. 为什么不用 git
 
 - git 是外部依赖；
 - 工作区可能不是 git repo；
 - 我们只需要“文件内容快照”，不需要分支/历史/远程；
 - 内容寻址 blob 更简单、可审计、可删除。
 
-## 4. 与 Cursor 的差距
+## 5. 与 Cursor 的差距
 
 已吸收：
 
@@ -108,7 +131,7 @@ manifest：
 - 文件 mode/重命名检测；
 - prune 未跟踪文件。
 
-## 5. 安全边界
+## 6. 安全边界
 
 - checkpoint 只读 workspace 文件，不跟随 symlink；
 - restore 校验父目录 realpath；
@@ -117,7 +140,7 @@ manifest：
 - 所有写入走临时文件 + rename；
 - `.ui` 自身不进入 checkpoint。
 
-## 6. 测试
+## 7. 测试
 
 - `checkpoint_diff_restore_round_trip`
 - `review_keeps_only_accepted_hunks`
@@ -127,8 +150,9 @@ manifest：
 - `symlinks_are_not_followed`
 - CLI e2e：`checkpoint_diff_restore_end_to_end`
 - CLI e2e：`review_accepts_only_one_hunk_end_to_end`
+- HTTP e2e：`checkpoint_diff_review_api_round_trip`
 
-## 7. 下一步
+## 8. 下一步
 
 1. hunk accept/reject 的 Web 视图；
 2. file-level revert；

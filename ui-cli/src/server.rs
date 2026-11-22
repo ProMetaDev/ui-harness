@@ -1344,6 +1344,75 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             *hub.pending_session.lock().unwrap() = Some(name);
             json_response(&mut stream, "{\"ok\":true}")
         }
+        ("GET", "/api/checkpoints") => match ui_core::checkpoint::list(&hub.workspace) {
+            Ok(rows) => json_response(&mut stream, &Json::Arr(rows).to_compact()),
+            Err(e) => json_response_status(
+                &mut stream,
+                "500 Internal Server Error",
+                &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))]).to_compact(),
+            ),
+        },
+        ("GET", "/api/diff") => {
+            let cid = query
+                .split('&')
+                .find_map(|kv| kv.split_once('='))
+                .filter(|(k, _)| *k == "checkpoint")
+                .map(|(_, v)| v.to_string());
+            let result = match cid.as_deref() {
+                Some(id) => ui_core::checkpoint::diff(&hub.workspace, Some(id)),
+                None => ui_core::checkpoint::diff(&hub.workspace, None),
+            };
+            match result {
+                Ok(report) => json_response(&mut stream, &report.to_json().to_compact()),
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                        .to_compact(),
+                ),
+            }
+        }
+        ("POST", "/api/review") => {
+            if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
+                return json_response_status(
+                    &mut stream,
+                    "409 Conflict",
+                    "{\"ok\":false,\"error\":\"任务运行中，先停止再 review\"}",
+                );
+            }
+            let value = json::parse(body.trim()).unwrap_or(Json::Null);
+            if value.bool_at("confirm") != Some(true) {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    "{\"ok\":false,\"error\":\"review 需要 confirm:true\"}",
+                );
+            }
+            let checkpoint = value.str_at("checkpoint").unwrap_or("");
+            if checkpoint.is_empty() {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    "{\"ok\":false,\"error\":\"缺少 checkpoint\"}",
+                );
+            }
+            let accepted: Vec<String> = value
+                .arr_at("accepted")
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            match ui_core::checkpoint::review(&hub.workspace, checkpoint, &accepted) {
+                Ok(out) => json_response(&mut stream, &out.to_compact()),
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                        .to_compact(),
+                ),
+            }
+        }
         ("GET", "/api/state") => {
             // 页面刷新后要靠这三样把按钮恢复成真相：在跑哪个、排队有哪些、
             // 哪一张审批卡还等着人点。
@@ -2222,7 +2291,9 @@ mod tests {
     }
 
     fn hub_for(ws: &std::path::Path) -> Arc<Hub> {
-        let hub = Arc::new(Hub::default());
+        let mut hub = Hub::default();
+        hub.workspace = ws.to_path_buf();
+        let hub = Arc::new(hub);
         *hub.ready.lock().unwrap() = Some(Json::obj(vec![
             ("workspace", Json::from(ws.to_string_lossy().to_string())),
             ("model", Json::from("test")),
@@ -2277,6 +2348,48 @@ mod tests {
                 body
             ),
         )
+    }
+
+    #[test]
+    fn checkpoint_diff_review_api_round_trip() {
+        let ws = temp_workspace("api-review");
+        std::fs::write(ws.join("a.txt"), "one\ntwo\n").unwrap();
+        let cp = ui_core::checkpoint::create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        let hub = hub_for(&ws);
+
+        let (head, listed) = http_get(hub.clone(), "/api/checkpoints");
+        assert!(head.contains("200 OK"), "{}", head);
+        let rows = ui_core::json::parse(listed.trim()).unwrap();
+        assert!(rows
+            .as_arr()
+            .map(|a| a.iter().any(|r| r.str_at("id") == Some(id.as_str())))
+            .unwrap_or(false));
+
+        std::fs::write(ws.join("a.txt"), "one\nTWO\n").unwrap();
+        let (head, diff) = http_get(
+            hub.clone(),
+            &format!("/api/diff?checkpoint={}", id),
+        );
+        assert!(head.contains("200 OK"), "{}", head);
+        let report = ui_core::json::parse(diff.trim()).unwrap();
+        let hunk = report
+            .arr_at("changes")
+            .and_then(|c| c.first())
+            .and_then(|c| c.arr_at("hunks"))
+            .and_then(|h| h.first())
+            .and_then(|h| h.str_at("id"))
+            .expect("hunk id")
+            .to_string();
+
+        let body = format!(
+            "{{\"checkpoint\":\"{}\",\"accepted\":[\"{}\"],\"confirm\":true}}",
+            id, hunk
+        );
+        let (head, out) = http_post(hub, "/api/review", &body);
+        assert!(head.contains("200 OK"), "{} {}", head, out);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "one\nTWO\n");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

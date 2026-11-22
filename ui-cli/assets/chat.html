@@ -1134,6 +1134,28 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   .lab-grid{grid-template-columns:1fr}.cap-row{grid-template-columns:minmax(90px,.7fr) 1.3fr auto}
   .cap-row .cgate{display:none}
 }
+.diff-overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+  background:rgba(10,12,16,.42);padding:24px}
+.diff-overlay[hidden]{display:none}
+.diff-panel{width:min(940px,96vw);max-height:88vh;display:flex;flex-direction:column;
+  background:var(--panel);border:1px solid var(--border-strong);border-radius:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.28);overflow:hidden}
+.diff-head{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border)}
+.diff-head h2{font:600 15px/1.2 var(--sans);margin:0}
+.diff-head .spacer{flex:1}
+.diff-head select{height:30px;max-width:320px;border:1px solid var(--border);border-radius:8px;
+  background:var(--bg);color:var(--text);font:11.5px var(--mono);padding:0 8px}
+.diff-body{overflow:auto;padding:12px 16px;display:grid;gap:12px}
+.diff-change{border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.diff-change>.dc-head{display:flex;gap:8px;align-items:center;padding:8px 10px;
+  background:var(--subtle);font:11.5px var(--mono);color:var(--muted)}
+.diff-hunk{border-top:1px solid var(--border);padding:8px 10px}
+.diff-hunk label{display:flex;align-items:center;gap:8px;font:11px var(--mono);color:var(--muted)}
+.diff-hunk pre{margin:7px 0 0;max-height:260px;overflow:auto;padding:8px;border-radius:6px;
+  background:var(--bg);font:11.5px/1.55 var(--mono);white-space:pre-wrap}
+.diff-foot{display:flex;align-items:center;gap:10px;padding:12px 16px;border-top:1px solid var(--border)}
+.diff-foot .spacer{flex:1}
+.diff-foot .hint{font-size:11.5px;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;
     transition-duration:.01ms !important;scroll-behavior:auto !important}
@@ -1214,6 +1236,10 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       <button class="cmdbtn" id="cmdBtn" title="命令面板 · Ctrl K">
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
         <span>命令、会话、文件</span><kbd>Ctrl K</kbd>
+      </button>
+      <button class="cmdbtn" id="diffBtn" type="button" title="查看本轮变更 / 按 hunk 接受">
+        <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+        <span>变更</span>
       </button>
       <div class="mh-chips">
         <span class="mh-model" id="mhModel">—</span>
@@ -1505,6 +1531,24 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
 </div>
 
 <div class="banner" id="banner"></div>
+
+<div class="diff-overlay" id="diffOverlay" hidden>
+  <div class="diff-panel" role="dialog" aria-modal="true" aria-labelledby="diffTitle">
+    <div class="diff-head">
+      <h2 id="diffTitle">变更审阅</h2>
+      <select id="diffCheckpoint" aria-label="选择 checkpoint"></select>
+      <div class="spacer"></div>
+      <button type="button" id="diffClose">关闭</button>
+    </div>
+    <div class="diff-body" id="diffBody"></div>
+    <div class="diff-foot">
+      <label><input type="checkbox" id="diffAll" checked> 全选</label>
+      <span class="hint" id="diffHint">未选中的 hunk 会回退到 checkpoint</span>
+      <div class="spacer"></div>
+      <button type="button" class="primary" id="diffApply">应用选中</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -3719,6 +3763,153 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     const rpct = document.getElementById('rpct');
     if (rpct) rpct.textContent = pct > 0 && pct < 1 ? '<1%' : Math.round(pct) + '%';
   }, 1000);
+})();
+</script>
+<script>
+// 变更审阅：只读 diff + 按 hunk 接受/回退。所有内容用 textContent 渲染，
+// 不把 diff 里的尖括号/脚本当成 HTML。
+(function () {
+  const request = window.__uiRequest;
+  const notify = window.__uiToast || (() => {});
+  const overlay = document.getElementById('diffOverlay');
+  const body = document.getElementById('diffBody');
+  const select = document.getElementById('diffCheckpoint');
+  const all = document.getElementById('diffAll');
+  const apply = document.getElementById('diffApply');
+  const hint = document.getElementById('diffHint');
+  if (!request || !overlay || !body || !select || !all || !apply) return;
+  let current = '';
+
+  const boxes = () => Array.from(body.querySelectorAll('input[type="checkbox"]'));
+  function syncCount() {
+    const n = boxes().filter((b) => b.checked).length;
+    hint.textContent = n ? n + ' 个 hunk 被选中；未选中的会回退到 checkpoint' : '未选中的 hunk 会回退到 checkpoint';
+  }
+  function close() { overlay.hidden = true; }
+
+  function render(report) {
+    current = report.checkpoint || '';
+    body.textContent = '';
+    const changes = report.changes || [];
+    if (!changes.length) {
+      const p = document.createElement('p');
+      p.textContent = '工作区与 checkpoint 一致。';
+      body.appendChild(p);
+      apply.disabled = true;
+      syncCount();
+      return;
+    }
+    for (const c of changes) {
+      const card = document.createElement('div');
+      card.className = 'diff-change';
+      const head = document.createElement('div');
+      head.className = 'dc-head';
+      const path = document.createElement('strong');
+      path.textContent = c.path;
+      const kind = document.createElement('span');
+      kind.textContent = '[' + c.kind + ']';
+      head.append(path, kind);
+      card.appendChild(head);
+      for (const h of (c.hunks || [])) {
+        const wrap = document.createElement('div');
+        wrap.className = 'diff-hunk';
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.value = h.id;
+        cb.onchange = syncCount;
+        label.append(cb, document.createTextNode(' ' + h.id));
+        const pre = document.createElement('pre');
+        pre.textContent = (h.lines || []).join('\n');
+        wrap.append(label, pre);
+        card.appendChild(wrap);
+      }
+      // 二进制/过大文件没有 hunk：按文件级接受。
+      if (!(c.hunks || []).length) {
+        const wrap = document.createElement('div');
+        wrap.className = 'diff-hunk';
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.value = c.path;
+        cb.onchange = syncCount;
+        label.append(cb, document.createTextNode(' 文件级：' + c.path));
+        const pre = document.createElement('pre');
+        pre.textContent = c.patch || '';
+        wrap.append(label, pre);
+        card.appendChild(wrap);
+      }
+      body.appendChild(card);
+    }
+    apply.disabled = false;
+    all.checked = true;
+    syncCount();
+  }
+
+  async function loadDiff(id) {
+    try {
+      const report = await request('/api/diff?checkpoint=' + encodeURIComponent(id));
+      render(report);
+    } catch (e) {
+      notify(e.message || '读取 diff 失败', 'error');
+    }
+  }
+
+  async function open() {
+    overlay.hidden = false;
+    try {
+      const rows = await request('/api/checkpoints');
+      select.textContent = '';
+      if (!Array.isArray(rows) || !rows.length) {
+        body.textContent = '还没有 checkpoint。先运行 `ui checkpoint`，或让 agent 在改文件前建一个。';
+        apply.disabled = true;
+        return;
+      }
+      for (const r of rows) {
+        const opt = document.createElement('option');
+        opt.value = r.id;
+        opt.textContent = (r.label || 'checkpoint') + ' · ' + r.id.slice(-8);
+        select.appendChild(opt);
+      }
+      select.value = rows[0].id;
+      await loadDiff(rows[0].id);
+    } catch (e) {
+      notify(e.message || '读取 checkpoint 失败', 'error');
+    }
+  }
+
+  const btn = document.getElementById('diffBtn');
+  if (btn) btn.onclick = open;
+  document.getElementById('diffClose').onclick = close;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !overlay.hidden) close();
+  });
+  all.onchange = () => {
+    boxes().forEach((b) => { b.checked = all.checked; });
+    syncCount();
+  };
+  select.onchange = () => loadDiff(select.value);
+  apply.onclick = async () => {
+    const accepted = boxes().filter((b) => b.checked).map((b) => b.value);
+    if (!accepted.length) { notify('没有选中任何 hunk', 'error'); return; }
+    apply.disabled = true;
+    try {
+      const out = await request('/api/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checkpoint: current, accepted: accepted, confirm: true })
+      });
+      notify('已应用：写入 ' + (out.written || 0) + ' 个文件，删除 ' + (out.removed || 0) + ' 个');
+      close();
+    } catch (e) {
+      notify(e.message || '应用失败', 'error');
+      apply.disabled = false;
+    }
+  };
+  window.__uiOpenDiff = open;
 })();
 </script>
 </body>
