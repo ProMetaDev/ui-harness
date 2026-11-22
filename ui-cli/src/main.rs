@@ -407,6 +407,34 @@ fn cmd_diff(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+fn cmd_review(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let id = args.get("checkpoint");
+    let report = ui_core::checkpoint::diff(&ws, id.as_deref())?;
+    let accept = args.get("accept");
+    if accept.is_none() {
+        if args.flag("json") {
+            println!("{}", report.to_json().to_compact());
+        } else {
+            print!("{}", report.render());
+            println!("\n用 --accept <path#n,...|all> --yes 接受 hunk；其余 hunk 会回退到 checkpoint。");
+        }
+        return Ok(0);
+    }
+    if !args.flag("yes") {
+        return Err("review 会改写工作区；确认后加 --yes".to_string());
+    }
+    let accepted: Vec<String> = accept
+        .unwrap()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let out = ui_core::checkpoint::review(&ws, report.checkpoint.as_str(), &accepted)?;
+    println!("{}", out.to_pretty());
+    Ok(0)
+}
+
 fn cmd_restore(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let id = args
@@ -753,6 +781,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("checkpoint") => cmd_checkpoint(&args),
         Some("checkpoints") => cmd_checkpoints(&args),
         Some("diff") => cmd_diff(&args),
+        Some("review") => cmd_review(&args),
         Some("restore") => cmd_restore(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
@@ -763,7 +792,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("forget") => memory::cmd_forget(&args),
         Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|restore）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|review|restore）",
             other
         )),
         None => {
@@ -852,6 +881,7 @@ fn help() -> String {
      ui checkpoint [--label L]    给当前 workspace 存一个零依赖内容寻址快照\n\
      ui checkpoints [--json]      列出 checkpoint\n\
      ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
+     ui review [--checkpoint ID]  列出 hunk；--accept path#n,all --yes 只保留选中的 hunk\n\
      ui restore --checkpoint ID --yes   从 checkpoint 写回（写回前自动再存 pre-restore）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\

@@ -97,6 +97,59 @@ fn checkpoint_diff_restore_end_to_end() {
 }
 
 #[test]
+fn review_accepts_only_one_hunk_end_to_end() {
+    let ws = temp_ws("review");
+    let old: String = (0..20).map(|i| format!("line {}\n", i)).collect();
+    fs::write(ws.join("a.txt"), &old).unwrap();
+
+    let cp = Command::new(bin())
+        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .output()
+        .expect("checkpoint");
+    assert!(cp.status.success());
+
+    let new_text = old.replacen("line 1\n", "CHANGED-1\n", 1).replacen(
+        "line 18\n",
+        "CHANGED-18\n",
+        1,
+    );
+    fs::write(ws.join("a.txt"), new_text).unwrap();
+
+    let diff = Command::new(bin())
+        .args(["diff", "--workspace", ws.to_str().unwrap(), "--json"])
+        .output()
+        .expect("diff");
+    assert!(diff.status.success());
+    let report = ui_core::json::parse(String::from_utf8_lossy(&diff.stdout).trim()).unwrap();
+    let first = report
+        .arr_at("changes")
+        .and_then(|c| c.first())
+        .and_then(|c| c.arr_at("hunks"))
+        .and_then(|h| h.first())
+        .and_then(|h| h.str_at("id"))
+        .expect("hunk id")
+        .to_string();
+
+    let review = Command::new(bin())
+        .args([
+            "review",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--accept",
+            &first,
+            "--yes",
+        ])
+        .output()
+        .expect("review");
+    assert!(review.status.success(), "{}", String::from_utf8_lossy(&review.stderr));
+    let got = fs::read_to_string(ws.join("a.txt")).unwrap();
+    assert!(got.contains("CHANGED-1"));
+    assert!(!got.contains("CHANGED-18"));
+    assert!(got.contains("line 18"));
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn journal_flag_redirects_the_log() {
     let ws = temp_ws("journal");
     let sc = scenario(&ws);

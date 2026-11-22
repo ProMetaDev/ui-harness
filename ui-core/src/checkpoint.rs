@@ -167,12 +167,25 @@ pub fn latest_id(ws: &Path) -> Result<String, String> {
         .ok_or_else(|| "还没有 checkpoint；先运行 `ui checkpoint`".to_string())
 }
 
+#[derive(Clone)]
+pub struct Hunk {
+    pub id: String,
+    pub path: String,
+    pub index: usize,
+    pub old_start: usize,
+    pub old_count: usize,
+    pub new_start: usize,
+    pub new_count: usize,
+    pub lines: Vec<String>,
+}
+
 pub struct Change {
     pub path: String,
     pub kind: String,
     pub old: Option<Vec<u8>>,
     pub new: Option<Vec<u8>>,
     pub patch: String,
+    pub hunks: Vec<Hunk>,
 }
 
 pub struct DiffReport {
@@ -194,6 +207,34 @@ impl DiffReport {
                                 ("path", Json::from(c.path.as_str())),
                                 ("kind", Json::from(c.kind.as_str())),
                                 ("patch", Json::from(c.patch.as_str())),
+                                (
+                                    "hunks",
+                                    Json::Arr(
+                                        c.hunks
+                                            .iter()
+                                            .map(|h| {
+                                                Json::obj(vec![
+                                                    ("id", Json::from(h.id.as_str())),
+                                                    ("path", Json::from(h.path.as_str())),
+                                                    ("index", Json::from(h.index as u64)),
+                                                    ("oldStart", Json::from(h.old_start as u64)),
+                                                    ("oldCount", Json::from(h.old_count as u64)),
+                                                    ("newStart", Json::from(h.new_start as u64)),
+                                                    ("newCount", Json::from(h.new_count as u64)),
+                                                    (
+                                                        "lines",
+                                                        Json::Arr(
+                                                            h.lines
+                                                                .iter()
+                                                                .map(|l| Json::from(l.as_str()))
+                                                                .collect(),
+                                                        ),
+                                                    ),
+                                                ])
+                                            })
+                                            .collect(),
+                                    ),
+                                ),
                                 (
                                     "oldBytes",
                                     Json::from(c.old.as_ref().map(|b| b.len()).unwrap_or(0) as u64),
@@ -280,23 +321,16 @@ fn lcs_ops(old: &[String], new: &[String]) -> Vec<(char, String, String)> {
     out
 }
 
-fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
+fn make_hunks(path: &str, old: &[u8], new: &[u8]) -> Vec<Hunk> {
     if !is_text(old) || !is_text(new) {
-        return format!("Binary files a/{} and b/{} differ\n", path, path);
+        return Vec::new();
     }
     let old_lines = lines(old);
     let new_lines = lines(new);
     let ops = lcs_ops(&old_lines, &new_lines);
     if ops.is_empty() {
-        return format!(
-            "（文件较大，未生成逐行 diff；a/{} {} bytes → b/{} {} bytes）\n",
-            path,
-            old.len(),
-            path,
-            new.len()
-        );
+        return Vec::new();
     }
-    // 找到变更区间，按 CTX 分组为 hunk。
     let changed: Vec<usize> = ops
         .iter()
         .enumerate()
@@ -304,9 +338,9 @@ fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
         .map(|(i, _)| i)
         .collect();
     if changed.is_empty() {
-        return String::new();
+        return Vec::new();
     }
-    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut start = changed[0].saturating_sub(CTX);
     let mut end = (changed[0] + CTX + 1).min(ops.len());
     for &i in &changed[1..] {
@@ -315,15 +349,15 @@ fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
         if s <= end {
             end = end.max(e);
         } else {
-            hunks.push((start, end));
+            ranges.push((start, end));
             start = s;
             end = e;
         }
     }
-    hunks.push((start, end));
+    ranges.push((start, end));
 
-    let mut out = format!("--- a/{}\n+++ b/{}\n", path, path);
-    for (hs, he) in hunks {
+    let mut out = Vec::new();
+    for (n, (hs, he)) in ranges.into_iter().enumerate() {
         let mut old_start = 0usize;
         let mut new_start = 0usize;
         for (tag, _, _) in &ops[..hs] {
@@ -339,16 +373,37 @@ fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
         }
         let old_count = ops[hs..he].iter().filter(|(t, _, _)| *t != '+').count();
         let new_count = ops[hs..he].iter().filter(|(t, _, _)| *t != '-').count();
-        out.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            old_start + 1,
-            old_count,
-            new_start + 1,
-            new_count
-        ));
+        let mut hlines = Vec::new();
         for (tag, o, n) in &ops[hs..he] {
             let line = if *tag == '-' { o } else { n };
-            out.push(*tag);
+            hlines.push(format!("{}{}", tag, line));
+        }
+        out.push(Hunk {
+            id: format!("{}#{}", path, n + 1),
+            path: path.to_string(),
+            index: n + 1,
+            old_start: old_start + 1,
+            old_count,
+            new_start: new_start + 1,
+            new_count,
+            lines: hlines,
+        });
+    }
+    out
+}
+
+fn render_hunks(hunks: &[Hunk]) -> String {
+    if hunks.is_empty() {
+        return String::new();
+    }
+    let path = &hunks[0].path;
+    let mut out = format!("--- a/{}\n+++ b/{}\n", path, path);
+    for h in hunks {
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            h.old_start, h.old_count, h.new_start, h.new_count
+        ));
+        for line in &h.lines {
             out.push_str(line);
             if !line.ends_with('\n') {
                 out.push('\n');
@@ -356,6 +411,23 @@ fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
         }
     }
     out
+}
+
+fn patch_text(path: &str, old: &[u8], new: &[u8]) -> String {
+    if !is_text(old) || !is_text(new) {
+        return format!("Binary files a/{} and b/{} differ\n", path, path);
+    }
+    let hunks = make_hunks(path, old, new);
+    if hunks.is_empty() {
+        return format!(
+            "（文件较大或无可逐行 diff；a/{} {} bytes → b/{} {} bytes）\n",
+            path,
+            old.len(),
+            path,
+            new.len()
+        );
+    }
+    render_hunks(&hunks)
 }
 
 pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
@@ -391,6 +463,14 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
             .get(&key)
             .map(|p| fs::read(p).map_err(|e| format!("读 {} 失败: {}", key, e)))
             .transpose()?;
+        let old_bytes = old.as_deref().unwrap_or(b"");
+        let new_bytes = new.as_deref().unwrap_or(b"");
+        let hunks = make_hunks(&key, old_bytes, new_bytes);
+        let patch = if hunks.is_empty() {
+            patch_text(&key, old_bytes, new_bytes)
+        } else {
+            render_hunks(&hunks)
+        };
         match (&old, &new) {
             (Some(o), Some(n)) if o == n => {}
             (None, Some(n)) => changes.push(Change {
@@ -398,21 +478,24 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
                 kind: "added".into(),
                 old: None,
                 new: Some(n.clone()),
-                patch: patch_text(&key, b"", n),
+                patch: patch.clone(),
+                hunks: hunks.clone(),
             }),
             (Some(o), None) => changes.push(Change {
                 path: key.clone(),
                 kind: "deleted".into(),
                 old: Some(o.clone()),
                 new: None,
-                patch: patch_text(&key, o, b""),
+                patch: patch.clone(),
+                hunks: hunks.clone(),
             }),
             (Some(o), Some(n)) => changes.push(Change {
                 path: key.clone(),
                 kind: "modified".into(),
                 old: Some(o.clone()),
                 new: Some(n.clone()),
-                patch: patch_text(&key, o, n),
+                patch: patch.clone(),
+                hunks: hunks.clone(),
             }),
             (None, None) => {}
         }
@@ -444,6 +527,152 @@ fn ensure_restore_target(ws: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn apply_hunks(old: &[u8], hunks: &[Hunk]) -> Result<Vec<u8>, String> {
+    let old_lines = lines(old);
+    let mut ordered: Vec<&Hunk> = hunks.iter().collect();
+    ordered.sort_by_key(|h| h.old_start);
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for h in ordered {
+        let start = h.old_start.saturating_sub(1);
+        if start < cursor {
+            return Err(format!("hunk {} 重叠", h.id));
+        }
+        if start > old_lines.len() {
+            return Err(format!("hunk {} 起点越界", h.id));
+        }
+        for line in &old_lines[cursor..start] {
+            out.push_str(line);
+        }
+        let old_block: Vec<&str> = h
+            .lines
+            .iter()
+            .filter(|l| !l.starts_with('+'))
+            .map(|l| &l[1..])
+            .collect();
+        if old_block.len() != h.old_count {
+            return Err(format!("hunk {} oldCount 不一致", h.id));
+        }
+        if start + old_block.len() > old_lines.len() {
+            return Err(format!("hunk {} 超出旧文件", h.id));
+        }
+        for (i, want) in old_block.iter().enumerate() {
+            if old_lines[start + i] != *want {
+                return Err(format!("hunk {} 上下文不匹配", h.id));
+            }
+        }
+        for line in &h.lines {
+            if !line.starts_with('-') {
+                out.push_str(&line[1..]);
+            }
+        }
+        cursor = start + old_block.len();
+    }
+    for line in &old_lines[cursor..] {
+        out.push_str(line);
+    }
+    Ok(out.into_bytes())
+}
+
+fn write_review_target(ws: &Path, target: &Path, bytes: &[u8]) -> Result<(), String> {
+    ensure_restore_target(ws, target)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    let tmp = target.with_extension(format!("ui-review-{}", std::process::id()));
+    fs::write(&tmp, bytes).map_err(|e| format!("写 {} 失败: {}", target.display(), e))?;
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("落盘 {} 失败: {}", target.display(), e)
+    })
+}
+
+/// 按 hunk 接受/拒绝一次 diff。
+///
+/// 语义：`accepted` 里的 hunk 保留新内容，其余 hunk 回到 checkpoint 的旧内容。
+/// 写盘前自动创建 `pre-review-<id>`，所以 review 本身也可回滚。
+pub fn review(ws: &Path, id: &str, accepted: &[String]) -> Result<Json, String> {
+    let report = diff(ws, Some(id))?;
+    let mut all_ids = Vec::new();
+    for c in &report.changes {
+        for h in &c.hunks {
+            all_ids.push(h.id.clone());
+        }
+    }
+    let file_level: std::collections::BTreeSet<String> = report
+        .changes
+        .iter()
+        .filter(|c| c.hunks.is_empty())
+        .map(|c| c.path.clone())
+        .collect();
+    for a in accepted {
+        if a != "all" && !all_ids.contains(a) && !file_level.contains(a) {
+            return Err(format!("未知 hunk: {}", a));
+        }
+    }
+    let accept_all = accepted.iter().any(|s| s == "all");
+    let accepted_set: std::collections::BTreeSet<String> = if accept_all {
+        all_ids.iter().cloned().collect()
+    } else {
+        accepted.iter().cloned().collect()
+    };
+
+    // 先算完所有目标内容，再写盘：某个 hunk 上下文不匹配时不能留下半套修改。
+    let mut plan: Vec<(std::path::PathBuf, Option<Vec<u8>>, String)> = Vec::new();
+    for change in &report.changes {
+        let target = ws.join(Path::new(&change.path));
+        ensure_restore_target(ws, &target)?;
+        let selected: Vec<Hunk> = change
+            .hunks
+            .iter()
+            .filter(|h| accepted_set.contains(&h.id))
+            .cloned()
+            .collect();
+        let result: Option<Vec<u8>> = if change.hunks.is_empty() {
+            // 二进制/过大文件没有 hunk：文件名可作为文件级接受标记。
+            if accept_all || accepted_set.contains(&change.path) {
+                change.new.clone()
+            } else {
+                change.old.clone()
+            }
+        } else if selected.len() == change.hunks.len() {
+            change.new.clone()
+        } else if selected.is_empty() {
+            change.old.clone()
+        } else {
+            let old = change.old.clone().unwrap_or_default();
+            Some(apply_hunks(&old, &selected)?)
+        };
+        plan.push((target, result, change.path.clone()));
+    }
+
+    let backup = create(ws, &format!("pre-review-{}", id))?;
+    let mut written = 0u64;
+    let mut removed = 0u64;
+    for (target, result, rel) in plan {
+        match result {
+            Some(bytes) => {
+                write_review_target(ws, &target, &bytes)?;
+                written += 1;
+            }
+            None => {
+                if target.exists() {
+                    ensure_restore_target(ws, &target)?;
+                    fs::remove_file(&target).map_err(|e| format!("删除 {} 失败: {}", rel, e))?;
+                    removed += 1;
+                }
+            }
+        }
+    }
+    Ok(Json::obj(vec![
+        ("checkpoint", Json::from(id)),
+        ("accepted", Json::from(accepted_set.len() as u64)),
+        ("written", Json::from(written)),
+        ("removed", Json::from(removed)),
+        ("backup", backup.get("id").cloned().unwrap_or(Json::Null)),
+    ]))
 }
 
 pub fn restore(ws: &Path, id: &str) -> Result<Json, String> {
@@ -529,6 +758,60 @@ mod tests {
         assert_eq!(fs::read_to_string(ws.join("src/b.txt")).unwrap(), "hello\n");
         // restore 不应删除 checkpoint 后新增的文件（非 prune 语义）。
         assert!(ws.join("src/new.txt").exists());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn review_keeps_only_accepted_hunks() {
+        let ws = scratch("review");
+        let old: String = (0..20).map(|i| format!("line {}\n", i)).collect();
+        fs::write(ws.join("a.txt"), &old).unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+
+        let mut new_lines: Vec<String> = (0..20).map(|i| format!("line {}\n", i)).collect();
+        new_lines[1] = "CHANGED-1\n".into();
+        new_lines[18] = "CHANGED-18\n".into();
+        fs::write(ws.join("a.txt"), new_lines.concat()).unwrap();
+
+        let report = diff(&ws, Some(&id)).unwrap();
+        let hunks = &report.changes[0].hunks;
+        assert_eq!(hunks.len(), 2, "two separated changes should be two hunks");
+        let first = hunks[0].id.clone();
+        let out = review(&ws, &id, &[first]).unwrap();
+        assert_eq!(out.u64_at("written"), Some(1));
+        let got = fs::read_to_string(ws.join("a.txt")).unwrap();
+        assert!(got.contains("CHANGED-1"));
+        assert!(!got.contains("CHANGED-18"), "rejected hunk must revert");
+        assert!(got.contains("line 18"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn review_accepts_binary_by_file_path() {
+        let ws = scratch("review-binary");
+        fs::write(ws.join("a.bin"), [0u8, 1, 2]).unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        fs::write(ws.join("a.bin"), [0u8, 9, 2]).unwrap();
+        let report = diff(&ws, Some(&id)).unwrap();
+        assert!(report.changes[0].hunks.is_empty());
+        let out = review(&ws, &id, &["a.bin".to_string()]).unwrap();
+        assert_eq!(out.u64_at("written"), Some(1));
+        assert_eq!(fs::read(ws.join("a.bin")).unwrap(), vec![0u8, 9, 2]);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn review_rejects_unknown_hunk_without_writing() {
+        let ws = scratch("review-unknown");
+        fs::write(ws.join("a.txt"), "one\n").unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        fs::write(ws.join("a.txt"), "two\n").unwrap();
+        let err = review(&ws, &id, &["a.txt#999".to_string()]).unwrap_err();
+        assert!(err.contains("未知 hunk"));
+        assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "two\n");
         let _ = fs::remove_dir_all(&ws);
     }
 
