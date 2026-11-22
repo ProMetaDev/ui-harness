@@ -679,6 +679,47 @@ pub fn review(ws: &Path, id: &str, accepted: &[String]) -> Result<Json, String> 
     ]))
 }
 
+/// 只回退一个文件：manifest 里有就写回旧内容，没有（checkpoint 后新增）就删除。
+pub fn revert_file(ws: &Path, id: &str, rel: &str) -> Result<Json, String> {
+    let rel_path = Path::new(rel);
+    let reserved = rel
+        .split('/')
+        .next()
+        .map(|s| matches!(s, ".ui" | ".git" | "target" | "node_modules"))
+        .unwrap_or(false);
+    if rel_path.is_absolute() || rel.split('/').any(|s| s == "..") || reserved {
+        return Err(format!("拒绝回退受保护路径: {}", rel));
+    }
+    let manifest = load_manifest(ws, id)?;
+    let entry = manifest
+        .get("entries")
+        .and_then(|v| v.as_arr())
+        .and_then(|a| a.iter().find(|e| e.str_at("path") == Some(rel)))
+        .cloned();
+    let target = ws.join(rel_path);
+    ensure_restore_target(ws, &target)?;
+    if entry.is_none() && !target.exists() {
+        return Err(format!("{} 不在 checkpoint，也不在当前工作区", rel));
+    }
+    let backup = create(ws, &format!("pre-revert-{}", id))?;
+    let action;
+    if let Some(e) = entry {
+        let hash = e.str_at("sha256").unwrap_or("");
+        let bytes = read_blob(ws, hash)?;
+        write_review_target(ws, &target, &bytes)?;
+        action = "restored";
+    } else {
+        fs::remove_file(&target).map_err(|e| format!("删除 {} 失败: {}", rel, e))?;
+        action = "removed";
+    }
+    Ok(Json::obj(vec![
+        ("checkpoint", Json::from(id)),
+        ("path", Json::from(rel)),
+        ("action", Json::from(action)),
+        ("backup", backup.get("id").cloned().unwrap_or(Json::Null)),
+    ]))
+}
+
 pub fn restore(ws: &Path, id: &str) -> Result<Json, String> {
     let manifest = load_manifest(ws, id)?;
     // 先给当前工作区留一个可回滚点；restore 本身也可能写错。
@@ -788,6 +829,29 @@ mod tests {
         assert!(got.contains("CHANGED-1"));
         assert!(!got.contains("CHANGED-18"), "rejected hunk must revert");
         assert!(got.contains("line 18"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn revert_file_restores_or_deletes_one_path_only() {
+        let ws = scratch("revert-file");
+        fs::write(ws.join("a.txt"), "old\n").unwrap();
+        fs::write(ws.join("b.txt"), "keep\n").unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        fs::write(ws.join("a.txt"), "new\n").unwrap();
+        fs::write(ws.join("added.txt"), "added\n").unwrap();
+
+        let out = revert_file(&ws, &id, "a.txt").unwrap();
+        assert_eq!(out.str_at("action"), Some("restored"));
+        assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "old\n");
+        assert_eq!(fs::read_to_string(ws.join("b.txt")).unwrap(), "keep\n");
+        assert!(ws.join("added.txt").exists(), "只回退指定路径");
+
+        let out = revert_file(&ws, &id, "added.txt").unwrap();
+        assert_eq!(out.str_at("action"), Some("removed"));
+        assert!(!ws.join("added.txt").exists());
+        assert!(revert_file(&ws, &id, ".ui/journal.jsonl").is_err());
         let _ = fs::remove_dir_all(&ws);
     }
 

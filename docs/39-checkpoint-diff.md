@@ -7,6 +7,7 @@
 ## 1. 命令
 
 ```bash
+ui run --task "..." --checkpoint   # 开跑前自动存基线
 ui checkpoint --label before-edit
 ui checkpoints
 ui diff
@@ -14,11 +15,14 @@ ui diff --checkpoint cp-... --json
 ui review --checkpoint cp-...
 ui review --checkpoint cp-... --accept path#1,path#2 --yes
 ui review --checkpoint cp-... --accept all --yes
+ui revert --checkpoint cp-... --path src/main.rs --yes
 ui restore --checkpoint cp-... --yes
 ```
 
 ### checkpoint
 
+- `ui run --checkpoint` 在 agent 改动前自动存一次；
+- 也可手动 `ui checkpoint` 指定 label；
 - 扫描 workspace；
 - 每个文件内容做 sha256；
 - 内容写入 `.ui/checkpoints/blobs/<sha256>`；
@@ -52,6 +56,14 @@ ui restore --checkpoint cp-... --yes
 - 先计算全部结果再写盘，hunk 上下文不匹配时不会留下半套修改；
 - 成功后写一条 `review/apply` journal 事件（actor=cli，含 checkpoint/accepted/written/removed/backup）；
 - 审计写失败时明确报“文件已写回、需要人工补账”，不静默成功；
+- 必须显式 `--yes`。
+
+### revert
+
+- 只处理一个文件：manifest 里有就写回旧内容，没有（checkpoint 后新增）就删除；
+- 拒绝 `.ui/.git/target/node_modules`、绝对路径和 `..`；
+- 写盘前自动创建 `pre-revert-<id>`；
+- 成功后写 `review/revert` journal 事件；
 - 必须显式 `--yes`。
 
 ### restore
@@ -153,6 +165,7 @@ manifest：
 - `symlinks_are_not_followed`
 - CLI e2e：`checkpoint_diff_restore_end_to_end`
 - CLI e2e：`review_accepts_only_one_hunk_end_to_end`
+- CLI e2e：`revert_single_file_end_to_end`
 - HTTP e2e：`checkpoint_diff_review_api_round_trip`
 
 ## 8. 下一步

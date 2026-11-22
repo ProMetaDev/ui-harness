@@ -461,6 +461,47 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+fn cmd_revert(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    let id = args
+        .get("checkpoint")
+        .ok_or_else(|| "revert 需要 --checkpoint <id>".to_string())?;
+    let path = args
+        .get("path")
+        .ok_or_else(|| "revert 需要 --path <workspace 相对路径>".to_string())?;
+    if !args.flag("yes") {
+        return Err(format!("revert 会改写 {}；确认后加 --yes", path));
+    }
+    let out = ui_core::checkpoint::revert_file(&ws, id, path)?;
+    let jp = resolve_journal(args, &ws);
+    let seq = match ui_core::Journal::open(&jp).and_then(|mut j| {
+        j.append(
+            "review/revert",
+            Json::obj(vec![
+                ("actor", Json::from("cli")),
+                ("checkpoint", Json::from(id)),
+                ("path", Json::from(path)),
+                (
+                    "action",
+                    out.str_at("action").map(Json::from).unwrap_or(Json::Null),
+                ),
+            ]),
+        )
+    }) {
+        Ok(event) => event.u64_at("seq").unwrap_or(0),
+        Err(e) => {
+            return Err(format!(
+                "revert 已写回文件，但审计失败: {}；需要人工补账",
+                e
+            ))
+        }
+    };
+    let mut out = out;
+    out.set("journalSeq", Json::from(seq));
+    println!("{}", out.to_pretty());
+    Ok(0)
+}
+
 fn cmd_restore(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let id = args
@@ -808,6 +849,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("checkpoints") => cmd_checkpoints(&args),
         Some("diff") => cmd_diff(&args),
         Some("review") => cmd_review(&args),
+        Some("revert") => cmd_revert(&args),
         Some("restore") => cmd_restore(&args),
         Some("apply") => cmd_apply(&args),
         Some("audit") => cmd_audit(&args),
@@ -818,7 +860,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("forget") => memory::cmd_forget(&args),
         Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|review|restore）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|review|revert|restore）",
             other
         )),
         None => {
@@ -908,11 +950,13 @@ fn help() -> String {
      ui checkpoints [--json]      列出 checkpoint\n\
      ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
      ui review [--checkpoint ID]  列出 hunk；--accept path#n,all --yes 只保留选中的 hunk\n\
+     ui revert --checkpoint ID --path P --yes   只回退一个文件（新增文件则删除）\n\
      ui restore --checkpoint ID --yes   从 checkpoint 写回（写回前自动再存 pre-restore）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
      通用参数: --workspace PATH  --task-file PATH  --max-tokens N  --max-calls N  --max-steps N  --yes\n\
+     审阅:     ui run --checkpoint 在开跑前存基线；之后用 ui diff / ui review / ui revert\n\
      隐私:     --private PATH（可重复，也可 a;b 一条给多个）或 UI_PRIVATE=\"a;b\"\n\
              默认清单 .ui/.git/secrets 之外再挡住的路径：工具、策略、网页端共用同一份\n\
      落账:     工具输出写进日志前默认抹掉凭据形状（要原文加 --no-redact，日志会记下这个选择）\n\
@@ -1875,6 +1919,15 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     let journal = Journal::open(&jp).map_err(|e| e.to_string())?;
     println!("workspace {}", ws.display());
     println!("journal   {}", jp.display());
+    // 审阅需要基线；显式开启，避免每次 run 都对大仓库做全量快照。
+    if args.flag("checkpoint") {
+        let cp = ui_core::checkpoint::create(&ws, "before-run")?;
+        println!(
+            "checkpoint {} · {} files",
+            cp.str_at("id").unwrap_or("?"),
+            cp.u64_at("files").unwrap_or(0)
+        );
+    }
 
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
     // 默认 `ui run` 仍是一次独立运行；只有显式 `--session` 才恢复该会话历史。

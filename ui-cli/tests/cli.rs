@@ -154,6 +154,93 @@ fn review_accepts_only_one_hunk_end_to_end() {
 }
 
 #[test]
+fn revert_single_file_end_to_end() {
+    let ws = temp_ws("revert");
+    fs::write(ws.join("a.txt"), "old\n").unwrap();
+    fs::write(ws.join("b.txt"), "keep\n").unwrap();
+
+    let cp = Command::new(bin())
+        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .output()
+        .expect("checkpoint");
+    assert!(cp.status.success());
+    let listed = Command::new(bin())
+        .args(["checkpoints", "--workspace", ws.to_str().unwrap(), "--json"])
+        .output()
+        .expect("checkpoints");
+    let rows = ui_core::json::parse(String::from_utf8_lossy(&listed.stdout).trim()).unwrap();
+    let id = rows
+        .as_arr()
+        .and_then(|a| a.first())
+        .and_then(|e| e.str_at("id"))
+        .expect("id")
+        .to_string();
+
+    fs::write(ws.join("a.txt"), "new\n").unwrap();
+    fs::write(ws.join("added.txt"), "added\n").unwrap();
+    let out = Command::new(bin())
+        .args([
+            "revert",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--checkpoint",
+            &id,
+            "--path",
+            "a.txt",
+            "--yes",
+        ])
+        .output()
+        .expect("revert");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "old\n");
+    assert_eq!(fs::read_to_string(ws.join("b.txt")).unwrap(), "keep\n");
+    assert!(ws.join("added.txt").exists());
+    let (events, corrupt) =
+        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(corrupt.is_none());
+    assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn run_can_checkpoint_before_tool_writes() {
+    let ws = temp_ws("run-checkpoint");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"写文件","toolCalls":[{"name":"fs_write","args":{"path":"a.txt","content":"x"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--task",
+            "写文件",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--checkpoint",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let cp = ui_core::checkpoint::list(&ws).unwrap();
+    assert!(!cp.is_empty(), "--checkpoint 必须留下基线");
+    let diff = Command::new(bin())
+        .args(["diff", "--workspace", ws.to_str().unwrap(), "--json"])
+        .output()
+        .expect("diff");
+    assert!(diff.status.success());
+    let report = ui_core::json::parse(String::from_utf8_lossy(&diff.stdout).trim()).unwrap();
+    assert!(!report.arr_at("changes").cloned().unwrap_or_default().is_empty());
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn journal_flag_redirects_the_log() {
     let ws = temp_ws("journal");
     let sc = scenario(&ws);
