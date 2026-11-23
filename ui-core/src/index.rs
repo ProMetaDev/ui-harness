@@ -40,10 +40,14 @@ fn walk(ws: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         if meta.is_dir() {
             walk(ws, &path, out)?;
         } else if meta.is_file() {
+            if crate::protected::is_sensitive_file_name(&name)
+                || crate::protected::is_private_path(ws, &path)
+            {
+                continue;
+            }
             out.push(path);
         }
     }
-    let _ = ws;
     Ok(())
 }
 
@@ -361,6 +365,20 @@ mod tests {
         fs::remove_file(ws.join("b.rs")).unwrap();
         let removed = build_incremental(&ws).unwrap();
         assert_eq!(removed.u64_at("removed"), Some(1));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn index_skips_secret_files_and_private_dirs() {
+        let ws = scratch("private");
+        fs::write(ws.join(".env"), "TOKEN=secret\n").unwrap();
+        fs::create_dir_all(ws.join("secrets")).unwrap();
+        fs::write(ws.join("secrets/db.txt"), "pw\n").unwrap();
+        fs::write(ws.join("a.rs"), "fn a() {}\n").unwrap();
+        let out = build(&ws).unwrap();
+        assert_eq!(out.u64_at("files"), Some(1));
+        assert!(!context(&ws, ".env", 10).contains(".env"));
+        assert!(!context(&ws, "secrets", 10).contains("secrets/"));
         let _ = fs::remove_dir_all(&ws);
     }
 

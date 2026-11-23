@@ -158,6 +158,7 @@ manifest：
 ## 6. 安全边界
 
 - checkpoint 只读 workspace 文件，不跟随 symlink；
+- 跳过 `.env*`、私钥/证书、`secrets/` 与 `--private` 声明路径；敏感文件不会进入 blob；
 - restore 校验父目录 realpath；
 - restore 不写 symlink 目标；
 - manifest 路径拒绝绝对路径和 `..`；

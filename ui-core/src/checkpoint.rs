@@ -44,6 +44,11 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, PathBuf>) -> Result<
         if meta.is_dir() {
             walk(root, &path, out)?;
         } else if meta.is_file() {
+            if crate::protected::is_sensitive_file_name(&name)
+                || crate::protected::is_private_path(root, &path)
+            {
+                continue;
+            }
             let rel = path.strip_prefix(root).unwrap_or(&path);
             out.insert(rel_key(rel), path);
         }
@@ -82,6 +87,11 @@ fn walk_limited(
         if meta.is_dir() {
             walk_limited(root, &path, out, bytes, max_files, max_bytes)?;
         } else if meta.is_file() {
+            if crate::protected::is_sensitive_file_name(&name)
+                || crate::protected::is_private_path(root, &path)
+            {
+                continue;
+            }
             let size = meta.len();
             if out.len() + 1 > max_files {
                 return Err(format!(
@@ -990,6 +1000,25 @@ mod tests {
         assert_eq!(out.u64_at("pruned"), Some(1));
         assert!(!ws.join("extra.txt").exists());
         assert!(ws.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn checkpoint_skips_secret_files_and_private_dirs() {
+        let ws = scratch("private");
+        fs::write(ws.join(".env"), "TOKEN=secret\n").unwrap();
+        fs::create_dir_all(ws.join("secrets")).unwrap();
+        fs::write(ws.join("secrets/db.txt"), "pw\n").unwrap();
+        fs::write(ws.join("id_rsa"), "key\n").unwrap();
+        fs::write(ws.join("a.txt"), "ok\n").unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap();
+        let manifest = load_manifest(&ws, id).unwrap();
+        let paths: Vec<&str> = manifest
+            .arr_at("entries")
+            .map(|a| a.iter().filter_map(|e| e.str_at("path")).collect())
+            .unwrap_or_default();
+        assert_eq!(paths, vec!["a.txt"], "checkpoint 不能复制私有文件: {:?}", paths);
         let _ = fs::remove_dir_all(&ws);
     }
 

@@ -32,6 +32,28 @@ use std::sync::{Mutex, OnceLock};
 /// 拉黑会让模型读不到构建配置，收益不抵代价。
 pub const PROTECTED_DIRS: &[&str] = &[".ui", ".git", "secrets"];
 
+/// 文件级敏感名：目录清单管不到 `.env` / 私钥这类单文件。
+///
+/// checkpoint 会把文件内容复制进 blob，index 会把路径/符号写进 manifest；
+/// 两者都必须先过这一条。这里故意保守：宁可少索引一个配置文件，也不把
+/// 凭据复制出第二份。
+pub fn is_sensitive_file_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n == ".env" || n.starts_with(".env.") {
+        return true;
+    }
+    if matches!(
+        n.as_str(),
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | "credentials" | ".netrc" | ".npmrc" | ".pypirc"
+    ) {
+        return true;
+    }
+    matches!(
+        n.rsplit_once('.').map(|(_, e)| e),
+        Some("key" | "pem" | "p12" | "pfx")
+    )
+}
+
 /// 受保护目录里唯一允许 `fs.read` 的路径前缀（相对 workspace，`/` 分隔）。
 ///
 /// 长工具输出会落到 `.ui/tool-output/`，上下文里只留一小片，模型必须能把

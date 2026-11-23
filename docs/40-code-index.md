@@ -46,6 +46,7 @@ ui index --query "agent" --json
 ## 3. 排除与限制
 
 - 排除 `.git/.ui/target/node_modules/dist/build`；
+- 排除 `.env*`、私钥/证书、`secrets/` 与私有路径声明；
 - 不跟随符号链接；
 - 单文件超过 1 MiB 跳过；
 - 二进制文件跳过；
