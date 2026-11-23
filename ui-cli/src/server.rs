@@ -3035,8 +3035,8 @@ mod tests {
         let cp = ui_core::checkpoint::create(&ws, "before").unwrap();
         let id = cp.str_at("id").unwrap().to_string();
         std::fs::write(ws.join("a.txt"), "two\n").unwrap();
-        let secret = "proxy-secret-must-not-leak";
-        let hub = trusted_hub(&ws, secret);
+        let proxy_value = "not-a-real-credential";
+        let hub = trusted_hub(&ws, proxy_value);
         let body = format!(
             "{{\"checkpoint\":\"{}\",\"accepted\":[\"all\"],\"confirm\":true}}",
             id
@@ -3045,7 +3045,7 @@ mod tests {
             hub.clone(),
             &format!(
                 "POST /api/review HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nX-UI-Proxy-Secret: {}\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                secret,
+                proxy_value,
                 body.len(),
                 body
             ),
@@ -3055,7 +3055,7 @@ mod tests {
             let log = hub.log.lock().unwrap();
             let leaked: Vec<_> = log
                 .iter()
-                .filter(|(_, line)| line.contains(secret))
+                .filter(|(_, line)| line.contains(proxy_value))
                 .map(|(n, _)| *n)
                 .collect();
             assert!(leaked.is_empty(), "事件里不得出现代理密钥，命中 seq={:?}", leaked);
@@ -3063,7 +3063,7 @@ mod tests {
         let jp = ws.join(".ui").join("journal.jsonl");
         let text = std::fs::read_to_string(&jp).unwrap_or_default();
         assert!(!text.is_empty(), "review 应写 journal");
-        assert!(!text.contains(secret), "journal 里不得出现代理密钥");
+        assert!(!text.contains(proxy_value), "journal 里不得出现代理密钥");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
