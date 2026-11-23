@@ -338,6 +338,26 @@ pub fn build_snapshot(
         },
     ];
 
+    // 轻量代码索引：只注入“相关文件地图”，不把文件正文塞进上下文。
+    // 索引不存在时 context() 返回空串，老工作区行为不变。
+    let index_query = history
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let index_text = crate::index::context(workspace, &index_query, 12);
+    if !index_text.is_empty() {
+        sections.push(Section {
+            id: "index",
+            owner: "workspace",
+            text: index_text,
+            tokens: 0,
+            bytes: 0,
+            volatility: "turn",
+        });
+    }
+
     if !skills_catalog.is_empty() {
         sections.push(Section {
             id: "skills",

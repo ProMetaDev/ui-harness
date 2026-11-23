@@ -17,6 +17,7 @@ ui review --checkpoint cp-... --accept path#1,path#2 --yes
 ui review --checkpoint cp-... --accept all --yes
 ui revert --checkpoint cp-... --path src/main.rs --yes
 ui restore --checkpoint cp-... --yes
+ui restore --checkpoint cp-... --prune --yes
 ```
 
 ### checkpoint
@@ -74,7 +75,8 @@ ui restore --checkpoint cp-... --yes
 
 - 先自动创建一个 `pre-restore-<id>` checkpoint；
 - 只写回 manifest 中存在的路径；
-- **不删除** checkpoint 之后新增的文件（没有 `--prune`）；
+- 默认不删除 checkpoint 之后新增的文件；`--prune` 才清理未跟踪文件；
+- 内容完全相同的 delete+add 会识别为 `renamed`（改名又改内容仍按 delete+add）；
 - 拒绝写符号链接或越出 workspace 的路径；
 - 必须显式 `--yes`。
 
@@ -172,6 +174,9 @@ manifest：
 - CLI e2e：`revert_single_file_end_to_end`
 - CLI e2e：`run_can_checkpoint_before_tool_writes`
 - CLI e2e：`run_auto_checkpoints_before_first_write`
+- `automatic_limit_fails_before_writing_a_manifest`
+- `restore_prune_removes_untracked_files_only_when_asked`
+- `exact_content_rename_is_detected_and_reviewed`
 - HTTP e2e：`checkpoint_diff_review_api_round_trip`
 
 ## 8. 下一步

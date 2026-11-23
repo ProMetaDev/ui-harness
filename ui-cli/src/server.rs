@@ -1382,6 +1382,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 ),
             }
         }
+        ("GET", "/api/reviews") => {
+            json_response(&mut stream, &review_history(&hub).to_compact())
+        }
         ("POST", "/api/review") => {
             if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
                 return json_response_status(
@@ -1456,6 +1459,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             // 哪一张审批卡还等着人点。
             let (active, queued) = hub.task_view();
             let pending = hub.approval_view();
+            let latest_checkpoint = ui_core::checkpoint::list(&hub.workspace)
+                .ok()
+                .and_then(|rows| rows.first().cloned());
             let state = vec![
                 ("busy", Json::Bool(hub.busy.load(Ordering::SeqCst))),
                 ("seq", Json::from(hub.seq.load(Ordering::SeqCst))),
@@ -1485,6 +1491,22 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                         Some(id) => Json::from(id),
                         None => Json::Null,
                     },
+                ),
+                (
+                    "checkpoint",
+                    latest_checkpoint
+                        .as_ref()
+                        .and_then(|c| c.str_at("id"))
+                        .map(Json::from)
+                        .unwrap_or(Json::Null),
+                ),
+                (
+                    "checkpointLabel",
+                    latest_checkpoint
+                        .as_ref()
+                        .and_then(|c| c.str_at("label"))
+                        .map(Json::from)
+                        .unwrap_or(Json::Null),
                 ),
             ];
             json_response(&mut stream, &Json::obj(state).to_compact())
@@ -1800,6 +1822,40 @@ fn audit_review(
         .append("review/apply", payload)
         .map_err(|e| format!("写审计日志失败: {}", e))?;
     Ok(event.u64_at("seq").unwrap_or(0))
+}
+
+fn review_history(hub: &Hub) -> Json {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let Ok((events, _)) = ui_core::Journal::read(&path) else {
+        return Json::Arr(Vec::new());
+    };
+    let mut rows: Vec<Json> = events
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e.str_at("kind"),
+                Some("review/apply") | Some("review/revert")
+            )
+        })
+        .map(|e| {
+            Json::obj(vec![
+                ("kind", Json::from(e.str_at("kind").unwrap_or(""))),
+                ("ts", Json::from(e.u64_at("ts").unwrap_or(0))),
+                ("checkpoint", Json::from(e.str_at("checkpoint").unwrap_or(""))),
+                ("path", Json::from(e.str_at("path").unwrap_or(""))),
+                ("actor", Json::from(e.str_at("actor").unwrap_or(""))),
+                ("written", Json::from(e.u64_at("written").unwrap_or(0))),
+                ("removed", Json::from(e.u64_at("removed").unwrap_or(0))),
+                ("action", Json::from(e.str_at("action").unwrap_or(""))),
+            ])
+        })
+        .collect();
+    rows.reverse();
+    Json::Arr(rows)
 }
 
 fn session_list(ws: &std::path::Path, current: &str) -> Json {
@@ -2457,9 +2513,16 @@ mod tests {
             "{{\"checkpoint\":\"{}\",\"accepted\":[\"{}\"],\"confirm\":true}}",
             id, hunk
         );
-        let (head, out) = http_post(hub, "/api/review", &body);
+        let (head, out) = http_post(hub.clone(), "/api/review", &body);
         assert!(head.contains("200 OK"), "{} {}", head, out);
         assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "one\nTWO\n");
+        let (head, history) = http_get(hub.clone(), "/api/reviews");
+        assert!(head.contains("200 OK"), "{}", head);
+        let rows = ui_core::json::parse(history.trim()).unwrap();
+        assert!(rows
+            .as_arr()
+            .map(|a| a.iter().any(|r| r.str_at("kind") == Some("review/apply")))
+            .unwrap_or(false));
         let (events, corrupt) =
             ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
         assert!(corrupt.is_none(), "review 审计日志不该损坏");

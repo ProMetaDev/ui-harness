@@ -1238,7 +1238,7 @@ impl Agent {
                     && Self::may_write_workspace(&call.name)
                 {
                     checkpointed = true;
-                    match crate::checkpoint::create(
+                    match crate::checkpoint::create_limited(
                         &self.workspace,
                         &format!("auto-before-turn-{}", turn),
                     ) {

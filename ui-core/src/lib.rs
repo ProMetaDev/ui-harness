@@ -20,6 +20,7 @@ pub mod checkpoint;
 pub mod compact;
 pub mod exec;
 pub mod fasthash;
+pub mod index;
 pub mod isolate;
 pub mod json;
 pub mod journal;

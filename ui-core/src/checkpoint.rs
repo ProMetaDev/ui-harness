@@ -57,6 +57,63 @@ fn scan(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     Ok(files)
 }
 
+fn walk_limited(
+    root: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, PathBuf>,
+    bytes: &mut u64,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let rd = fs::read_dir(dir).map_err(|e| format!("读目录 {} 失败: {}", dir.display(), e))?;
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if EXCLUDED.contains(&name.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            walk_limited(root, &path, out, bytes, max_files, max_bytes)?;
+        } else if meta.is_file() {
+            let size = meta.len();
+            if out.len() + 1 > max_files {
+                return Err(format!(
+                    "checkpoint 文件数超过上限 {}；可用 UI_AUTO_CHECKPOINT=0 或提高上限",
+                    max_files
+                ));
+            }
+            if bytes.saturating_add(size) > max_bytes {
+                return Err(format!(
+                    "checkpoint 体积超过上限 {} MiB；可用 UI_AUTO_CHECKPOINT=0 或提高上限",
+                    max_bytes / 1024 / 1024
+                ));
+            }
+            *bytes = bytes.saturating_add(size);
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            out.insert(rel_key(rel), path);
+        }
+    }
+    Ok(())
+}
+
+fn scan_limited(
+    root: &Path,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<BTreeMap<String, PathBuf>, String> {
+    let mut files = BTreeMap::new();
+    let mut bytes = 0u64;
+    walk_limited(root, root, &mut files, &mut bytes, max_files, max_bytes)?;
+    Ok(files)
+}
+
 fn checkpoint_root(ws: &Path) -> PathBuf {
     ws.join(".ui").join("checkpoints")
 }
@@ -91,10 +148,51 @@ fn read_blob(ws: &Path, hash: &str) -> Result<Vec<u8>, String> {
     fs::read(&path).map_err(|e| format!("读 blob {} 失败: {}", hash, e))
 }
 
+/// 自动快照的默认上限：防止第一次写操作把大仓库扫死。
+pub const AUTO_MAX_FILES: usize = 20_000;
+pub const AUTO_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 自动 checkpoint 的上限；环境变量可覆盖。
+pub fn auto_limits() -> (usize, u64) {
+    let files = std::env::var("UI_CHECKPOINT_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(AUTO_MAX_FILES);
+    let bytes = std::env::var("UI_CHECKPOINT_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(AUTO_MAX_BYTES);
+    (files, bytes)
+}
+
 /// 创建一个 checkpoint，返回元信息。
 pub fn create(ws: &Path, label: &str) -> Result<Json, String> {
+    create_with(ws, label, scan(ws)?)
+}
+
+/// 自动 checkpoint 专用：有文件数/体积上限，超限时不写半份 manifest。
+pub fn create_limited(ws: &Path, label: &str) -> Result<Json, String> {
+    let (files, bytes) = auto_limits();
+    create_limited_with(ws, label, files, bytes)
+}
+
+pub fn create_limited_with(
+    ws: &Path,
+    label: &str,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<Json, String> {
+    create_with(ws, label, scan_limited(ws, max_files, max_bytes)?)
+}
+
+fn create_with(
+    ws: &Path,
+    label: &str,
+    files: BTreeMap<String, PathBuf>,
+) -> Result<Json, String> {
     fs::create_dir_all(checkpoint_root(ws)).map_err(|e| format!("创建 checkpoint 目录失败: {}", e))?;
-    let files = scan(ws)?;
     let mut entries = Vec::new();
     for (rel, path) in files {
         let bytes = fs::read(&path).map_err(|e| format!("读 {} 失败: {}", rel, e))?;
@@ -181,6 +279,8 @@ pub struct Hunk {
 
 pub struct Change {
     pub path: String,
+    /// rename 的旧路径；其他 kind 为 None。
+    pub from: Option<String>,
     pub kind: String,
     pub old: Option<Vec<u8>>,
     pub new: Option<Vec<u8>>,
@@ -205,6 +305,7 @@ impl DiffReport {
                         .map(|c| {
                             Json::obj(vec![
                                 ("path", Json::from(c.path.as_str())),
+                                ("from", c.from.as_deref().map(Json::from).unwrap_or(Json::Null)),
                                 ("kind", Json::from(c.kind.as_str())),
                                 ("patch", Json::from(c.patch.as_str())),
                                 (
@@ -258,7 +359,12 @@ impl DiffReport {
         let mut out = String::new();
         out.push_str(&format!("checkpoint {}\n", self.checkpoint));
         for c in &self.changes {
-            out.push_str(&format!("\n### {} [{}]\n", c.path, c.kind));
+            let from = c
+                .from
+                .as_deref()
+                .map(|p| format!(" from {}", p))
+                .unwrap_or_default();
+            out.push_str(&format!("\n### {}{} [{}]\n", c.path, from, c.kind));
             out.push_str(&c.patch);
             if !c.patch.ends_with('\n') {
                 out.push('\n');
@@ -479,6 +585,7 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
             (Some(o), Some(n)) if o == n => {}
             (None, Some(n)) => changes.push(Change {
                 path: key.clone(),
+                from: None,
                 kind: "added".into(),
                 old: None,
                 new: Some(n.clone()),
@@ -487,6 +594,7 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
             }),
             (Some(o), None) => changes.push(Change {
                 path: key.clone(),
+                from: None,
                 kind: "deleted".into(),
                 old: Some(o.clone()),
                 new: None,
@@ -495,6 +603,7 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
             }),
             (Some(o), Some(n)) => changes.push(Change {
                 path: key.clone(),
+                from: None,
                 kind: "modified".into(),
                 old: Some(o.clone()),
                 new: Some(n.clone()),
@@ -504,7 +613,56 @@ pub fn diff(ws: &Path, id: Option<&str>) -> Result<DiffReport, String> {
             (None, None) => {}
         }
     }
-    Ok(DiffReport { checkpoint, changes })
+    // 内容完全相同的 delete + add 视为 rename。只做精确内容配对；
+    // “改名又改内容”仍按 delete+add 呈现，避免猜测导致 review 写错。
+    let mut deleted_by_hash: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, c) in changes.iter().enumerate() {
+        if c.kind == "deleted" {
+            if let Some(old) = &c.old {
+                deleted_by_hash
+                    .entry(sha256::hex(old))
+                    .or_default()
+                    .push(i);
+            }
+        }
+    }
+    let mut consumed_added = std::collections::BTreeSet::new();
+    let mut renamed: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in changes.iter().enumerate() {
+        if c.kind != "added" {
+            continue;
+        }
+        let Some(new) = &c.new else { continue };
+        let hash = sha256::hex(new);
+        if let Some(bucket) = deleted_by_hash.get_mut(&hash) {
+            if let Some(di) = bucket.pop() {
+                renamed.push((di, i));
+                consumed_added.insert(i);
+            }
+        }
+    }
+    for (di, ai) in &renamed {
+        let add_path = changes[*ai].path.clone();
+        let add_new = changes[*ai].new.clone();
+        let old_path = changes[*di].path.clone();
+        changes[*di].kind = "renamed".into();
+        changes[*di].from = Some(old_path);
+        changes[*di].path = add_path;
+        changes[*di].new = add_new;
+        changes[*di].patch = String::new();
+        changes[*di].hunks.clear();
+    }
+    let mut filtered = Vec::new();
+    for (i, c) in changes.into_iter().enumerate() {
+        if consumed_added.contains(&i) {
+            continue;
+        }
+        filtered.push(c);
+    }
+    Ok(DiffReport {
+        checkpoint,
+        changes: filtered,
+    })
 }
 
 fn ensure_restore_target(ws: &Path, target: &Path) -> Result<(), String> {
@@ -628,6 +786,20 @@ pub fn review(ws: &Path, id: &str, accepted: &[String]) -> Result<Json, String> 
     for change in &report.changes {
         let target = ws.join(Path::new(&change.path));
         ensure_restore_target(ws, &target)?;
+        if change.kind == "renamed" {
+            let accepted = accept_all || accepted_set.contains(&change.path);
+            let from = change.from.as_deref().unwrap_or("");
+            let old_target = ws.join(Path::new(from));
+            ensure_restore_target(ws, &old_target)?;
+            if accepted {
+                plan.push((target, change.new.clone(), change.path.clone()));
+                plan.push((old_target, None, from.to_string()));
+            } else {
+                plan.push((target, None, change.path.clone()));
+                plan.push((old_target, change.old.clone(), from.to_string()));
+            }
+            continue;
+        }
         let selected: Vec<Hunk> = change
             .hunks
             .iter()
@@ -721,6 +893,15 @@ pub fn revert_file(ws: &Path, id: &str, rel: &str) -> Result<Json, String> {
 }
 
 pub fn restore(ws: &Path, id: &str) -> Result<Json, String> {
+    restore_inner(ws, id, false)
+}
+
+/// `--prune`：写回 manifest 后，删除 checkpoint 之后新增的未跟踪文件。
+pub fn restore_prune(ws: &Path, id: &str) -> Result<Json, String> {
+    restore_inner(ws, id, true)
+}
+
+fn restore_inner(ws: &Path, id: &str, prune: bool) -> Result<Json, String> {
     let manifest = load_manifest(ws, id)?;
     // 先给当前工作区留一个可回滚点；restore 本身也可能写错。
     let backup = create(ws, &format!("pre-restore-{}", id))?;
@@ -729,6 +910,10 @@ pub fn restore(ws: &Path, id: &str) -> Result<Json, String> {
         .and_then(|v| v.as_arr())
         .cloned()
         .unwrap_or_default();
+    let tracked: std::collections::BTreeSet<String> = entries
+        .iter()
+        .filter_map(|e| e.str_at("path").map(str::to_string))
+        .collect();
     let mut restored = 0u64;
     for e in entries {
         let rel = match e.str_at("path") {
@@ -754,8 +939,21 @@ pub fn restore(ws: &Path, id: &str) -> Result<Json, String> {
         })?;
         restored += 1;
     }
+    let mut pruned = 0u64;
+    if prune {
+        let current = scan(ws)?;
+        for (rel, path) in current {
+            if tracked.contains(&rel) {
+                continue;
+            }
+            ensure_restore_target(ws, &path)?;
+            fs::remove_file(&path).map_err(|e| format!("prune {} 失败: {}", rel, e))?;
+            pruned += 1;
+        }
+    }
     Ok(Json::obj(vec![
         ("restored", Json::from(restored)),
+        ("pruned", Json::from(pruned)),
         ("checkpoint", Json::from(id)),
         ("backup", backup.get("id").cloned().unwrap_or(Json::Null)),
     ]))
@@ -774,6 +972,36 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn restore_prune_removes_untracked_files_only_when_asked() {
+        let ws = scratch("prune");
+        fs::write(ws.join("a.txt"), "a\n").unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        fs::write(ws.join("extra.txt"), "extra\n").unwrap();
+
+        restore(&ws, &id).unwrap();
+        assert!(ws.join("extra.txt").exists(), "默认 restore 不删新文件");
+
+        fs::write(ws.join("extra.txt"), "extra\n").unwrap();
+        let out = restore_prune(&ws, &id).unwrap();
+        assert_eq!(out.u64_at("pruned"), Some(1));
+        assert!(!ws.join("extra.txt").exists());
+        assert!(ws.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn automatic_limit_fails_before_writing_a_manifest() {
+        let ws = scratch("limited");
+        fs::write(ws.join("a.txt"), "a").unwrap();
+        fs::write(ws.join("b.txt"), "bb").unwrap();
+        let err = create_limited_with(&ws, "auto", 1, 1024).unwrap_err();
+        assert!(err.contains("文件数超过上限"), "{}", err);
+        assert!(list(&ws).unwrap().is_empty(), "超限不能留下半份 checkpoint");
+        let _ = fs::remove_dir_all(&ws);
     }
 
     #[test]
@@ -867,6 +1095,31 @@ mod tests {
         let out = review(&ws, &id, &["a.bin".to_string()]).unwrap();
         assert_eq!(out.u64_at("written"), Some(1));
         assert_eq!(fs::read(ws.join("a.bin")).unwrap(), vec![0u8, 9, 2]);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn exact_content_rename_is_detected_and_reviewed() {
+        let ws = scratch("rename");
+        fs::write(ws.join("a.txt"), "same\n").unwrap();
+        let cp = create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        fs::rename(ws.join("a.txt"), ws.join("b.txt")).unwrap();
+
+        let report = diff(&ws, Some(&id)).unwrap();
+        assert_eq!(report.changes.len(), 1);
+        let c = &report.changes[0];
+        assert_eq!(c.kind, "renamed");
+        assert_eq!(c.path, "b.txt");
+        assert_eq!(c.from.as_deref(), Some("a.txt"));
+
+        review(&ws, &id, &["b.txt".to_string()]).unwrap();
+        assert!(!ws.join("a.txt").exists());
+        assert!(ws.join("b.txt").exists());
+
+        review(&ws, &id, &[]).unwrap();
+        assert!(ws.join("a.txt").exists());
+        assert!(!ws.join("b.txt").exists());
         let _ = fs::remove_dir_all(&ws);
     }
 

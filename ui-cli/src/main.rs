@@ -364,6 +364,31 @@ fn cmd_sessions(args: &Args) -> Result<i32, String> {
     Ok(0)
 }
 
+fn cmd_index(args: &Args) -> Result<i32, String> {
+    let ws = workspace(args);
+    if let Some(q) = args.get("query") {
+        let hits = ui_core::index::search(&ws, q, 20)?;
+        if args.flag("json") {
+            println!("{}", Json::Arr(hits).to_compact());
+        } else if hits.is_empty() {
+            println!("没有匹配（先运行 ui index 建索引）");
+        } else {
+            for h in hits {
+                println!(
+                    "{}  {} 行  {}",
+                    h.str_at("path").unwrap_or("?"),
+                    h.u64_at("lines").unwrap_or(0),
+                    h.u64_at("score").unwrap_or(0)
+                );
+            }
+        }
+        return Ok(0);
+    }
+    let out = ui_core::index::build(&ws)?;
+    println!("{}", out.to_pretty());
+    Ok(0)
+}
+
 fn cmd_checkpoint(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let label = args.get("label").unwrap_or("manual");
@@ -513,7 +538,11 @@ fn cmd_restore(args: &Args) -> Result<i32, String> {
             id
         ));
     }
-    let out = ui_core::checkpoint::restore(&ws, id)?;
+    let out = if args.flag("prune") {
+        ui_core::checkpoint::restore_prune(&ws, id)?
+    } else {
+        ui_core::checkpoint::restore(&ws, id)?
+    };
     println!("{}", out.to_pretty());
     Ok(0)
 }
@@ -845,6 +874,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("providers") => cmd_providers(&args),
         Some("plugins") => cmd_plugins(&args),
         Some("sessions") => cmd_sessions(&args),
+        Some("index") => cmd_index(&args),
         Some("checkpoint") => cmd_checkpoint(&args),
         Some("checkpoints") => cmd_checkpoints(&args),
         Some("diff") => cmd_diff(&args),
@@ -860,7 +890,7 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         Some("forget") => memory::cmd_forget(&args),
         Some("memory") => memory::cmd(&args),
         Some(other) => Err(format!(
-            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|checkpoint|checkpoints|diff|review|revert|restore）",
+            "未知命令 `{}`（doctor|run|chat|preview|tui|resume|replay|verify|export|secrets|spill|skills|workflow|apply|policy|knowledge|remember|forget|memory|index|checkpoint|checkpoints|diff|review|revert|restore）",
             other
         )),
         None => {
@@ -946,12 +976,14 @@ fn help() -> String {
      ui memory list [--all]       列出记忆（默认只列有效；--all 含墓碑/过期）\n\
      ui memory check              校验记忆文件哈希链 + id/内容一致（损坏退 2）\n\
      ui prompt --memory-query \"...\"  单独渲染一次记忆检索（不写事件、不跑 turn）\n\
+     ui index                     建零依赖代码索引（.ui/index/manifest.json）\n\
+     ui index --query \"foo\"       按路径/符号查相关文件\n\
      ui checkpoint [--label L]    给当前 workspace 存一个零依赖内容寻址快照\n\
      ui checkpoints [--json]      列出 checkpoint\n\
      ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
      ui review [--checkpoint ID]  列出 hunk；--accept path#n,all --yes 只保留选中的 hunk\n\
      ui revert --checkpoint ID --path P --yes   只回退一个文件（新增文件则删除）\n\
-     ui restore --checkpoint ID --yes   从 checkpoint 写回（写回前自动再存 pre-restore）\n\
+     ui restore --checkpoint ID [--prune] --yes   从 checkpoint 写回（--prune 删除未跟踪新文件）\n\
      ui tui                       全屏终端界面\n\
      ui policy --effect fs.write --target /etc/passwd\n\
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\

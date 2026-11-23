@@ -203,6 +203,84 @@ fn revert_single_file_end_to_end() {
 }
 
 #[test]
+fn index_build_and_query_end_to_end() {
+    let ws = temp_ws("index");
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(ws.join("src/agent.rs"), "pub fn run_turn() {}\n").unwrap();
+    fs::write(ws.join("README.md"), "# Demo\n").unwrap();
+
+    let build = Command::new(bin())
+        .args(["index", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("index");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let query = Command::new(bin())
+        .args([
+            "index",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--query",
+            "run_turn",
+            "--json",
+        ])
+        .output()
+        .expect("index query");
+    assert!(query.status.success(), "{}", String::from_utf8_lossy(&query.stderr));
+    let rows = ui_core::json::parse(String::from_utf8_lossy(&query.stdout).trim()).unwrap();
+    assert_eq!(
+        rows.as_arr()
+            .and_then(|a| a.first())
+            .and_then(|r| r.str_at("path")),
+        Some("src/agent.rs")
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn index_is_injected_into_prompt_snapshot() {
+    let ws = temp_ws("index-prompt");
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(ws.join("src/agent.rs"), "pub fn run_turn() {}\n").unwrap();
+    let build = Command::new(bin())
+        .args(["index", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("index");
+    assert!(build.status.success());
+
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[{"content":"完成"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--task",
+            "run_turn 在哪",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let (events, corrupt) =
+        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(corrupt.is_none());
+    assert!(events.iter().any(|e| {
+        e.str_at("kind") == Some("prompt/snapshot")
+            && e.arr_at("sections")
+                .map(|a| a.iter().any(|s| s.str_at("id") == Some("index")))
+                .unwrap_or(false)
+    }));
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn run_auto_checkpoints_before_first_write() {
     let ws = temp_ws("auto-checkpoint");
     let sc = ws.join("sc.json");
