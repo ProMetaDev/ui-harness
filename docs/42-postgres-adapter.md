@@ -23,6 +23,9 @@
   - `psql` 建 schema；
   - 导出并导入；
   - 失败非零。
+- `worker.py`
+  - `ui_claim_task` → 运行 `ui run` → heartbeat → done/failed；
+  - 只依赖标准库 + psql。
 - `test_export.py`
   - 不依赖运行中的 Postgres。
 
@@ -45,13 +48,16 @@ bash tools/verify_postgres_live.sh
 `ui_sync_derived()` + `ui_task_records/ui_approval_records` 查询 + claim/heartbeat/过期重领 + append-only 触发器；
 没有 docker/镜像时明确 SKIP。
 
+`verify_postgres_worker.sh` 用假 `ui` 验证 worker 协议：
+`claim -> --task 参数 -> status=done`。
+
 ## 3. 边界
 
 未实现：
 
 - core 直连 Postgres；
 - 自动增量同步；
-- 多 worker 调度器（单次 claim + heartbeat 已验证，尚无 worker 进程）；
+- 多 worker 调度器（已有一个最小 worker 循环；没有队列公平性/优先级）；
 - 任务/审批的完整状态机（当前只做 queued/running/done 与 pending/allowed/denied）；
 - 保留/删除；
 - 审计签名/WORM；
