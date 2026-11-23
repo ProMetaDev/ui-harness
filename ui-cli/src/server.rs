@@ -97,6 +97,12 @@ struct Hub {
     busy: AtomicBool,
     /// 只信任这个对端注入的 X-UI-* 身份头；None = 本地单用户模式。
     trusted_proxy: Option<String>,
+    /// 受信代理共享密钥：请求必须带 `X-UI-Proxy-Secret` 且与之相等。
+    ///
+    /// 没有它，`--trusted-proxy loopback` 信任的其实是"任意本机进程"——
+    /// 同一台机器上的其它程序只要伪造 `X-UI-User/X-UI-Roles` 就能拿到 operator。
+    /// None / 空串一律拒绝（fail closed），绝不退回"只看源地址"的旧行为。
+    trusted_proxy_secret: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -118,8 +124,61 @@ impl Actor {
     }
 }
 
+/// 定长比较：不按字节提前返回，避免用响应时间猜前缀。
+///
+/// 长度不同直接 false（长度本身不是秘密，也藏不住）。
+fn secret_eq(got: &str, expected: &str) -> bool {
+    let a = got.as_bytes();
+    let b = expected.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// 请求是否带对了受信代理密钥。没有配置密钥时**始终** false。
+fn proxy_secret_ok(hub: &Hub, headers: &std::collections::HashMap<String, String>) -> bool {
+    let Some(expected) = hub.trusted_proxy_secret.as_deref() else {
+        return false;
+    };
+    if expected.is_empty() {
+        return false;
+    }
+    headers
+        .get("x-ui-proxy-secret")
+        .map(|got| secret_eq(got.trim(), expected))
+        .unwrap_or(false)
+}
+
+/// `--trusted-proxy` 必须同时给非空 `--trusted-proxy-secret`，否则拒绝启动。
+///
+/// 单独抽成函数是为了让"启动失败"这条边界能被单测直接钉住；错误文案里
+/// **不出现密钥值**（启动失败信息会进终端、CI 日志、issue 截图）。
+pub fn check_trusted_proxy_secret(
+    trusted_proxy: Option<&str>,
+    secret: Option<&str>,
+) -> Result<(), String> {
+    if trusted_proxy.is_none() {
+        return Ok(());
+    }
+    match secret {
+        Some(s) if !s.trim().is_empty() => Ok(()),
+        _ => Err("--trusted-proxy 必须同时提供非空的 --trusted-proxy-secret：\
+             没有共享密钥时，127.0.0.1 上任意本机进程都能伪造 X-UI-* 身份"
+            .to_string()),
+    }
+}
+
 fn actor_from(hub: &Hub, headers: &std::collections::HashMap<String, String>, peer: Option<std::net::IpAddr>) -> Option<Actor> {
     let trusted = hub.trusted_proxy.as_deref()?;
+    // 先验共享密钥再谈身份：源地址（loopback）只说明"同机"，不说明"是代理"。
+    if !proxy_secret_ok(hub, headers) {
+        return None;
+    }
     let peer = peer?;
     let allowed = match trusted {
         "loopback" => peer.is_loopback(),
@@ -779,10 +838,17 @@ pub fn serve(
     token: Option<&str>,
     session_arg: Option<&str>,
     trusted_proxy: Option<&str>,
+    trusted_proxy_secret: Option<&str>,
 ) -> Result<(), String> {
+    // fail closed：开启受信代理却没有共享密钥时宁可起不来，也不接受源地址当身份。
+    check_trusted_proxy_secret(trusted_proxy, trusted_proxy_secret)?;
     let mut hub0 = Hub::default();
     hub0.bench = bench.map(str::to_string);
     hub0.trusted_proxy = trusted_proxy.map(str::to_string);
+    hub0.trusted_proxy_secret = trusted_proxy_secret
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     hub0.token = match token {
         // `--token off` 明确表示不校验（本地脚本/截图用）
         Some("off") | Some("none") => String::new(),
@@ -980,7 +1046,12 @@ pub fn serve(
     let listener = TcpListener::bind(addr).map_err(|e| format!("监听 {} 失败: {}", addr, e))?;
     if hub.token.is_empty() {
         println!("UI 已启动  http://{}", addr);
-        println!("鉴权       已关闭（--token off）：本机任何程序都能调用");
+        // 受信代理模式下"本机任何程序都能调用"不再成立：没有代理密钥什么都拿不到。
+        if hub.trusted_proxy.is_some() {
+            println!("鉴权       无 token；受信代理要求 X-UI-Proxy-Secret + X-UI-* 身份头");
+        } else {
+            println!("鉴权       已关闭（--token off）：本机任何程序都能调用");
+        }
     } else {
         println!("UI 已启动  http://{}/?t={}", addr, hub.token);
         println!("鉴权       需要 token：首次带 ?t= 打开，之后浏览器用 Cookie");
@@ -989,6 +1060,10 @@ pub fn serve(
     // 属于 HTTP 响应（agent_workspace_hint 的原始理由），启动横幅照抄它只会让人
     // 看不到自己到底在哪个工作区上开审批。
     println!("工作区     {}", hub.workspace.display());
+    if let Some(proxy) = hub.trusted_proxy.as_deref() {
+        // 只报来源、不报密钥：终端截图和 CI 日志都算会流出去的地方。
+        println!("受信代理   {}（要求 X-UI-Proxy-Secret；密钥不打印）", proxy);
+    }
     println!("Ctrl-C 退出");
 
     for stream in listener.incoming() {
@@ -1114,6 +1189,12 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
 
     // 查询串：`since=<seq>` 用于断线重连只补新事件
     let query = raw_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    // 受信代理共享密钥：受信代理模式下**所有**请求都要带对，包括页面、快照与
+    // `/api/ready`。只挡 `/api/*` 会让同机进程照样打开聊天页、看到工作区内容。
+    // 密钥不对就 401，且不再往下解析身份头——伪造 `X-UI-Roles` 到不了角色判定。
+    if hub.trusted_proxy.is_some() && !proxy_secret_ok(&hub, &headers) {
+        return unauthorized(&mut stream, path.starts_with("/api"));
+    }
     let actor = actor_from(&hub, &headers, peer);
 
     // CSRF：Cookie 是 SameSite=Lax，但 Lax 只保证 same-site，不保证 same-origin；
@@ -2825,13 +2906,10 @@ mod tests {
         assert_eq!(out.u64_at("count"), Some(1));
         assert_eq!(out.str_at("sha256").map(str::len), Some(64));
 
-        let mut h = Hub::default();
-        h.workspace = ws.clone();
-        h.trusted_proxy = Some("loopback".into());
-        let trusted = Arc::new(h);
+        let trusted = trusted_hub(&ws, "export-secret");
         let viewer = http_request(
             trusted,
-            "GET /api/audit/export HTTP/1.1\r\nHost: test\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nConnection: close\r\n\r\n",
+            "GET /api/audit/export HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: export-secret\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nConnection: close\r\n\r\n",
         );
         assert!(viewer.0.contains("403"), "{}", viewer.0);
         let _ = std::fs::remove_dir_all(&ws);
@@ -2862,34 +2940,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// 受信代理模式的测试 hub：loopback + 共享密钥都配齐。
+    fn trusted_hub(ws: &std::path::Path, secret: &str) -> Arc<Hub> {
+        let mut hub = Hub::default();
+        hub.workspace = ws.to_path_buf();
+        hub.trusted_proxy = Some("loopback".into());
+        hub.trusted_proxy_secret = Some(secret.to_string());
+        Arc::new(hub)
+    }
+
     #[test]
     fn trusted_proxy_requires_actor_and_write_role() {
         let ws = temp_workspace("m1");
-        let mut hub = Hub::default();
-        hub.workspace = ws.clone();
-        hub.trusted_proxy = Some("loopback".into());
-        let hub = Arc::new(hub);
+        let secret = "proxy-secret-1";
+        let hub = trusted_hub(&ws, secret);
 
         let (head, _) = http_get(hub.clone(), "/api/state");
         assert!(head.contains("401"), "无身份头必须 401: {}", head);
 
+        // 有身份头、没带代理密钥：仍是 401。loopback 只说明"同机"，
+        // 不说明"是那个代理"，这正是旧实现被本机进程伪造的那个洞。
+        let forged = http_request(
+            hub.clone(),
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+        );
+        assert!(
+            forged.0.contains("401"),
+            "没有代理密钥的伪造身份必须 401: {}",
+            forged.0
+        );
+
+        let wrong = http_request(
+            hub.clone(),
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-Proxy-Secret: not-the-secret\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+        );
+        assert!(wrong.0.contains("401"), "错误代理密钥必须 401: {}", wrong.0);
+
         let viewer = http_request(
             hub.clone(),
-            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-Proxy-Secret: proxy-secret-1\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
         );
         assert!(viewer.0.contains("403"), "viewer 不能写: {}", viewer.0);
 
         let operator = http_request(
             hub.clone(),
-            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-Proxy-Secret: proxy-secret-1\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
         );
         assert!(operator.0.contains("200"), "operator 应能写: {}", operator.0);
 
         let auditor = http_request(
             hub,
-            "GET /api/reviews HTTP/1.1\r\nHost: test\r\nX-UI-User: a@example.com\r\nX-UI-Roles: auditor\r\nConnection: close\r\n\r\n",
+            "GET /api/reviews HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: proxy-secret-1\r\nX-UI-User: a@example.com\r\nX-UI-Roles: auditor\r\nConnection: close\r\n\r\n",
         );
         assert!(auditor.0.contains("200"), "auditor 应能读审计: {}", auditor.0);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 缺密钥必须 fail closed：启动直接报错，请求层面也一律 401。
+    #[test]
+    fn trusted_proxy_without_secret_fails_closed() {
+        // 启动校验：受信代理必须配非空密钥。
+        assert!(check_trusted_proxy_secret(Some("loopback"), None).is_err());
+        assert!(check_trusted_proxy_secret(Some("loopback"), Some("")).is_err());
+        assert!(check_trusted_proxy_secret(Some("loopback"), Some("   ")).is_err());
+        // 不开受信代理时不需要密钥；开了就得有。
+        assert!(check_trusted_proxy_secret(None, None).is_ok());
+        assert!(check_trusted_proxy_secret(None, Some("unused")).is_ok());
+        assert!(check_trusted_proxy_secret(Some("loopback"), Some("s")).is_ok());
+
+        let ws = temp_workspace("m1-nosecret");
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        hub.trusted_proxy = Some("loopback".into());
+        // trusted_proxy_secret 保持 None：等效于旧调用方/配置漏传。
+        let hub = Arc::new(hub);
+
+        let raw = "GET /api/state HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: anything\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nConnection: close\r\n\r\n";
+        let (head, _) = http_request(hub.clone(), raw);
+        assert!(head.contains("401"), "没配密钥时必须 fail closed: {}", head);
+
+        // 页面与快照同样要密钥：否则同机进程照样能打开聊天页看工作区。
+        let (head, _) = http_get(hub.clone(), "/");
+        assert!(head.contains("401"), "受信代理模式页面也要密钥: {}", head);
+        let (head, _) = http_get(hub, "/snapshot");
+        assert!(head.contains("401"), "受信代理模式快照也要密钥: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 密钥只用于比较，不进事件、不进 journal。
+    #[test]
+    fn proxy_secret_never_reaches_events_or_journal() {
+        let ws = temp_workspace("m1-secret-log");
+        std::fs::write(ws.join("a.txt"), "one\n").unwrap();
+        let cp = ui_core::checkpoint::create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        std::fs::write(ws.join("a.txt"), "two\n").unwrap();
+        let secret = "proxy-secret-must-not-leak";
+        let hub = trusted_hub(&ws, secret);
+        let body = format!(
+            "{{\"checkpoint\":\"{}\",\"accepted\":[\"all\"],\"confirm\":true}}",
+            id
+        );
+        let (head, out) = http_request(
+            hub.clone(),
+            &format!(
+                "POST /api/review HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nX-UI-Proxy-Secret: {}\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                secret,
+                body.len(),
+                body
+            ),
+        );
+        assert!(head.contains("200 OK"), "{} {}", head, out);
+        {
+            let log = hub.log.lock().unwrap();
+            let leaked: Vec<_> = log
+                .iter()
+                .filter(|(_, line)| line.contains(secret))
+                .map(|(n, _)| *n)
+                .collect();
+            assert!(leaked.is_empty(), "事件里不得出现代理密钥，命中 seq={:?}", leaked);
+        }
+        let jp = ws.join(".ui").join("journal.jsonl");
+        let text = std::fs::read_to_string(&jp).unwrap_or_default();
+        assert!(!text.is_empty(), "review 应写 journal");
+        assert!(!text.contains(secret), "journal 里不得出现代理密钥");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

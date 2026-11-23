@@ -33,7 +33,7 @@ GET /api/audit/export?since=<seq>&limit=<n>
 ## 权限
 
 - 受 `/api/*` 的 token / 受信代理约束；
-- `--trusted-proxy` 模式下：
+- `--trusted-proxy` 模式下（每个请求须带 `X-UI-Proxy-Secret`，否则 401）：
   - `auditor` / `admin` / `owner` 可导出；
   - `viewer` / `operator` 返回 403。
 

@@ -27,5 +27,20 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null
+
+# fail closed：没有 token 必须拒绝启动（空 token = 对本机所有进程开放 /execute）。
+# 用 timeout 兜住"万一它没拒绝、反而起来了"的情况（124 = 真起来了并挂住）。
+if command -v timeout >/dev/null 2>&1; then
+  set +e
+  timeout 5 python3 adapters/runner/runner.py \
+    --port "$((PORT + 1))" --workspace-root "$WS" --image "$IMAGE" >/dev/null 2>&1
+  NO_TOKEN_CODE=$?
+  set -e
+  if [ "$NO_TOKEN_CODE" -eq 0 ] || [ "$NO_TOKEN_CODE" -eq 124 ]; then
+    echo "FAIL: 缺 token 时 runner 没有拒绝启动（退出码 $NO_TOKEN_CODE）"
+    exit 1
+  fi
+fi
+
 python3 adapters/runner/test_live.py \
   --base "http://127.0.0.1:$PORT" --token "$TOKEN" --workspace "$WS"

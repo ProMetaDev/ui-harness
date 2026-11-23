@@ -10,7 +10,8 @@ http://127.0.0.1:7788/admin
 
 - 与其它页面一样受 token / 受信代理约束；
 - 本地单用户模式显示“本地单用户模式”；
-- `--trusted-proxy` 模式显示 `X-UI-UserId` 与 roles。
+- `--trusted-proxy` 模式显示 `X-UI-UserId` 与 roles（该模式要求每个请求带
+  `X-UI-Proxy-Secret`，由代理注入；缺密钥时 `ui serve` 拒绝启动）。
 
 ## 展示
 

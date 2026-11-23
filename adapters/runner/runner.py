@@ -9,6 +9,7 @@
 - 结束时 --rm；超时 docker kill。
 """
 import argparse
+import hmac
 import json
 import os
 import subprocess
@@ -101,10 +102,13 @@ def handler(runner):
             pass
 
         def auth(self):
+            # 没有 token 时**不**放行：能否启动由 main() 先挡一次，这里再挡一次——
+            # 少任何一道，"忘传 token"就等于把任意命令执行开给本机所有进程。
             if not runner.token:
-                return True
+                return False
             got = self.headers.get("Authorization", "")
-            return got == "Bearer " + runner.token
+            # 定长比较：token 是唯一凭据，别按字节提前返回。
+            return hmac.compare_digest(got, "Bearer " + runner.token)
 
         def send_json(self, code, obj):
             body = json.dumps(obj, ensure_ascii=False).encode()
@@ -142,9 +146,18 @@ def main():
     p.add_argument("--port", type=int, default=18080)
     p.add_argument("--workspace-root", required=True)
     p.add_argument("--image", default="python:3.11-slim")
-    p.add_argument("--token", default=os.environ.get("RUNNER_TOKEN", ""))
+    p.add_argument(
+        "--token",
+        default=os.environ.get("RUNNER_TOKEN", ""),
+        help="Bearer token；必须非空（也可用 RUNNER_TOKEN 环境变量）",
+    )
     a = p.parse_args()
-    runner = Runner(a.workspace_root, a.image, a.token)
+    # fail closed：token 是唯一身份边界，空 token 等于对本机所有进程开放 /execute。
+    # 不做"空 token 就跳过校验"的降级——那种默认值正是安全审计里最常见的一条。
+    token = (a.token or "").strip()
+    if not token:
+        p.error("必须提供非空的 --token 或 RUNNER_TOKEN（空 token 时拒绝启动）")
+    runner = Runner(a.workspace_root, a.image, token)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), handler(runner))
     print(f"runner on 127.0.0.1:{a.port} image={a.image}", flush=True)
     srv.serve_forever()

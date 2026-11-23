@@ -4,13 +4,21 @@
 
 ## 启动
 
+`--token`（或环境变量 `RUNNER_TOKEN`）**必须非空**：没有 token 时 runner 直接报错退出
+（退出码 2），不会以「不校验」的姿态起来。token 是 `/execute` 唯一的身份边界，
+空 token 等于把任意命令执行开给本机所有进程。
+
 ```bash
+export RUNNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 python3 adapters/runner/runner.py \
   --port 18089 \
   --workspace-root /srv/ui/workspaces \
   --image python:3.11-slim \
   --token "$RUNNER_TOKEN"
 ```
+
+也可以用 `RUNNER_TOKEN=... python3 adapters/runner/runner.py ...` 而不传 `--token`；
+命令行参数优先于环境变量。只给 `--token ""` 同样按缺失处理并拒绝启动。
 
 ## API
 
@@ -24,6 +32,9 @@ Authorization: Bearer <token>
   "timeout": 30
 }
 ```
+
+`Authorization` 缺失或不匹配一律 `401`（服务端没有「无 token 放行」分支）。
+`/healthz` 不需要 token：它只回 `{"ok":true}`，用于探活，不执行任何命令。
 
 ## 隔离
 

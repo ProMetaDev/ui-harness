@@ -954,7 +954,7 @@ fn help() -> String {
      ui run --task \"...\" --mock F 跑一轮（F 是剧本 JSON）\n\
      ui chat --mock F             交互式会话：多轮、同一份日志\n\
      ui serve --port 7788         网页端：浏览器里和模型对话（本地，零依赖）\n\
-     ui serve --trusted-proxy loopback   由受信代理注入 X-UI-User/X-UI-Roles（M1）\n\
+     ui serve --trusted-proxy loopback --trusted-proxy-secret S   受信代理注入 X-UI-User/X-UI-Roles（M1，缺 S 拒绝启动）\n\
      ui resume                    对账崩溃打断的副作用\n\
      ui replay                    回放日志\n\
      ui verify                    日志自检：哈希链、未完成调用\n\
@@ -1001,6 +1001,7 @@ fn help() -> String {
      模式:     --mode quiet | standard | strict\n\
      模型:     --mock 剧本.json   或   UI_MODEL_CMD=\"node adapters/deepseek.mjs\"\n\
      网页端:   --port N  --bundles 目录  --bench-cmd \"命令\"\n\
+               --trusted-proxy loopback|<ip>  --trusted-proxy-secret <secret>（两者必须同时给）\n\
      外部工具: --mcp mcp.json（stdio JSON-RPC，工具效果记为 proc.exec mcp:<server>:<tool>）"
         .to_string()
 }
@@ -1361,6 +1362,9 @@ fn boot_step(id: &str, ok: bool, detail: impl Into<String>, started: std::time::
 /// 网页端：浏览器里和模型对话（本地 HTTP + SSE，零依赖）
 fn cmd_serve(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
+    // 配置在产生任何副作用（打开 journal、写 .ui/）之前先校验：受信代理没有
+    // 共享密钥就拒绝启动，而不是先起来再"忽略身份头"。
+    let (trusted_proxy, trusted_proxy_secret) = trusted_proxy_config(args)?;
     let port = args.get("port").unwrap_or("7788");
     let addr = format!("127.0.0.1:{}", port);
 
@@ -1456,8 +1460,39 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let splash =
         !args.flag("no-splash") && std::env::var("UI_SPLASH").map(|v| v != "0").unwrap_or(true);
 
-    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"), args.get("trusted-proxy"))?;
+    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"), trusted_proxy.as_deref(), trusted_proxy_secret.as_deref())?;
     Ok(0)
+}
+
+/// 解析受信代理配置：`--trusted-proxy` 必须配非空 `--trusted-proxy-secret`。
+///
+/// 校验本身在 `server` 里（那里也有一道，防止别的入口绕过），这里只负责把
+/// 命令行上的空串/纯空格归一成"没给"。
+fn trusted_proxy_config(args: &Args) -> Result<(Option<String>, Option<String>), String> {
+    // `--trusted-proxy` 后面没跟值（被解析成布尔开关）或给了空串，都不该被
+    // 静默当成"没开"：那会把一次配置错误变成"企业鉴权悄悄关掉"。
+    if args.flag("trusted-proxy") {
+        return Err("--trusted-proxy 需要一个值：loopback 或受信代理 IP".to_string());
+    }
+    let proxy = match args.get("trusted-proxy") {
+        Some(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        Some(_) => {
+            return Err("--trusted-proxy 不能为空：要 loopback 或受信代理 IP".to_string());
+        }
+        None => None,
+    };
+    if proxy.is_none() {
+        // 没开受信代理时 `--trusted-proxy-secret` 没有意义，直接丢掉；本地模式
+        // 既不解析 X-UI-*，也不读这个密钥。
+        return Ok((None, None));
+    }
+    let secret = args
+        .get("trusted-proxy-secret")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    server::check_trusted_proxy_secret(proxy.as_deref(), secret.as_deref())?;
+    Ok((proxy, secret))
 }
 
 /// 渲染一帧全屏界面（纯函数，不需要 tty）。用来定版式，也方便贴进 issue。
