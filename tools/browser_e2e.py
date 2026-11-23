@@ -112,21 +112,24 @@ class WS:
                 return payload.decode()
 
 
-def evaluate(ws, expr):
-    ws.send(json.dumps({
-        "id": 1,
-        "method": "Runtime.evaluate",
-        "params": {"expression": expr, "returnByValue": True, "awaitPromise": True},
-    }))
+def cdp(ws, method, params):
+    ws.send(json.dumps({"id": 1, "method": method, "params": params}))
     while True:
         msg = json.loads(ws.recv())
         if msg.get("id") == 1:
             if "error" in msg:
                 raise RuntimeError(msg["error"])
-            res = msg.get("result", {}).get("result", {})
-            if res.get("subtype") == "error":
-                raise RuntimeError(res.get("description", "JS error"))
-            return res.get("value")
+            return msg.get("result", {})
+
+
+def evaluate(ws, expr):
+    result = cdp(ws, "Runtime.evaluate", {
+        "expression": expr, "returnByValue": True, "awaitPromise": True,
+    })
+    res = result.get("result", {})
+    if res.get("subtype") == "error":
+        raise RuntimeError(res.get("description", "JS error"))
+    return res.get("value")
 
 
 def kill_tree(pid):
@@ -171,9 +174,13 @@ def main():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         targets = json.loads(wait_url(f"http://127.0.0.1:{debug}/json/list"))
-        page = next((t for t in targets if t.get("type") == "page"), None)
+        pages = [t for t in targets if t.get("type") == "page"]
+        # Chrome 可能先创建一个 about:blank 页面；必须选真正导航到 ui 的 target。
+        page = next((t for t in pages if str(port) in t.get("url", "")), None)
+        if not page and pages:
+            page = pages[0]
         if not page:
-            raise RuntimeError("no page target")
+            raise RuntimeError("no page target: " + repr(targets))
         ws = WS(page["webSocketDebuggerUrl"])
         value = evaluate(ws, """(() => {
           const b = document.getElementById('diffBtn');
@@ -195,7 +202,19 @@ def main():
         })()""")
         if not opened or opened.get("hidden") is not False:
             raise RuntimeError("diff overlay did not open: " + repr(opened))
-        print(f"PASS browser e2e: title={value.get('title')} diff=ok overlay=ok")
+        # 管理面：导航后检查真实 DOM，而不是只 curl HTML。
+        cdp(ws, "Page.navigate", {"url": f"http://127.0.0.1:{port}/admin"})
+        time.sleep(0.8)
+        admin = evaluate(ws, """(() => ({
+          title: document.title,
+          text: document.body ? document.body.innerText : '',
+          cards: document.querySelectorAll('.card').length
+        }))()""")
+        if not admin or "管理面" not in admin.get("text", "") or admin.get("cards", 0) < 4:
+            raise RuntimeError("admin page not mounted: " + repr(admin))
+        print(
+            f"PASS browser e2e: title={value.get('title')} diff=ok overlay=ok admin=ok"
+        )
         return 0
     finally:
         if chrome:
