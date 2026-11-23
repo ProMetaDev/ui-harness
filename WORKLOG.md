@@ -1,5 +1,23 @@
 # Worklog
 
+## 2026-11-23 · 多智能体第一轮集成
+
+三个独立 worktree 并行，主 worktree 不参与实现；合并顺序 security → data → verify。
+
+- `feat/security-runner-token` / `fc53795`：runner 无 token 拒绝启动；受信代理加
+  `--trusted-proxy-secret`，无密钥 fail closed；密钥不进事件/journal。
+- `feat/pg-migrations` / `a65f077`：幂等迁移 + `ui_schema_migrations`、任务优先级、
+  queued/running cancel、worker 取消路径；真实 Docker Postgres live 通过。
+- `feat/soak-metrics` / `ef373b0`：soak 改采 ui 子进程 RSS/fd、失败/超时记录；
+  定位 lab_pack flake 根因是 mtime vs wall-clock。
+- 集成后补修：
+  - `.gitattributes` 强制 `*.sh/*.py` LF；
+  - `lab_pack` 用 journal `fs/read` path+sha 判定输入，mtime 回跳不再把输入误判成产物；
+  - 回归测试把输入 mtime 推到未来。
+- `tools/debug.sh`：**57 passed / 0 failed**。
+- 2h soak 旧脚本在 1405/1440 轮后因自身进程检查退出 1；**不是产品失败**，
+  但也没有 `phase=passed`，不能算通过。新 soak 脚本已用 8s/10s 短跑验证。
+
 ## 2026-11-23 · 企业硬化与审阅闭环
 
 ### 目标
