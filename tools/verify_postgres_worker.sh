@@ -62,4 +62,18 @@ grep -q -- "--task" "$ARGS_FILE" || { echo "FAIL: worker did not pass --task"; c
 grep -q "hello worker" "$ARGS_FILE" || { echo "FAIL: prompt missing"; cat "$ARGS_FILE"; exit 1; }
 status=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_task_records where task_seq=1")
 [ "$status" = "done" ] || { echo "FAIL: status=$status"; exit 1; }
-echo "PASS postgres worker: claim -> fake ui -> status=done"
+
+# 失败路径：假 ui 退出 2，worker 必须写 failed，而不是 done。
+docker exec "$NAME" psql -U postgres -d ui -v ON_ERROR_STOP=1 -c \
+  "insert into ui_events(workspace_id,session_id,seq,kind,payload,prev_hash,hash,created_at) values
+   ('w1','default',2,'turn/start','{\"turn\":2,\"prompt\":\"fail me\"}','h1','h2',now())" >/dev/null
+docker exec "$NAME" psql -U postgres -d ui -Atc 'select ui_sync_derived()' >/dev/null
+FAKE_FAIL="$TMP/fake-fail"
+printf '#!/bin/sh\nexit 2\n' > "$FAKE_FAIL"
+chmod +x "$FAKE_FAIL"
+python3 adapters/postgres/worker.py \
+  --psql "$PSQL" --dsn ignored --worker w1 \
+  --ui "$FAKE_FAIL" --workspace "$TMP/ws" --once
+status2=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_task_records where task_seq=2")
+[ "$status2" = "failed" ] || { echo "FAIL: failed path status=$status2"; exit 1; }
+echo "PASS postgres worker: claim -> fake ui -> done/failed"
