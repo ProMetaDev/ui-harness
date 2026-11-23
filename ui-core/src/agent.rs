@@ -98,7 +98,7 @@ impl ApprovalScope {
 }
 
 /// Hooks 对一个审批请求的完整回答。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResponse {
     pub decision: Decision,
     pub scope: ApprovalScope,
@@ -109,6 +109,8 @@ pub struct ApprovalResponse {
     /// 这不是装饰：日志里一条 `verdict=deny` 如果分不清"人说了不"和"没人来得及说"，
     /// 复盘时就会把一次网络卡顿读成一次否决——而这两种情况的处置完全相反。
     pub via: Option<&'static str>,
+    /// 受信代理身份；None = 本地单用户模式/不是人答的。
+    pub actor: Option<String>,
 }
 
 impl ApprovalResponse {
@@ -117,6 +119,7 @@ impl ApprovalResponse {
             decision: Decision::Allow,
             scope: ApprovalScope::Once,
             via: None,
+            actor: None,
         }
     }
 
@@ -125,7 +128,16 @@ impl ApprovalResponse {
             decision: Decision::Allow,
             scope: ApprovalScope::Session,
             via: None,
+            actor: None,
         }
+    }
+
+    /// 记录是哪个受信身份做的决定。
+    pub fn by(mut self, actor: &str) -> ApprovalResponse {
+        if !actor.trim().is_empty() {
+            self.actor = Some(actor.to_string());
+        }
+        self
     }
 
     /// 标出"这个决定不是人做的"。构造后调用，保持三个快捷构造器不变。
@@ -140,6 +152,7 @@ impl ApprovalResponse {
             decision: Decision::Deny,
             scope: ApprovalScope::Once,
             via: None,
+            actor: None,
         }
     }
 
@@ -150,6 +163,7 @@ impl ApprovalResponse {
             decision,
             scope: ApprovalScope::Once,
             via: None,
+            actor: None,
         }
     }
 
@@ -1499,6 +1513,9 @@ impl Agent {
         // `verdict=deny` 就同时表示"不同意"和"没人来得及同意"。
         if let Some(via) = answer.via {
             record.push(("via", Json::from(via)));
+        }
+        if let Some(actor) = answer.actor.as_deref() {
+            record.push(("actor", Json::from(actor)));
         }
         self.log_event("approval/answered", Json::obj(record))?;
         Ok(answer)
@@ -2911,7 +2928,7 @@ mod tests {
         fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
             self.asks
                 .push((req.approval_id.clone(), req.call_id.clone()));
-            self.answer
+            self.answer.clone()
         }
     }
 
@@ -2950,6 +2967,24 @@ mod tests {
         let mut agent = Agent::new(journal, model(script), ws, Limits::default());
         agent.mode = crate::mode::Mode::Strict;
         agent
+    }
+
+    #[test]
+    fn approval_answered_records_the_trusted_actor() {
+        let script = writes_a_twice(1);
+        let mut agent = strict_agent("approval-actor", &script);
+        let mut hooks = Recorder {
+            answer: ApprovalResponse::allow_once().by("alice@example.com"),
+            asks: Vec::new(),
+        };
+        agent.run_turn("写两次", &mut hooks).unwrap();
+        let row = agent
+            .journal
+            .events
+            .iter()
+            .find(|e| e.str_at("kind") == Some("approval/answered"))
+            .expect("必须有审批回执");
+        assert_eq!(row.str_at("actor"), Some("alice@example.com"));
     }
 
     #[test]

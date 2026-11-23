@@ -1768,10 +1768,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             let verdict = value.str_at("verdict").unwrap_or("");
             let approval_id = value.str_at("approvalId").unwrap_or("");
             let call_id = value.str_at("callId").unwrap_or("");
-            let response = ApprovalResponse::parse_verdict(verdict);
+            let mut response = ApprovalResponse::parse_verdict(verdict);
+            if let Some(a) = actor.as_ref() {
+                response = response.by(&a.id);
+            }
             // 身份必须点名对上：旧实现谁答都算，于是「双击批准」= 批准两次，
             // 开着的老页面还能把答案投给下一张根本不同的审批卡。
-            let reply = match hub.answer(approval_id, call_id, response) {
+            let reply = match hub.answer(approval_id, call_id, response.clone()) {
                 Answer::Accepted { approval_id, call_id } => {
                     let mut reply = Json::obj(vec![
                         ("ok", Json::Bool(true)),

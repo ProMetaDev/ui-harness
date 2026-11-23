@@ -135,8 +135,8 @@ cite() {
     bad "$a 不再指向「$needle」" "代码动了，文档里引用它的那句话就成了假话"
   fi
 }
-cite "agent.rs:847" "append_raw"
-cite "agent.rs:497" "append_raw"
+cite "agent.rs:861" "append_raw"
+cite "agent.rs:511" "append_raw"
 cite "memory.rs:325" "append_raw"
 cite "tools.rs:841" "pub fn registry"
 

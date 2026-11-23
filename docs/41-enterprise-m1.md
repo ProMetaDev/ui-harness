@@ -79,9 +79,9 @@ X-UI-Request-Id: ...
 
 1. `serve` 增加 `--trusted-proxy loopback|<ip>`（已实现 loopback/精确 IP）；
 2. 请求入口解析 `X-UI-*`，生成 `Actor {id, roles}`（已实现）；
-3. `/api/approve`、`/api/review` 写 `actor`（review 已写；approve 的 journal actor 仍待补）；
+3. `/api/approve`、`/api/review` 写 `actor`（已实现；approval/answered 记录受信 actor）；
 4. `/api/audit/export` 校验 `audit:read`（待实现）；
-5. journal 的 `review/apply`、`approval` 增加 `actorId`（review 已写）；
+5. journal 的 `review/apply`、`approval` 增加 `actorId`（已实现）；
 6. 所有 `/api/*` 默认拒绝无 actor 的写请求。
 
 ## 6. 验收测试

@@ -146,8 +146,8 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 
 | 位置 | 写什么 | 为什么允许绕 |
 |---|---|---|
-| `agent.rs:847` | `tool/output` 的正文 | 正文已经先过了下面两档；再过一遍门会把 `redacted` 计数的含义洗掉 |
-| `agent.rs:497` | 落盘原文的指针记号 | 记号是给原文作证的，里面只有路径、字数与指纹 |
+| `agent.rs:861` | `tool/output` 的正文 | 正文已经先过了下面两档；再过一遍门会把 `redacted` 计数的含义洗掉 |
+| `agent.rs:511` | 落盘原文的指针记号 | 记号是给原文作证的，里面只有路径、字数与指纹 |
 | `memory.rs:325` | `memory/write` | 记忆条目是原文的另一个藏身处——所以 `ui secrets` 单独扫 `.ui/memory.jsonl` |
 
 关掉它：`--no-redact` 或 `UI_REDACT=0`。**关这件事本身会写一条 `privacy/redact-off`**，
