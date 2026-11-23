@@ -57,10 +57,17 @@ create table if not exists ui_task_records (
   turn bigint,
   prompt text,
   status text not null default 'queued',
+  worker_id text,
+  lease_until timestamptz,
+  attempts int not null default 0,
   created_at timestamptz not null,
   finished_at timestamptz,
   primary key (workspace_id, session_id, task_seq)
 );
+
+alter table ui_task_records add column if not exists worker_id text;
+alter table ui_task_records add column if not exists lease_until timestamptz;
+alter table ui_task_records add column if not exists attempts int not null default 0;
 
 create table if not exists ui_approval_records (
   workspace_id text not null,
@@ -118,6 +125,29 @@ begin
     and a.workspace_id = e.workspace_id
     and a.session_id = e.session_id
     and a.approval_id = coalesce(e.payload->>'approvalId', e.payload->>'approval_id');
+end;
+$$ language plpgsql;
+
+-- M2 lease 基础：一个任务同一时刻只能被一个 worker 领到。
+create or replace function ui_claim_task(p_worker text)
+returns table (workspace_id text, session_id text, task_seq bigint) as $$
+begin
+  return query
+  update ui_task_records t
+  set status = 'running',
+      worker_id = p_worker,
+      lease_until = now() + interval '60 seconds',
+      attempts = t.attempts + 1
+  where (t.workspace_id, t.session_id, t.task_seq) = (
+    select x.workspace_id, x.session_id, x.task_seq
+    from ui_task_records x
+    where x.status = 'queued'
+       or (x.status = 'running' and x.lease_until < now())
+    order by x.created_at
+    for update skip locked
+    limit 1
+  )
+  returning t.workspace_id, t.session_id, t.task_seq;
 end;
 $$ language plpgsql;
 
