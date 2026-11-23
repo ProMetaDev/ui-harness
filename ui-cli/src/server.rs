@@ -94,6 +94,53 @@ struct Hub {
     bench: Option<String>,
     lab_busy: AtomicBool,
     busy: AtomicBool,
+    /// 只信任这个对端注入的 X-UI-* 身份头；None = 本地单用户模式。
+    trusted_proxy: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Actor {
+    id: String,
+    roles: Vec<String>,
+}
+
+impl Actor {
+    fn can_write(&self) -> bool {
+        self.roles
+            .iter()
+            .any(|r| matches!(r.as_str(), "owner" | "admin" | "operator"))
+    }
+    fn can_audit(&self) -> bool {
+        self.roles
+            .iter()
+            .any(|r| matches!(r.as_str(), "owner" | "admin" | "auditor"))
+    }
+}
+
+fn actor_from(hub: &Hub, headers: &std::collections::HashMap<String, String>, peer: Option<std::net::IpAddr>) -> Option<Actor> {
+    let trusted = hub.trusted_proxy.as_deref()?;
+    let peer = peer?;
+    let allowed = match trusted {
+        "loopback" => peer.is_loopback(),
+        ip => peer.to_string() == ip || (peer.is_loopback() && ip == "127.0.0.1"),
+    };
+    if !allowed {
+        return None;
+    }
+    let id = headers.get("x-ui-userid").or_else(|| headers.get("x-ui-user"))?.trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let roles = headers
+        .get("x-ui-roles")
+        .map(|s| {
+            s.split(',')
+                .map(|r| r.trim().to_ascii_lowercase())
+                .filter(|r| !r.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Actor { id, roles })
 }
 
 fn hub_lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -730,9 +777,11 @@ pub fn serve(
     bench: Option<&str>,
     token: Option<&str>,
     session_arg: Option<&str>,
+    trusted_proxy: Option<&str>,
 ) -> Result<(), String> {
     let mut hub0 = Hub::default();
     hub0.bench = bench.map(str::to_string);
+    hub0.trusted_proxy = trusted_proxy.map(str::to_string);
     hub0.token = match token {
         // `--token off` 明确表示不校验（本地脚本/截图用）
         Some("off") | Some("none") => String::new(),
@@ -1012,6 +1061,7 @@ fn blocked_entry(workspace: &std::path::Path, path: &std::path::Path, name: &str
 }
 
 fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std::io::Result<()> {
+    let peer = stream.peer_addr().ok().map(|a| a.ip());
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -1063,6 +1113,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
 
     // 查询串：`since=<seq>` 用于断线重连只补新事件
     let query = raw_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let actor = actor_from(&hub, &headers, peer);
 
     // CSRF：Cookie 是 SameSite=Lax，但 Lax 只保证 same-site，不保证 same-origin；
     // 127.0.0.1 上另一个端口的页面也能带 Cookie 发简单 POST。浏览器会自动带
@@ -1096,6 +1147,26 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 path, hub.token
             );
             return stream.write_all(set.as_bytes());
+        }
+    }
+
+    if hub.trusted_proxy.is_some() && path.starts_with("/api/") && path != "/api/ready" {
+        let Some(actor) = actor.as_ref() else {
+            return unauthorized(&mut stream, true);
+        };
+        if method != "GET" && !actor.can_write() {
+            return json_response_status(
+                &mut stream,
+                "403 Forbidden",
+                "{\"ok\":false,\"error\":\"当前角色没有写权限\"}",
+            );
+        }
+        if path == "/api/reviews" && !(actor.can_write() || actor.can_audit()) {
+            return json_response_status(
+                &mut stream,
+                "403 Forbidden",
+                "{\"ok\":false,\"error\":\"当前角色没有审计权限\"}",
+            );
         }
     }
 
@@ -1417,7 +1488,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
             match ui_core::checkpoint::review(&hub.workspace, checkpoint, &accepted) {
-                Ok(mut out) => match audit_review(&hub, checkpoint, &accepted, &out) {
+                Ok(mut out) => match audit_review(
+                    &hub,
+                    checkpoint,
+                    &accepted,
+                    &out,
+                    actor.as_ref().map(|a| a.id.as_str()).unwrap_or("web"),
+                ) {
                     Ok(seq) => {
                         out.set("journalSeq", Json::from(seq));
                         hub.push(Json::obj(vec![
@@ -1796,6 +1873,7 @@ fn audit_review(
     checkpoint: &str,
     accepted: &[String],
     out: &Json,
+    actor: &str,
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
@@ -1805,7 +1883,7 @@ fn audit_review(
     let mut journal =
         ui_core::Journal::open(&path).map_err(|e| format!("写审计日志失败: {}", e))?;
     let payload = Json::obj(vec![
-        ("actor", Json::from("web")),
+        ("actor", Json::from(actor)),
         ("checkpoint", Json::from(checkpoint)),
         (
             "accepted",
@@ -2475,6 +2553,37 @@ mod tests {
                 body
             ),
         )
+    }
+
+    #[test]
+    fn trusted_proxy_requires_actor_and_write_role() {
+        let ws = temp_workspace("m1");
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        hub.trusted_proxy = Some("loopback".into());
+        let hub = Arc::new(hub);
+
+        let (head, _) = http_get(hub.clone(), "/api/state");
+        assert!(head.contains("401"), "无身份头必须 401: {}", head);
+
+        let viewer = http_request(
+            hub.clone(),
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+        );
+        assert!(viewer.0.contains("403"), "viewer 不能写: {}", viewer.0);
+
+        let operator = http_request(
+            hub.clone(),
+            "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+        );
+        assert!(operator.0.contains("200"), "operator 应能写: {}", operator.0);
+
+        let auditor = http_request(
+            hub,
+            "GET /api/reviews HTTP/1.1\r\nHost: test\r\nX-UI-User: a@example.com\r\nX-UI-Roles: auditor\r\nConnection: close\r\n\r\n",
+        );
+        assert!(auditor.0.contains("200"), "auditor 应能读审计: {}", auditor.0);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

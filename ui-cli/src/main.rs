@@ -950,6 +950,7 @@ fn help() -> String {
      ui run --task \"...\" --mock F 跑一轮（F 是剧本 JSON）\n\
      ui chat --mock F             交互式会话：多轮、同一份日志\n\
      ui serve --port 7788         网页端：浏览器里和模型对话（本地，零依赖）\n\
+     ui serve --trusted-proxy loopback   由受信代理注入 X-UI-User/X-UI-Roles（M1）\n\
      ui resume                    对账崩溃打断的副作用\n\
      ui replay                    回放日志\n\
      ui verify                    日志自检：哈希链、未完成调用\n\
@@ -1451,7 +1452,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let splash =
         !args.flag("no-splash") && std::env::var("UI_SPLASH").map(|v| v != "0").unwrap_or(true);
 
-    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"))?;
+    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"), args.get("trusted-proxy"))?;
     Ok(0)
 }
 

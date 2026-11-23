@@ -1,6 +1,9 @@
 # 企业 M1：身份与 RBAC 的零依赖边界
 
-> 状态：边界设计 + 部署契约，尚未实现。
+> 状态：边界设计 + 最小写权限实现。OIDC adapter / 管理台尚未实现。
+>
+> 已实现：`ui serve --trusted-proxy loopback`、`X-UI-User/UserId/Roles` 解析、
+> 无 actor 401、viewer/auditor 写操作 403、auditor 可读 `/api/reviews`。
 >
 > 结论：**OIDC/TLS/JWT 不进入 `ui-core`。** 核心只接受来自受信代理的已认证身份；
 > 企业 adapter 负责 OIDC、cookie、组映射。这样不破坏 docs/38 的 L0 零依赖。
@@ -72,13 +75,13 @@ X-UI-Request-Id: ...
 | 查看正文 | ✓ | ✓ | 按策略 | 默认否 | 按策略 |
 | review/revert | ✓ | ✓ | ✓ | | |
 
-## 5. 代码接入点（待实现）
+## 5. 代码接入点（部分已实现）
 
-1. `serve` 增加 `--trusted-proxy <cidr>`；
-2. 请求入口解析 `X-UI-*`，生成 `Actor {id, roles}`；
-3. `/api/approve`、`/api/review`、`/api/revisit` 写 `actor`；
-4. `/api/audit/export` 校验 `audit:read`；
-5. journal 的 `review/apply`、`approval` 增加 `actorId`；
+1. `serve` 增加 `--trusted-proxy loopback|<ip>`（已实现 loopback/精确 IP）；
+2. 请求入口解析 `X-UI-*`，生成 `Actor {id, roles}`（已实现）；
+3. `/api/approve`、`/api/review` 写 `actor`（review 已写；approve 的 journal actor 仍待补）；
+4. `/api/audit/export` 校验 `audit:read`（待实现）；
+5. journal 的 `review/apply`、`approval` 增加 `actorId`（review 已写）；
 6. 所有 `/api/*` 默认拒绝无 actor 的写请求。
 
 ## 6. 验收测试
