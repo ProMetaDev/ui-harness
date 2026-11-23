@@ -21,7 +21,11 @@ ui restore --checkpoint cp-... --yes
 
 ### checkpoint
 
-- `ui run --checkpoint` 在 agent 改动前自动存一次；
+- **自动**：每个 turn 第一次写操作（fs_write/patch/shell/plugin/mcp 等）前
+  自动建 `auto-before-turn-<n>`；成功写 `checkpoint/auto`，失败写
+  `checkpoint/error`（不会假装基线存在）；
+- `UI_AUTO_CHECKPOINT=0` 或 `--no-auto-checkpoint` 关闭；
+- `ui run --checkpoint` 额外在开跑前存一次 `before-run`；
 - 也可手动 `ui checkpoint` 指定 label；
 - 扫描 workspace；
 - 每个文件内容做 sha256；
@@ -166,6 +170,8 @@ manifest：
 - CLI e2e：`checkpoint_diff_restore_end_to_end`
 - CLI e2e：`review_accepts_only_one_hunk_end_to_end`
 - CLI e2e：`revert_single_file_end_to_end`
+- CLI e2e：`run_can_checkpoint_before_tool_writes`
+- CLI e2e：`run_auto_checkpoints_before_first_write`
 - HTTP e2e：`checkpoint_diff_review_api_round_trip`
 
 ## 8. 下一步

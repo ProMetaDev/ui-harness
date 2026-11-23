@@ -258,6 +258,8 @@ pub struct Agent {
     pub loaded_skills: Vec<(String, String)>,
     /// 工具输出在上下文里最多保留多少字符（0 = 不截断）。超出部分落盘。
     pub tool_chars: usize,
+    /// 每个 turn 第一次写操作前自动建 checkpoint；`UI_AUTO_CHECKPOINT=0` 可关。
+    pub auto_checkpoint: bool,
     /// 记忆（workspace 级，跨会话）。`memory_enabled=false` 时完全不动它。
     pub memory: crate::memory::Store,
     pub memory_enabled: bool,
@@ -560,6 +562,9 @@ impl Agent {
             history: Vec::new(),
             loaded_skills: Vec::new(),
             tool_chars: 2000,
+            auto_checkpoint: std::env::var("UI_AUTO_CHECKPOINT")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             memory,
             memory_enabled,
             memory_tokens,
@@ -948,6 +953,23 @@ impl Agent {
     /// 这一条是刻意的：以前每轮开头顺手 `cancel.reset()`，长驻 worker 里
     /// 「刚在队列中被取消的任务」一开跑就复活了；预算同理，上一任务烧掉的
     /// token 会串进下一任务的账单。run 边界由持有取消令牌的人划，才不会串。
+    /// 可能改动 workspace 的工具。自动 checkpoint 只在这些调用前触发；
+    /// 读/搜索/skill 等不应为每个 turn 付全量快照成本。
+    fn may_write_workspace(tool: &str) -> bool {
+        matches!(
+            tool,
+            "fs_write"
+                | "fs_edit"
+                | "patch"
+                | "fs_mv"
+                | "fs_delete"
+                | "shell"
+                | "plugin_call"
+                | "mcp_call"
+                | "todo"
+        )
+    }
+
     pub fn run_turn(&mut self, input: &str, hooks: &mut dyn Hooks) -> Result<TurnReport, AgentError> {
         // 每轮只读一次：先 refresh（坏链就在这里 fail closed，连 turn/start 都不写），
         // 再用「本轮输入 + goal + 最近两条 user」检索一次。工具结果不触发隐式重检索。
@@ -984,6 +1006,7 @@ impl Agent {
         let mut last_text = String::new();
         let mut empty_replies = 0usize;
         let mut memory_logged = false;
+        let mut checkpointed = false;
 
         loop {
             if self.active_cancel.is_cancelled() {
@@ -1206,6 +1229,34 @@ impl Agent {
             for call in &response.tool_calls {
                 if self.active_cancel.is_cancelled() {
                     return self.finish(turn, "cancelled", steps, tool_calls, last_text);
+                }
+                // 写操作前留基线：没有它，review/revert 只能靠用户记得先手动
+                // checkpoint。只做一次；失败要显式留一条 checkpoint/error，
+                // 不能假装自动基线已经存在。
+                if self.auto_checkpoint
+                    && !checkpointed
+                    && Self::may_write_workspace(&call.name)
+                {
+                    checkpointed = true;
+                    match crate::checkpoint::create(
+                        &self.workspace,
+                        &format!("auto-before-turn-{}", turn),
+                    ) {
+                        Ok(cp) => {
+                            let mut payload = cp;
+                            payload.set("tool", Json::from(call.name.as_str()));
+                            self.log_event("checkpoint/auto", payload)?;
+                        }
+                        Err(e) => {
+                            let _ = self.log_event(
+                                "checkpoint/error",
+                                Json::obj(vec![
+                                    ("tool", Json::from(call.name.as_str())),
+                                    ("error", Json::from(e)),
+                                ]),
+                            );
+                        }
+                    }
                 }
                 let (result, name) = match self.dispatch(call, hooks) {
                     Ok(v) => v,

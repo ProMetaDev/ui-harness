@@ -203,6 +203,41 @@ fn revert_single_file_end_to_end() {
 }
 
 #[test]
+fn run_auto_checkpoints_before_first_write() {
+    let ws = temp_ws("auto-checkpoint");
+    let sc = ws.join("sc.json");
+    fs::write(
+        &sc,
+        r#"{"model":"scripted","steps":[
+            {"content":"写文件","toolCalls":[{"name":"fs_write","args":{"path":"a.txt","content":"x"}}]},
+            {"content":"完成"}]}"#,
+    )
+    .unwrap();
+    let run = Command::new(bin())
+        .args([
+            "run",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--task",
+            "写文件",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let cps = ui_core::checkpoint::list(&ws).unwrap();
+    assert!(!cps.is_empty(), "首次写操作前必须自动建 checkpoint");
+    assert_eq!(cps[0].str_at("label"), Some("auto-before-turn-1"));
+    let (events, corrupt) =
+        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(corrupt.is_none());
+    assert!(events.iter().any(|e| e.str_at("kind") == Some("checkpoint/auto")));
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn run_can_checkpoint_before_tool_writes() {
     let ws = temp_ws("run-checkpoint");
     let sc = ws.join("sc.json");

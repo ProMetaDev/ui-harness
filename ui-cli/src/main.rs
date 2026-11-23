@@ -957,6 +957,7 @@ fn help() -> String {
      ui preview --cols 84 --rows 22   渲染一帧界面（不需要终端）\n\n\
      通用参数: --workspace PATH  --task-file PATH  --max-tokens N  --max-calls N  --max-steps N  --yes\n\
      审阅:     ui run --checkpoint 在开跑前存基线；之后用 ui diff / ui review / ui revert\n\
+              自动基线默认开启（每个 turn 首次写操作前），--no-auto-checkpoint 关闭\n\
      隐私:     --private PATH（可重复，也可 a;b 一条给多个）或 UI_PRIVATE=\"a;b\"\n\
              默认清单 .ui/.git/secrets 之外再挡住的路径：工具、策略、网页端共用同一份\n\
      落账:     工具输出写进日志前默认抹掉凭据形状（要原文加 --no-redact，日志会记下这个选择）\n\
@@ -1236,6 +1237,9 @@ fn cmd_chat(args: &Args) -> Result<i32, String> {
     restore_session_history(&mut agent, &jp)?;
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
+    if args.flag("no-auto-checkpoint") {
+        agent.auto_checkpoint = false;
+    }
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     attach_plugins(&mut agent, args)?;
@@ -1381,6 +1385,9 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
+    if args.flag("no-auto-checkpoint") {
+        agent.auto_checkpoint = false;
+    }
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     attach_plugins(&mut agent, args)?;
@@ -1557,6 +1564,9 @@ fn cmd_tui(args: &Args) -> Result<i32, String> {
     let mut agent = Agent::new(journal, model, ws.clone(), limits);
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
+    if args.flag("no-auto-checkpoint") {
+        agent.auto_checkpoint = false;
+    }
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     attach_plugins(&mut agent, args)?;
@@ -1942,6 +1952,9 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     agent.memory_query = Some(memory_input);
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
+    if args.flag("no-auto-checkpoint") {
+        agent.auto_checkpoint = false;
+    }
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     attach_plugins(&mut agent, args)?;
@@ -3813,6 +3826,9 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     let mut agent = Agent::new(journal, model, ws.clone(), limits_from(args));
     agent.compact = compact_policy(args);
     agent.tool_chars = tool_chars(args);
+    if args.flag("no-auto-checkpoint") {
+        agent.auto_checkpoint = false;
+    }
     agent.mode = mode_from(args);
     attach_mcp(&mut agent, args)?;
     attach_plugins(&mut agent, args)?;
