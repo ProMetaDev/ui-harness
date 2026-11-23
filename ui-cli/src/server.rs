@@ -1456,6 +1456,75 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         ("GET", "/api/reviews") => {
             json_response(&mut stream, &review_history(&hub).to_compact())
         }
+        ("POST", "/api/revert") => {
+            if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
+                return json_response_status(
+                    &mut stream,
+                    "409 Conflict",
+                    "{\"ok\":false,\"error\":\"任务运行中，先停止再回退\"}",
+                );
+            }
+            let value = json::parse(body.trim()).unwrap_or(Json::Null);
+            if value.bool_at("confirm") != Some(true) {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    "{\"ok\":false,\"error\":\"revert 需要 confirm:true\"}",
+                );
+            }
+            let checkpoint = value.str_at("checkpoint").unwrap_or("");
+            let path = value.str_at("path").unwrap_or("");
+            if checkpoint.is_empty() || path.is_empty() {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    "{\"ok\":false,\"error\":\"缺少 checkpoint 或 path\"}",
+                );
+            }
+            match ui_core::checkpoint::revert_file(&hub.workspace, checkpoint, path) {
+                Ok(mut out) => {
+                    let action = out.str_at("action").unwrap_or("").to_string();
+                    match audit_revert(
+                        &hub,
+                        checkpoint,
+                        path,
+                        &action,
+                        actor.as_ref().map(|a| a.id.as_str()).unwrap_or("web"),
+                    ) {
+                        Ok(seq) => {
+                            out.set("journalSeq", Json::from(seq));
+                            hub.push(Json::obj(vec![
+                                ("type", Json::from("review")),
+                                ("checkpoint", Json::from(checkpoint)),
+                                ("path", Json::from(path)),
+                                ("action", Json::from(action.as_str())),
+                                ("journalSeq", Json::from(seq)),
+                            ]));
+                            json_response(&mut stream, &out.to_compact())
+                        }
+                        Err(e) => json_response_status(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            &Json::obj(vec![
+                                ("ok", Json::Bool(false)),
+                                ("applied", Json::Bool(true)),
+                                (
+                                    "error",
+                                    Json::from(format!("{}；文件已回退，但审计失败，需要人工补账", e)),
+                                ),
+                            ])
+                            .to_compact(),
+                        ),
+                    }
+                }
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                        .to_compact(),
+                ),
+            }
+        }
         ("POST", "/api/review") => {
             if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
                 return json_response_status(
@@ -1934,6 +2003,34 @@ fn review_history(hub: &Hub) -> Json {
         .collect();
     rows.reverse();
     Json::Arr(rows)
+}
+
+fn audit_revert(
+    hub: &Hub,
+    checkpoint: &str,
+    path: &str,
+    action: &str,
+    actor: &str,
+) -> Result<u64, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let journal_path = session_file(&hub.workspace, &session);
+    let mut journal =
+        ui_core::Journal::open(&journal_path).map_err(|e| format!("写审计日志失败: {}", e))?;
+    let event = journal
+        .append(
+            "review/revert",
+            Json::obj(vec![
+                ("actor", Json::from(actor)),
+                ("checkpoint", Json::from(checkpoint)),
+                ("path", Json::from(path)),
+                ("action", Json::from(action)),
+            ]),
+        )
+        .map_err(|e| format!("写审计日志失败: {}", e))?;
+    Ok(event.u64_at("seq").unwrap_or(0))
 }
 
 fn session_list(ws: &std::path::Path, current: &str) -> Json {
@@ -2553,6 +2650,28 @@ mod tests {
                 body
             ),
         )
+    }
+
+    #[test]
+    fn web_revert_single_file_is_audited() {
+        let ws = temp_workspace("api-revert");
+        std::fs::write(ws.join("a.txt"), "old\n").unwrap();
+        let cp = ui_core::checkpoint::create(&ws, "before").unwrap();
+        let id = cp.str_at("id").unwrap().to_string();
+        std::fs::write(ws.join("a.txt"), "new\n").unwrap();
+        let hub = hub_for(&ws);
+        let body = format!(
+            "{{\"checkpoint\":\"{}\",\"path\":\"a.txt\",\"confirm\":true}}",
+            id
+        );
+        let (head, out) = http_post(hub, "/api/revert", &body);
+        assert!(head.contains("200 OK"), "{} {}", head, out);
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "old\n");
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none());
+        assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

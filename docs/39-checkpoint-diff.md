@@ -87,6 +87,7 @@ ui restore --checkpoint cp-... --prune --yes
 - 选择 checkpoint；
 - 查看文件级 diff；
 - 每个 hunk 一个复选框；
+- 每个文件有「回退此文件」按钮，走 `POST /api/revert`；
 - 「应用选中」走 `POST /api/review`，未选中的 hunk 回退；
 - 任务运行/排队时拒绝 review（409），避免和 agent 同时改文件；
 - diff 内容全部用 `textContent` 渲染，不把代码当 HTML。
@@ -98,6 +99,8 @@ GET  /api/checkpoints
 GET  /api/diff?checkpoint=<id>
 POST /api/review
      {"checkpoint":"cp-...","accepted":["src/main.rs#1"],"confirm":true}
+POST /api/revert
+     {"checkpoint":"cp-...","path":"src/main.rs","confirm":true}
 ```
 
 `POST /api/review` 需要同源请求 + token + `confirm:true`；写盘前自动建
@@ -178,6 +181,7 @@ manifest：
 - `restore_prune_removes_untracked_files_only_when_asked`
 - `exact_content_rename_is_detected_and_reviewed`
 - HTTP e2e：`checkpoint_diff_review_api_round_trip`
+- HTTP e2e：`web_revert_single_file_is_audited`
 
 ## 8. 下一步
 

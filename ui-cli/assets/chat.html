@@ -3828,6 +3828,14 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
         ? '[renamed from ' + (c.from || '?') + ']'
         : '[' + c.kind + ']';
       head.append(path, kind);
+      if (c.kind !== 'renamed') {
+        const revert = document.createElement('button');
+        revert.type = 'button';
+        revert.textContent = '回退此文件';
+        revert.style.marginLeft = 'auto';
+        revert.onclick = () => revertOne(c.path);
+        head.appendChild(revert);
+      }
       card.appendChild(head);
       for (const h of (c.hunks || [])) {
         const wrap = document.createElement('div');
@@ -3896,6 +3904,22 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       renderHistory(await request('/api/reviews'));
     } catch (e) {
       if (history) history.hidden = true;
+    }
+  }
+
+  async function revertOne(path) {
+    if (!window.confirm('回退 ' + path + ' 到当前 checkpoint？')) return;
+    try {
+      await request('/api/revert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checkpoint: current, path, confirm: true })
+      });
+      notify('已回退 ' + path);
+      await loadHistory();
+      await loadDiff(current);
+    } catch (e) {
+      notify(e.message || '回退失败', 'error');
     }
   }
 
