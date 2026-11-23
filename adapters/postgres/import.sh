@@ -13,4 +13,5 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$HERE/schema.sql"
 python3 "$HERE/export_journal.py" \
   --journal "$JOURNAL" --session "$SESSION" --workspace "$WORKSPACE" \
   | psql "$DATABASE_URL" -v ON_ERROR_STOP=1
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'select ui_sync_derived();' >/dev/null
 echo "PASS imported $JOURNAL session=$SESSION workspace=$WORKSPACE"

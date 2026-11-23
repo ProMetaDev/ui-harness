@@ -49,6 +49,78 @@ select
 from ui_events
 where kind in ('approval/requested', 'approval/answered');
 
+-- M2 物化：任务/审批从事件派生，但落成可被 lease/状态机接管的表。
+create table if not exists ui_task_records (
+  workspace_id text not null,
+  session_id text not null,
+  task_seq bigint not null,
+  turn bigint,
+  prompt text,
+  status text not null default 'queued',
+  created_at timestamptz not null,
+  finished_at timestamptz,
+  primary key (workspace_id, session_id, task_seq)
+);
+
+create table if not exists ui_approval_records (
+  workspace_id text not null,
+  session_id text not null,
+  approval_id text not null,
+  call_id text,
+  tool text,
+  effects jsonb,
+  status text not null default 'pending',
+  scope text,
+  via text,
+  created_at timestamptz not null,
+  decided_at timestamptz,
+  primary key (workspace_id, session_id, approval_id)
+);
+
+create or replace function ui_sync_derived() returns void as $$
+begin
+  insert into ui_task_records
+    (workspace_id, session_id, task_seq, turn, prompt, status, created_at)
+  select workspace_id, session_id, seq, (payload->>'turn')::bigint,
+         payload->>'prompt', 'queued', created_at
+  from ui_events where kind = 'turn/start'
+  on conflict (workspace_id, session_id, task_seq) do nothing;
+
+  update ui_task_records t
+  set status = 'done', finished_at = e.created_at
+  from ui_events e
+  where e.kind = 'turn/end'
+    and t.workspace_id = e.workspace_id
+    and t.session_id = e.session_id
+    and t.turn = (e.payload->>'turn')::bigint
+    and t.status <> 'done';
+
+  insert into ui_approval_records
+    (workspace_id, session_id, approval_id, call_id, tool, effects, status, created_at)
+  select workspace_id, session_id,
+         coalesce(payload->>'approvalId', payload->>'approval_id'),
+         coalesce(payload->>'callId', payload->>'call_id'),
+         payload->>'tool', payload->'effects', 'pending', created_at
+  from ui_events where kind = 'approval/requested'
+  on conflict (workspace_id, session_id, approval_id) do nothing;
+
+  update ui_approval_records a
+  set status = case
+        when e.payload->>'verdict' in ('allow','once','allow-once','y','yes') then 'allowed'
+        when e.payload->>'verdict' in ('always','session','allow-always','a') then 'allowed'
+        else 'denied'
+      end,
+      scope = e.payload->>'scope',
+      via = e.payload->>'via',
+      decided_at = e.created_at
+  from ui_events e
+  where e.kind = 'approval/answered'
+    and a.workspace_id = e.workspace_id
+    and a.session_id = e.session_id
+    and a.approval_id = coalesce(e.payload->>'approvalId', e.payload->>'approval_id');
+end;
+$$ language plpgsql;
+
 -- 审计/回放约束：事件不可 update/delete（用触发器而不是只靠约定）。
 create or replace function ui_events_immutable() returns trigger as $$
 begin

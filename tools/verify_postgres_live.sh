@@ -45,15 +45,18 @@ docker exec "$NAME" psql -U postgres -d ui -v ON_ERROR_STOP=1 -f /tmp/schema.sql
 python3 adapters/postgres/export_journal.py \
   --journal "$J" --session default --workspace w1 \
   | docker exec -i "$NAME" psql -U postgres -d ui -v ON_ERROR_STOP=1 >/dev/null
+docker exec "$NAME" psql -U postgres -d ui -Atc 'select ui_sync_derived()' >/dev/null
 
 events=$(docker exec "$NAME" psql -U postgres -d ui -Atc 'select count(*) from ui_events')
-tasks=$(docker exec "$NAME" psql -U postgres -d ui -Atc 'select count(*) from ui_tasks')
-approvals=$(docker exec "$NAME" psql -U postgres -d ui -Atc 'select count(*) from ui_approvals')
+tasks=$(docker exec "$NAME" psql -U postgres -d ui -Atc 'select count(*) from ui_task_records')
+approvals=$(docker exec "$NAME" psql -U postgres -d ui -Atc 'select count(*) from ui_approval_records')
 hash=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select hash from ui_events where seq=3")
+status=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_approval_records where approval_id='ap-1'")
 [ "$events" = "3" ] || { echo "FAIL: events=$events"; exit 1; }
 [ "$tasks" = "1" ] || { echo "FAIL: tasks=$tasks"; exit 1; }
-[ "$approvals" = "2" ] || { echo "FAIL: approvals=$approvals"; exit 1; }
+[ "$approvals" = "1" ] || { echo "FAIL: approvals=$approvals"; exit 1; }
 [ "$hash" = "h3" ] || { echo "FAIL: hash=$hash"; exit 1; }
+[ "$status" = "denied" ] || { echo "FAIL: approval status=$status"; exit 1; }
 
 # append-only：update 必须被触发器拒绝。
 if docker exec "$NAME" psql -U postgres -d ui -c "update ui_events set kind='tampered' where seq=1" >/dev/null 2>&1; then
@@ -61,4 +64,4 @@ if docker exec "$NAME" psql -U postgres -d ui -c "update ui_events set kind='tam
   exit 1
 fi
 
-echo "PASS postgres live: events=$events tasks=$tasks approvals=$approvals append-only=yes"
+echo "PASS postgres live: events=$events tasks=$tasks approvals=$approvals status=$status append-only=yes"

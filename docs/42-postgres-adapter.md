@@ -9,7 +9,9 @@
 - `schema.sql`
   - `ui_events` append-only；
   - 触发器禁止 update/delete；
-  - `ui_tasks` / `ui_approvals` 事件派生 view。
+  - `ui_task_records` / `ui_approval_records` 物化表；
+  - `ui_sync_derived()` 从事件同步任务/审批状态；
+  - `ui_tasks` / `ui_approvals` 兼容 view。
 - `export_journal.py`
   - journal JSONL → Postgres `COPY` 文本；
   - 保留 `seq/prev/hash/ts`；
@@ -38,7 +40,8 @@ bash tools/verify_postgres_live.sh
 ```
 
 `verify_postgres_live.sh` 用 `postgres:16-alpine` 容器真跑 schema + COPY +
-`ui_tasks/ui_approvals` 查询 + append-only 触发器；没有 docker/镜像时明确 SKIP。
+`ui_sync_derived()` + `ui_task_records/ui_approval_records` 查询 + append-only 触发器；
+没有 docker/镜像时明确 SKIP。
 
 ## 3. 边界
 
@@ -47,7 +50,7 @@ bash tools/verify_postgres_live.sh
 - core 直连 Postgres；
 - 自动增量同步；
 - 多 worker lease；
-- 任务/审批物化状态机；
+- 任务/审批的完整状态机（当前只做 queued/done 与 pending/allowed/denied）；
 - 保留/删除；
 - 审计签名/WORM；
 - 真实 Postgres CI（本机 live 脚本已验证；CI 尚未接入）。
