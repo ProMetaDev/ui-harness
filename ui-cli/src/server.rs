@@ -1168,6 +1168,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 "{\"ok\":false,\"error\":\"当前角色没有审计权限\"}",
             );
         }
+        if path == "/api/audit/export" && !actor.can_audit() {
+            return json_response_status(
+                &mut stream,
+                "403 Forbidden",
+                "{\"ok\":false,\"error\":\"audit export 需要 auditor/admin\"}",
+            );
+        }
     }
 
     match (method.as_str(), path.as_str()) {
@@ -1456,6 +1463,15 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         ("GET", "/api/reviews") => {
             json_response(&mut stream, &review_history(&hub).to_compact())
         }
+        ("GET", "/api/audit/export") => match audit_export(&hub) {
+            Ok(out) => json_response(&mut stream, &out.to_compact()),
+            Err(e) => json_response_status(
+                &mut stream,
+                "500 Internal Server Error",
+                &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                    .to_compact(),
+            ),
+        },
         ("POST", "/api/revert") => {
             if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
                 return json_response_status(
@@ -2035,6 +2051,33 @@ fn audit_revert(
         )
         .map_err(|e| format!("写审计日志失败: {}", e))?;
     Ok(event.u64_at("seq").unwrap_or(0))
+}
+
+fn audit_export(hub: &Hub) -> Result<Json, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let (events, corrupt) =
+        ui_core::Journal::read(&path).map_err(|e| format!("读审计日志失败: {}", e))?;
+    if corrupt.is_some() {
+        return Err("审计日志损坏，拒绝导出".to_string());
+    }
+    let canonical = events
+        .iter()
+        .map(|e| e.to_compact())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let digest = ui_core::sha256::hex(canonical.as_bytes());
+    Ok(Json::obj(vec![
+        ("version", Json::from(1u64)),
+        ("session", Json::from(session.as_str())),
+        ("exportedAt", Json::from(ui_core::time::now_ms())),
+        ("count", Json::from(events.len() as u64)),
+        ("events", Json::Arr(events)),
+        ("sha256", Json::from(digest.as_str())),
+    ]))
 }
 
 fn session_list(ws: &std::path::Path, current: &str) -> Json {
@@ -2722,6 +2765,34 @@ mod tests {
             ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
         assert!(corrupt.is_none());
         assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn audit_export_is_verifiable_and_role_checked() {
+        let ws = temp_workspace("audit-export");
+        std::fs::create_dir_all(ws.join(".ui")).unwrap();
+        let path = ws.join(".ui").join("journal.jsonl");
+        let mut j = ui_core::Journal::open(&path).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("a"))])).unwrap();
+        drop(j);
+
+        let hub = hub_for(&ws);
+        let (head, body) = http_get(hub.clone(), "/api/audit/export");
+        assert!(head.contains("200 OK"), "{}", head);
+        let out = ui_core::json::parse(body.trim()).unwrap();
+        assert_eq!(out.u64_at("count"), Some(1));
+        assert_eq!(out.str_at("sha256").map(str::len), Some(64));
+
+        let mut h = Hub::default();
+        h.workspace = ws.clone();
+        h.trusted_proxy = Some("loopback".into());
+        let trusted = Arc::new(h);
+        let viewer = http_request(
+            trusted,
+            "GET /api/audit/export HTTP/1.1\r\nHost: test\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nConnection: close\r\n\r\n",
+        );
+        assert!(viewer.0.contains("403"), "{}", viewer.0);
         let _ = std::fs::remove_dir_all(&ws);
     }
 
