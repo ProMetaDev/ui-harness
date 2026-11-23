@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""最小 Postgres worker：claim -> run ui -> heartbeat -> done/failed。
+"""最小 Postgres worker：claim -> run ui -> heartbeat -> done/failed/cancelled。
 
 只使用 Python 标准库 + 可选 psql（L2 adapter）。不进入 ui-core。
+
+取消语义：
+- claim 前先把自己名下 running 且 cancel_requested 的任务标成 cancelled；
+- claim 到 cancel_requested=true 的任务时不启动 ui；
+- 运行中由 heartbeat 轮询 cancel_requested，命中后终止子进程并标 cancelled；
+- 任何路径都不把已请求取消的任务写成 done。
 """
 import argparse
 import datetime as dt
@@ -12,8 +18,12 @@ import sys
 import threading
 import time
 
+# Heartbeat also carries the cancellation poll; keep it well below the 60s lease.
+HEARTBEAT_SECONDS = 2.0
+UI_POLL_SECONDS = 0.2
+
 CLAIM = """
-select c.task_seq, c.session_id, c.workspace_id, t.prompt
+select c.task_seq, c.session_id, c.workspace_id, t.prompt, t.cancel_requested
 from ui_claim_task('{worker}') c
 join ui_task_records t
   on t.workspace_id=c.workspace_id and t.session_id=c.session_id and t.task_seq=c.task_seq
@@ -34,10 +44,12 @@ class Worker:
         self.extra = extra
         self.sync = sync_events
         self.stop = threading.Event()
+        self.cancel = threading.Event()
+        self.lease_lost = threading.Event()
 
     def psql_run(self, sql):
         p = subprocess.run(
-            [self.psql, self.dsn, "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            [self.psql, self.dsn, "-At", "-F", "\t", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
             text=True,
             capture_output=True,
         )
@@ -45,14 +57,38 @@ class Worker:
             raise RuntimeError(p.stderr.strip() or "psql failed")
         return p.stdout.strip()
 
+    def cancel_requested(self, workspace_id, session, seq):
+        out = self.psql_run(
+            "select cancel_requested from ui_task_records "
+            f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+            f"and task_seq={int(seq)}"
+        )
+        return out == "t"
+
     def heartbeat(self, workspace_id, session, seq):
-        while not self.stop.wait(20):
+        while not self.stop.is_set():
             try:
-                self.psql_run(
-                    f"select ui_heartbeat_task('{q(workspace_id)}','{q(session)}',{seq},'{q(self.worker)}')"
+                out = self.psql_run(
+                    f"select ui_heartbeat_task('{q(workspace_id)}','{q(session)}',{int(seq)},'{q(self.worker)}'), "
+                    "(select cancel_requested from ui_task_records "
+                    f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+                    f"and task_seq={int(seq)})"
                 )
+                parts = out.split("\t")
+                if len(parts) < 2:
+                    raise RuntimeError("bad heartbeat row: " + out)
+                hb, cancel = parts[0], parts[1]
+                if cancel == "t":
+                    self.cancel.set()
+                    return
+                if hb != "t":
+                    self.lease_lost.set()
+                    print(f"heartbeat lost task={seq} session={session}", file=sys.stderr)
+                    return
             except Exception as exc:
                 print(f"heartbeat failed: {exc}", file=sys.stderr)
+                return
+            if self.stop.wait(HEARTBEAT_SECONDS):
                 return
 
     def sync_events(self, workspace_id, session):
@@ -114,42 +150,146 @@ class Worker:
         )
         return len(vals)
 
+    def reap_cancelled(self):
+        """Mark tasks already assigned to this worker as cancelled.
+
+        This is called before every claim.  It covers a worker restart (or a
+        cancellation requested between claims) where no process is running but
+        the row is still ``running`` with ``cancel_requested=true``.
+        """
+        out = self.psql_run(
+            "update ui_task_records "
+            "set status='cancelled', finished_at=now(), lease_until=null "
+            f"where worker_id='{q(self.worker)}' and status='running' and cancel_requested "
+            "returning task_seq"
+        )
+        seqs = [line for line in out.splitlines() if line]
+        for seq in seqs:
+            print(f"cancelled stale task={seq} worker={self.worker}")
+        return len(seqs)
+
+    def mark_cancelled(self, workspace_id, session, seq):
+        self.psql_run(
+            "update ui_task_records "
+            "set status='cancelled', cancel_requested=true, finished_at=now(), lease_until=null "
+            f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+            f"and task_seq={int(seq)} and worker_id='{q(self.worker)}' and status='running'"
+        )
+
+    def finish(self, workspace_id, session, seq, status):
+        if status == "done":
+            # The final guard makes the cancel-vs-complete race safe: a task
+            # whose cancellation landed just before we write done is not done.
+            out = self.psql_run(
+                "update ui_task_records "
+                "set status='done', finished_at=now(), lease_until=null "
+                f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+                f"and task_seq={int(seq)} and worker_id='{q(self.worker)}' "
+                "and status='running' and not cancel_requested "
+                "returning task_seq"
+            )
+            if out:
+                return
+            state = self.psql_run(
+                "select status, cancel_requested from ui_task_records "
+                f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+                f"and task_seq={int(seq)}"
+            )
+            parts = state.split("\t")
+            if len(parts) >= 2 and parts[1] == "t":
+                self.mark_cancelled(workspace_id, session, seq)
+                return
+            if parts and parts[0] == "done":
+                # ui_sync_derived() may have observed turn/end before us.
+                return
+            print(f"could not finish task={seq}: lease/status changed", file=sys.stderr)
+            return
+        if status == "cancelled":
+            self.mark_cancelled(workspace_id, session, seq)
+            return
+        self.psql_run(
+            "update ui_task_records "
+            "set status='failed', finished_at=now(), lease_until=null "
+            f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' "
+            f"and task_seq={int(seq)} and worker_id='{q(self.worker)}' and status='running'"
+        )
+
+    @staticmethod
+    def terminate(proc):
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
     def one(self):
+        reaped = self.reap_cancelled()
         out = self.psql_run(CLAIM.format(worker=q(self.worker)))
         if not out:
-            return False
+            return reaped > 0
         parts = out.split("\t")
-        if len(parts) < 4:
+        if len(parts) < 5:
             raise RuntimeError("bad claim row: " + out)
-        seq, session, workspace_id, prompt = parts[0], parts[1], parts[2], parts[3]
-        hb = threading.Thread(target=self.heartbeat, args=(workspace_id, session, int(seq)), daemon=True)
+        seq, session, workspace_id, prompt, cancel = parts[0], parts[1], parts[2], parts[3], parts[4]
+        seq_i = int(seq)
+
+        # A cancellation may have raced with the claim.  Do not launch ui for it.
+        if cancel == "t" or self.cancel_requested(workspace_id, session, seq_i):
+            self.mark_cancelled(workspace_id, session, seq_i)
+            print(f"cancelled task={seq} session={session} before run")
+            return True
+
+        self.stop = threading.Event()
+        self.cancel = threading.Event()
+        self.lease_lost = threading.Event()
+        hb = threading.Thread(
+            target=self.heartbeat, args=(workspace_id, session, seq_i), daemon=True
+        )
         hb.start()
+        status = "failed"
         try:
-            p = subprocess.run(
+            proc = subprocess.Popen(
                 [self.ui, "run", "--workspace", self.workspace, "--task", prompt, "--yes"]
                 + self.extra,
                 text=True,
             )
-            if p.returncode != 0:
-                raise RuntimeError(f"ui exited {p.returncode}")
-            status = "done"
+            while True:
+                if self.cancel.is_set():
+                    status = "cancelled"
+                    self.terminate(proc)
+                    break
+                rc = proc.poll()
+                if rc is not None:
+                    status = "done" if rc == 0 else "failed"
+                    break
+                time.sleep(UI_POLL_SECONDS)
+            if status == "done" and (
+                self.cancel.is_set() or self.cancel_requested(workspace_id, session, seq_i)
+            ):
+                status = "cancelled"
         except Exception as exc:
             print(f"task {seq} failed: {exc}", file=sys.stderr)
             status = "failed"
         finally:
             self.stop.set()
+            hb.join(timeout=5)
+
         if self.sync:
             try:
                 n = self.sync_events(workspace_id, session)
                 print(f"synced {n} new events task={seq}")
             except Exception as exc:
                 print(f"sync failed task={seq}: {exc}", file=sys.stderr)
-                status = "failed"
-        extra = ", finished_at=now()" if status in ("done", "failed") else ""
-        self.psql_run(
-            f"update ui_task_records set status='{status}'{extra} "
-            f"where workspace_id='{q(workspace_id)}' and session_id='{q(session)}' and task_seq={int(seq)}"
-        )
+                if status != "cancelled":
+                    status = "failed"
+
+        self.finish(workspace_id, session, seq_i, status)
         print(f"{status} task={seq} session={session}")
         return True
 
