@@ -13,6 +13,13 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
 > 用 1.0 是给用户错误信号。版本号规则与 1.0 的准入条件见 [docs/34](docs/34-versioning.md)。
 
+## 当前状态（2026-11-23）
+
+- **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
+- **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；Postgres/runner/metrics/audit/admin 是可选 L2。
+- **未完成**：24h soak、M6 可写管理台/合规、checkpoint blob GC、review 事务化。
+- 门禁：`tools/debug.sh` 当前 **57 passed / 0 failed**（以实际输出为准）。
+
 企业单租户的长期路线、Phase 0 架构和运维 runbook 在
 [docs/35](docs/35-enterprise-roadmap.md) / [docs/36](docs/36-enterprise-phase0.md) /
 [docs/37](docs/37-enterprise-runbook.md)。这些是**目标设计**，不是已交付的企业能力；
@@ -79,6 +86,62 @@ cargo build --release
 # secrets/astra.json: {"base_url": "...", "api_key": "...", "model": "..."}
 UI_MODEL_CMD="node tools/chat_compat.mjs" ui run --task "把 hello.txt 写出来" --yes
 ```
+
+## 变更审阅与代码索引
+
+Agent 改文件后，不再只能翻聊天记录：
+
+```bash
+ui run --task "改代码" --checkpoint --yes   # 开跑前留基线（每个 turn 首次写操作也会自动留）
+ui diff                                    # 文件级 diff
+ui review --checkpoint cp-...              # 列出 hunk
+ui review --checkpoint cp-... --accept src/main.rs#1 --yes
+ui revert --checkpoint cp-... --path src/main.rs --yes
+ui restore --checkpoint cp-... --prune --yes
+```
+
+- 自动 checkpoint 跳过 `.env*`、私钥/证书、`secrets/` 与 `--private` 路径；
+- review/revert 写 journal，Web 端有「变更」面板和历史；
+- 内容完全相同的 rename 会识别为 `renamed`；
+- `restore --prune` 才会删除 checkpoint 后新增的文件。
+
+大仓库上下文：
+
+```bash
+ui index                 # 文件/符号索引，写入 .ui/index/manifest.json
+ui index --incremental   # 按 size+mtime 复用未变文件
+ui index --query "run_turn"
+```
+
+prompt 只注入“相关文件地图”，不注入正文；索引不存在时行为不变。详见
+[docs/39](docs/39-checkpoint-diff.md)、[docs/40](docs/40-code-index.md)。
+
+## 企业基础（可选 L2）
+
+核心仍是 Rust std-only；下面这些需要显式安装/启动：
+
+```bash
+# 受信代理模式：必须同时给共享密钥，否则 fail closed
+ui serve --port 7788 --trusted-proxy loopback --trusted-proxy-secret "$PROXY_SECRET"
+
+# Postgres 事件/任务/审批 adapter（需要 psql/Docker）
+bash adapters/postgres/migrate.sh
+bash adapters/postgres/import.sh .ui/journal.jsonl default w1
+
+# 容器 runner（需要 Docker）
+python3 adapters/runner/runner.py --port 18089 \
+  --workspace-root /srv/ui/workspaces --token "$RUNNER_TOKEN"
+```
+
+- `/api/metrics`：受保护的 Prometheus 文本指标；
+- `/api/audit/export?since=&limit=`：带 sha256 的 journal 导出；
+- `/admin`：只读管理面；
+- `adapters/postgres/worker.py`：claim → 真实 `ui run` → heartbeat → done/failed；
+- `adapters/runner/runner.py`：workspace-only 挂载、无网络、资源/超时限制。
+
+详见 [docs/41](docs/41-enterprise-m1.md) / [docs/42](docs/42-postgres-adapter.md) /
+[docs/44](docs/44-container-runner.md) / [docs/45](docs/45-metrics.md) /
+[docs/46](docs/46-audit-export.md) / [docs/47](docs/47-admin.md)。
 
 ## 四个不一样的地方
 
@@ -155,6 +218,7 @@ $ ui replay
 | ![能力](docs/images/capabilities.png) | ![实验室](docs/images/lab.png) |
 
 首开有 3 步教练，工作区 / 能力 / 实验室各有一次性上下文提示；`?` 或 `⋯ → 重新看引导` 可重开。
+另有只读 [`/admin`](docs/47-admin.md) 管理面，以及顶部「变更」审阅面板（diff/hunk/回退）。
 
 ![首开引导](docs/images/onboarding.png)
 
@@ -173,6 +237,9 @@ Word 专用方案与脚本在 [demo/skills/docx-safe-edit/SKILL.md](demo/skills/
 | `ui doctor` | 探测真实环境能力，并打印信任边界 |
 | `ui run --task "..."` | 跑一轮任务（`--mock` 可用剧本，无需模型） |
 | `ui tui` / `ui serve` | 全屏终端 / 本地网页端 |
+| `ui index [--incremental]` | 代码索引 / 增量索引 |
+| `ui checkpoint` / `ui diff` | 变更基线 / 文件级 diff |
+| `ui review` / `ui revert` | hunk 级接受 / 单文件回退 |
 | `ui replay` | 回放日志：快照、计价、决策、副作用、**实际改动** |
 | `ui verify` | 校验哈希链与未完成调用 |
 | `ui resume` | 对账崩溃打断的副作用 |
@@ -183,7 +250,8 @@ Word 专用方案与脚本在 [demo/skills/docx-safe-edit/SKILL.md](demo/skills/
 | `ui spill [clean]` | 看/清落在磁盘上的工具输出原文（两个目录、一份保留预算） |
 | `ui secrets` | 扫留在 `.ui` 里的明文：日志、两个落盘目录、记忆库 |
 
-其余：`chat` / `workflow` / `apply` / `export` / `skills` / `preview` / `providers` / `sessions`。
+其余：`chat` / `workflow` / `apply` / `export` / `skills` / `preview` / `providers` / `sessions` /
+`restore` / `checkpoints`。
 
 ## 诚实的边界
 
@@ -212,6 +280,12 @@ Word 专用方案与脚本在 [demo/skills/docx-safe-edit/SKILL.md](demo/skills/
 bash tools/kit.sh                        # 攻击场景，一张结论表（场景数以输出为准）
 python3 tools/verify_journal.py JOURNAL  # 0 完好 / 2 链被改 / 3 尾部残缺
 UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3 seeds 实验链路
+
+bash tools/verify_flake.sh               # 20 次 lab_pack 稳定性循环
+python tools/browser_e2e.py --ui out/ui.exe   # 真实浏览器：聊天 + /admin
+bash tools/verify_postgres_live.sh       # 真实 Postgres schema/COPY/lease
+bash tools/verify_runner_live.sh         # 真实 Docker runner 隔离
+bash tools/soak_status.sh /tmp/ui-soak-long-state.json
 ```
 
 - 格式说明与复跑记录模板：[docs/22-verify-kit.md](docs/22-verify-kit.md)
