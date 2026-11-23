@@ -1600,6 +1600,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 ),
             }
         }
+        ("GET", "/api/metrics") => text_response(&mut stream, &metrics_text(&hub)),
         ("GET", "/api/state") => {
             // 页面刷新后要靠这三样把按钮恢复成真相：在跑哪个、排队有哪些、
             // 哪一张审批卡还等着人点。
@@ -2184,6 +2185,53 @@ fn json_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
     json_response_status(stream, "200 OK", body)
 }
 
+fn text_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()
+}
+
+fn metrics_text(hub: &Hub) -> String {
+    let active = hub_lock(&hub.active).is_some() as u64;
+    let queued = hub_lock(&hub.queue).len() as u64;
+    let tools = hub_lock(&hub.tools).len() as u64;
+    let pending = hub_lock(&hub.approval).is_some() as u64;
+    let events = hub_lock(&hub.log).len() as u64;
+    let seq = hub.seq.load(Ordering::SeqCst);
+    let uptime = ui_core::time::now_ms().saturating_sub(hub.epoch) / 1000;
+    format!(
+        "# HELP ui_up 1 if the process is serving\n\
+         # TYPE ui_up gauge\n\
+         ui_up 1\n\
+         # HELP ui_uptime_seconds process uptime\n\
+         # TYPE ui_uptime_seconds gauge\n\
+         ui_uptime_seconds {}\n\
+         # HELP ui_events_seq last broadcast sequence\n\
+         # TYPE ui_events_seq counter\n\
+         ui_events_seq {}\n\
+         # HELP ui_events_in_memory events retained in memory\n\
+         # TYPE ui_events_in_memory gauge\n\
+         ui_events_in_memory {}\n\
+         # HELP ui_tasks_active currently running web tasks\n\
+         # TYPE ui_tasks_active gauge\n\
+         ui_tasks_active {}\n\
+         # HELP ui_tasks_queued queued web tasks\n\
+         # TYPE ui_tasks_queued gauge\n\
+         ui_tasks_queued {}\n\
+         # HELP ui_tools_stored cached full tool outputs\n\
+         # TYPE ui_tools_stored gauge\n\
+         ui_tools_stored {}\n\
+         # HELP ui_approval_pending pending approval\n\
+         # TYPE ui_approval_pending gauge\n\
+         ui_approval_pending {}\n",
+        uptime, seq, events, active, queued, tools, pending
+    )
+}
+
 fn json_response_status(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2674,6 +2722,20 @@ mod tests {
             ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
         assert!(corrupt.is_none());
         assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn metrics_endpoint_exposes_gauges() {
+        let ws = temp_workspace("metrics");
+        let hub = hub_for(&ws);
+        hub.push(Json::obj(vec![("type", Json::from("note"))]));
+        let (head, body) = http_get(hub, "/api/metrics");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(head.contains("text/plain"), "{}", head);
+        assert!(body.contains("ui_up 1"), "{}", body);
+        assert!(body.contains("ui_events_seq 1"), "{}", body);
+        assert!(body.contains("ui_events_in_memory 1"), "{}", body);
         let _ = std::fs::remove_dir_all(&ws);
     }
 
