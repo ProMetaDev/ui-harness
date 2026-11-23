@@ -48,8 +48,8 @@ bash tools/verify_postgres_live.sh
 `ui_sync_derived()` + `ui_task_records/ui_approval_records` 查询 + claim/heartbeat/过期重领 + append-only 触发器；
 没有 docker/镜像时明确 SKIP。
 
-`verify_postgres_worker.sh` 用假 `ui` 验证 worker 协议：
-`claim -> --task 参数 -> status=done`。
+`verify_postgres_worker.sh` 验证 worker 协议：
+假 `ui` 的 done/failed，以及真实 `ui run --mock` 写 journal 后 `status=done`。
 
 ## 3. 边界
 
@@ -57,7 +57,7 @@ bash tools/verify_postgres_live.sh
 
 - core 直连 Postgres；
 - 自动增量同步；
-- 多 worker 调度器（已有一个最小 worker 循环；没有队列公平性/优先级）；
+- 多 worker 调度器（已有真实 `ui run` 端到端 worker；没有队列公平性/优先级）；
 - 任务/审批的完整状态机（当前只做 queued/running/done 与 pending/allowed/denied）；
 - 保留/删除；
 - 审计签名/WORM；

@@ -76,4 +76,20 @@ python3 adapters/postgres/worker.py \
   --ui "$FAKE_FAIL" --workspace "$TMP/ws" --once
 status2=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_task_records where task_seq=2")
 [ "$status2" = "failed" ] || { echo "FAIL: failed path status=$status2"; exit 1; }
-echo "PASS postgres worker: claim -> fake ui -> done/failed"
+
+# 真实 ui run：worker 必须能把 Postgres task 跑成真实 journal，并写 done。
+docker exec "$NAME" psql -U postgres -d ui -v ON_ERROR_STOP=1 -c \
+  "insert into ui_events(workspace_id,session_id,seq,kind,payload,prev_hash,hash,created_at) values
+   ('w1','default',3,'turn/start','{\"turn\":3,\"prompt\":\"real worker\"}','h2','h3',now())" >/dev/null
+docker exec "$NAME" psql -U postgres -d ui -Atc 'select ui_sync_derived()' >/dev/null
+UIWS="$TMP/ui-ws"
+mkdir -p "$UIWS"
+SC="$TMP/scenario.json"
+printf '%s\n' '{"model":"scripted","steps":[{"content":"real worker done"}]}' > "$SC"
+python3 adapters/postgres/worker.py \
+  --psql "$PSQL" --dsn ignored --worker w1 \
+  --ui "$UI_BIN" --workspace "$UIWS" --once -- --mock "$SC"
+status3=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_task_records where task_seq=3")
+[ "$status3" = "done" ] || { echo "FAIL: real ui status=$status3"; exit 1; }
+[ -f "$UIWS/.ui/journal.jsonl" ] || { echo "FAIL: real ui did not write journal"; exit 1; }
+echo "PASS postgres worker: fake done/failed + real ui run -> status=done"
