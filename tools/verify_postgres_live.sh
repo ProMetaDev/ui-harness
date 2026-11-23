@@ -54,6 +54,11 @@ hash=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select hash from ui_even
 status=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select status from ui_approval_records where approval_id='ap-1'")
 claim1=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select task_seq from ui_claim_task('w1')")
 claim2=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select task_seq from ui_claim_task('w2')")
+hb1=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select ui_heartbeat_task('w1','default',1,'w1')")
+hb2=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select ui_heartbeat_task('w1','default',1,'w2')")
+docker exec "$NAME" psql -U postgres -d ui -Atc "update ui_task_records set lease_until=now()-interval '1 second' where task_seq=1" >/dev/null
+claim3=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select task_seq from ui_claim_task('w2')")
+attempts=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select attempts from ui_task_records where task_seq=1")
 [ "$events" = "3" ] || { echo "FAIL: events=$events"; exit 1; }
 [ "$tasks" = "1" ] || { echo "FAIL: tasks=$tasks"; exit 1; }
 [ "$approvals" = "1" ] || { echo "FAIL: approvals=$approvals"; exit 1; }
@@ -61,6 +66,10 @@ claim2=$(docker exec "$NAME" psql -U postgres -d ui -Atc "select task_seq from u
 [ "$status" = "denied" ] || { echo "FAIL: approval status=$status"; exit 1; }
 [ "$claim1" = "1" ] || { echo "FAIL: first claim=$claim1"; exit 1; }
 [ -z "$claim2" ] || { echo "FAIL: task double-claimed=$claim2"; exit 1; }
+[ "$hb1" = "t" ] || { echo "FAIL: owner heartbeat=$hb1"; exit 1; }
+[ "$hb2" = "f" ] || { echo "FAIL: non-owner heartbeat=$hb2"; exit 1; }
+[ "$claim3" = "1" ] || { echo "FAIL: expired lease not reclaimable=$claim3"; exit 1; }
+[ "$attempts" = "2" ] || { echo "FAIL: attempts=$attempts"; exit 1; }
 
 # append-only：update 必须被触发器拒绝。
 if docker exec "$NAME" psql -U postgres -d ui -c "update ui_events set kind='tampered' where seq=1" >/dev/null 2>&1; then
@@ -68,4 +77,4 @@ if docker exec "$NAME" psql -U postgres -d ui -c "update ui_events set kind='tam
   exit 1
 fi
 
-echo "PASS postgres live: events=$events tasks=$tasks approvals=$approvals status=$status lease=single-claim append-only=yes"
+echo "PASS postgres live: events=$events tasks=$tasks approvals=$approvals status=$status lease=claim+heartbeat+expiry append-only=yes"

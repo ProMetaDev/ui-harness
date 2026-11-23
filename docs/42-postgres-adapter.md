@@ -12,6 +12,7 @@
   - `ui_task_records` / `ui_approval_records` 物化表；
   - `ui_sync_derived()` 从事件同步任务/审批状态；
   - `ui_claim_task(worker)` 用 `FOR UPDATE SKIP LOCKED` 做单 worker lease；
+  - `ui_heartbeat_task(...)` 只允许当前 worker 续租，过期可被重领；
   - `ui_tasks` / `ui_approvals` 兼容 view。
 - `export_journal.py`
   - journal JSONL → Postgres `COPY` 文本；
@@ -41,7 +42,7 @@ bash tools/verify_postgres_live.sh
 ```
 
 `verify_postgres_live.sh` 用 `postgres:16-alpine` 容器真跑 schema + COPY +
-`ui_sync_derived()` + `ui_task_records/ui_approval_records` 查询 + `ui_claim_task` 单次领取 + append-only 触发器；
+`ui_sync_derived()` + `ui_task_records/ui_approval_records` 查询 + claim/heartbeat/过期重领 + append-only 触发器；
 没有 docker/镜像时明确 SKIP。
 
 ## 3. 边界
@@ -50,7 +51,7 @@ bash tools/verify_postgres_live.sh
 
 - core 直连 Postgres；
 - 自动增量同步；
-- 多 worker 调度与 lease 续租（当前只有单次 claim）；
+- 多 worker 调度器（单次 claim + heartbeat 已验证，尚无 worker 进程）；
 - 任务/审批的完整状态机（当前只做 queued/running/done 与 pending/allowed/denied）；
 - 保留/删除；
 - 审计签名/WORM；

@@ -151,6 +151,25 @@ begin
 end;
 $$ language plpgsql;
 
+-- 续租：只有当前 worker 能延长自己的 lease。
+create or replace function ui_heartbeat_task(
+  p_workspace text, p_session text, p_task_seq bigint, p_worker text
+) returns boolean as $$
+declare
+  n int;
+begin
+  update ui_task_records
+  set lease_until = now() + interval '60 seconds'
+  where workspace_id = p_workspace
+    and session_id = p_session
+    and task_seq = p_task_seq
+    and worker_id = p_worker
+    and status = 'running';
+  get diagnostics n = row_count;
+  return n > 0;
+end;
+$$ language plpgsql;
+
 -- 审计/回放约束：事件不可 update/delete（用触发器而不是只靠约定）。
 create or replace function ui_events_immutable() returns trigger as $$
 begin
