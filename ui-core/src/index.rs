@@ -4,6 +4,7 @@
 //! 一份 JSON，构建是一次文件扫描；查询是字符串匹配 + 简单打分。它不会替代
 //! `grep/fs_read`，只负责把“大仓库里先看哪几个文件”变得可复现。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -101,16 +102,62 @@ fn symbols(path: &str, text: &str) -> Vec<String> {
     out
 }
 
-/// 构建索引，返回文件数与符号数。
-pub fn build(ws: &Path) -> Result<Json, String> {
+fn mtime_ms(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn build_with(ws: &Path, incremental: bool) -> Result<Json, String> {
     let mut paths = Vec::new();
     walk(ws, ws, &mut paths)?;
     paths.sort();
 
+    let previous: BTreeMap<String, Json> = if incremental {
+        load(ws)
+            .ok()
+            .and_then(|m| m.arr_at("files").cloned())
+            .map(|rows| {
+                rows.into_iter()
+                    .filter_map(|e| {
+                        let path = e.str_at("path")?.to_string();
+                        Some((path, e))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+    let mut seen = BTreeMap::new();
     let mut entries = Vec::new();
     let mut symbols_count = 0u64;
+    let mut reused = 0u64;
+    let mut updated = 0u64;
+
     for path in paths {
         let rel = rel_key(path.strip_prefix(ws).unwrap_or(&path));
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Some(prev) = previous.get(&rel) {
+            if prev.u64_at("bytes") == Some(meta.len()) {
+                let prev_mtime = prev.u64_at("mtimeMs").unwrap_or(0);
+                if prev_mtime != 0 && prev_mtime == mtime_ms(&meta) {
+                    symbols_count += prev
+                        .arr_at("symbols")
+                        .map(|a| a.len() as u64)
+                        .unwrap_or(0);
+                    entries.push(prev.clone());
+                    seen.insert(rel.clone(), ());
+                    reused += 1;
+                    continue;
+                }
+            }
+        }
         let bytes = fs::read(&path).map_err(|e| format!("读 {} 失败: {}", rel, e))?;
         if bytes.len() as u64 > MAX_FILE_BYTES || !is_text(&bytes) {
             continue;
@@ -122,18 +169,26 @@ pub fn build(ws: &Path) -> Result<Json, String> {
             ("path", Json::from(rel.as_str())),
             ("bytes", Json::from(bytes.len() as u64)),
             ("lines", Json::from(text.lines().count() as u64)),
+            ("mtimeMs", Json::from(mtime_ms(&meta))),
             ("sha256", Json::from(sha256::hex(&bytes))),
             (
                 "symbols",
                 Json::Arr(syms.iter().map(|s| Json::from(s.as_str())).collect()),
             ),
         ]));
+        seen.insert(rel.clone(), ());
+        updated += 1;
     }
 
+    let removed = previous.keys().filter(|k| !seen.contains_key(*k)).count() as u64;
     let body = Json::obj(vec![
-        ("version", Json::from(1u64)),
+        ("version", Json::from(2u64)),
         ("builtAt", Json::from(time::now_ms())),
         ("workspace", Json::from(ws.to_string_lossy().to_string())),
+        ("incremental", Json::Bool(incremental)),
+        ("reused", Json::from(reused)),
+        ("updated", Json::from(updated)),
+        ("removed", Json::from(removed)),
         ("files", Json::Arr(entries)),
     ]);
     let path = ws.join(MANIFEST);
@@ -144,10 +199,26 @@ pub fn build(ws: &Path) -> Result<Json, String> {
     fs::write(&tmp, body.to_pretty()).map_err(|e| format!("写索引失败: {}", e))?;
     fs::rename(&tmp, &path).map_err(|e| format!("落盘索引失败: {}", e))?;
     Ok(Json::obj(vec![
-        ("files", Json::from(body.arr_at("files").map(|a| a.len()).unwrap_or(0) as u64)),
+        (
+            "files",
+            Json::from(body.arr_at("files").map(|a| a.len()).unwrap_or(0) as u64),
+        ),
         ("symbols", Json::from(symbols_count)),
+        ("reused", Json::from(reused)),
+        ("updated", Json::from(updated)),
+        ("removed", Json::from(removed)),
         ("manifest", Json::from(path.to_string_lossy().to_string())),
     ]))
+}
+
+/// 构建索引，返回文件数与符号数。
+pub fn build(ws: &Path) -> Result<Json, String> {
+    build_with(ws, false)
+}
+
+/// 增量：大小与 mtime 都未变的文件复用旧符号；变了就重读。
+pub fn build_incremental(ws: &Path) -> Result<Json, String> {
+    build_with(ws, true)
 }
 
 pub fn load(ws: &Path) -> Result<Json, String> {
@@ -269,6 +340,27 @@ mod tests {
         let text = context(&ws, "agent", 5);
         assert!(text.contains("src/agent.rs"));
         assert!(!text.contains(".ui/secret"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn incremental_reuses_unchanged_and_updates_changed() {
+        let ws = scratch("incremental");
+        fs::write(ws.join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        build(&ws).unwrap();
+        let again = build_incremental(&ws).unwrap();
+        assert_eq!(again.u64_at("reused"), Some(2));
+        assert_eq!(again.u64_at("updated"), Some(0));
+
+        fs::write(ws.join("a.rs"), "fn a() {}\nfn a2() {}\n").unwrap();
+        let changed = build_incremental(&ws).unwrap();
+        assert_eq!(changed.u64_at("updated"), Some(1));
+        assert_eq!(changed.u64_at("reused"), Some(1));
+
+        fs::remove_file(ws.join("b.rs")).unwrap();
+        let removed = build_incremental(&ws).unwrap();
+        assert_eq!(removed.u64_at("removed"), Some(1));
         let _ = fs::remove_dir_all(&ws);
     }
 

@@ -384,7 +384,11 @@ fn cmd_index(args: &Args) -> Result<i32, String> {
         }
         return Ok(0);
     }
-    let out = ui_core::index::build(&ws)?;
+    let out = if args.flag("incremental") {
+        ui_core::index::build_incremental(&ws)?
+    } else {
+        ui_core::index::build(&ws)?
+    };
     println!("{}", out.to_pretty());
     Ok(0)
 }
@@ -977,7 +981,7 @@ fn help() -> String {
      ui memory list [--all]       列出记忆（默认只列有效；--all 含墓碑/过期）\n\
      ui memory check              校验记忆文件哈希链 + id/内容一致（损坏退 2）\n\
      ui prompt --memory-query \"...\"  单独渲染一次记忆检索（不写事件、不跑 turn）\n\
-     ui index                     建零依赖代码索引（.ui/index/manifest.json）\n\
+     ui index [--incremental]     建零依赖代码索引（--incremental 复用未变文件）\n\
      ui index --query \"foo\"       按路径/符号查相关文件\n\
      ui checkpoint [--label L]    给当前 workspace 存一个零依赖内容寻址快照\n\
      ui checkpoints [--json]      列出 checkpoint\n\

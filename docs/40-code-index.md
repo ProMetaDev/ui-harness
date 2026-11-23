@@ -8,6 +8,7 @@
 
 ```bash
 ui index
+ui index --incremental
 ui index --query "run_turn"
 ui index --query "agent" --json
 ```
@@ -27,6 +28,7 @@ ui index --query "agent" --json
   "path": "src/agent.rs",
   "bytes": 12345,
   "lines": 400,
+  "mtimeMs": 1790000000000,
   "sha256": "...",
   "symbols": ["fn run_turn", "struct Agent"]
 }
@@ -71,12 +73,13 @@ ui index --query "agent" --json
 
 - 不做跨文件引用解析；
 - 不做调用图；
-- 不做增量 watcher；`ui index` 是一次重建；
+- `--incremental` 按 size+mtime 复用未变文件；不是 watcher，仍需显式运行；
 - 查询是字符串匹配，可能漏掉同义词。
 
 ## 7. 测试
 
 - `index_finds_symbols_and_ignores_ui_internal`
 - `missing_index_is_a_clear_error`
+- `incremental_reuses_unchanged_and_updates_changed`
 - CLI e2e：`index_build_and_query_end_to_end`
 - prompt e2e：`index_is_injected_into_prompt_snapshot`
