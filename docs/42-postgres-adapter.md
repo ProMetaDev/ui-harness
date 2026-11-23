@@ -34,7 +34,11 @@ bash adapters/postgres/import.sh \
 
 ```bash
 bash tools/verify_postgres_adapter.sh
+bash tools/verify_postgres_live.sh
 ```
+
+`verify_postgres_live.sh` 用 `postgres:16-alpine` 容器真跑 schema + COPY +
+`ui_tasks/ui_approvals` 查询 + append-only 触发器；没有 docker/镜像时明确 SKIP。
 
 ## 3. 边界
 
@@ -46,7 +50,7 @@ bash tools/verify_postgres_adapter.sh
 - 任务/审批物化状态机；
 - 保留/删除；
 - 审计签名/WORM；
-- 真实 Postgres CI（当前只验证导出文本）。
+- 真实 Postgres CI（本机 live 脚本已验证；CI 尚未接入）。
 
 ## 4. 为什么不做进 core
 
