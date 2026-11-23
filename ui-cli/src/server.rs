@@ -17,6 +17,7 @@ use ui_core::tools::ToolResult;
 use ui_core::{Agent, Decision};
 
 const CHAT_HTML: &str = include_str!("../assets/chat.html");
+const ADMIN_HTML: &str = include_str!("../assets/admin.html");
 const BG_DARK: &[u8] = include_bytes!("../assets/bg-dark.jpg");
 const BG_LIGHT: &[u8] = include_bytes!("../assets/bg-light.jpg");
 
@@ -1179,6 +1180,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/") => html(&mut stream, CHAT_HTML),
+        ("GET", "/admin") => html(&mut stream, ADMIN_HTML),
         // 背景板：GPT 生成后压成 JPEG，80KB 左右；随二进制走，不依赖外部 CDN。
         ("GET", "/bg/dark.jpg") => image(&mut stream, BG_DARK, "image/jpeg"),
         ("GET", "/bg/light.jpg") => image(&mut stream, BG_LIGHT, "image/jpeg"),
@@ -1670,6 +1672,22 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                         .and_then(|c| c.str_at("label"))
                         .map(Json::from)
                         .unwrap_or(Json::Null),
+                ),
+                (
+                    "actor",
+                    actor
+                        .as_ref()
+                        .map(|a| Json::from(a.id.as_str()))
+                        .unwrap_or(Json::Null),
+                ),
+                (
+                    "roles",
+                    Json::Arr(
+                        actor
+                            .as_ref()
+                            .map(|a| a.roles.iter().map(|r| Json::from(r.as_str())).collect())
+                            .unwrap_or_default(),
+                    ),
                 ),
             ];
             json_response(&mut stream, &Json::obj(state).to_compact())
@@ -2793,6 +2811,17 @@ mod tests {
             "GET /api/audit/export HTTP/1.1\r\nHost: test\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nConnection: close\r\n\r\n",
         );
         assert!(viewer.0.contains("403"), "{}", viewer.0);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn admin_page_is_served() {
+        let ws = temp_workspace("admin-page");
+        let hub = hub_for(&ws);
+        let (head, body) = http_get(hub, "/admin");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(body.contains("管理面"), "admin page missing title");
+        assert!(body.contains("/api/audit/export"), "admin page missing audit link");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

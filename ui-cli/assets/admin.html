@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UI · 管理面</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--text:#17202a;--muted:#68737d;--border:#dfe3e8;--accent:#2d6cdf;--ok:#2e7d4f;--bad:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--panel:#181d23;--text:#e6e9ec;--muted:#9aa4ae;--border:#2b333c;--accent:#7aa7ff;--ok:#8bc49a;--bad:#ff8a80}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--border);background:var(--panel)}
+header h1{font-size:16px;margin:0}header .sp{flex:1}header a{color:var(--accent);text-decoration:none;font-size:13px}
+main{max-width:1100px;margin:0 auto;padding:22px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
+.card h2{font-size:12px;letter-spacing:.08em;color:var(--muted);margin:0 0 10px;text-transform:uppercase}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px dashed var(--border);font-size:13px}
+.kv:last-child{border-bottom:0}.kv b{font-weight:600}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.row{padding:6px 0;border-bottom:1px dashed var(--border);font-size:12.5px;color:var(--muted)}
+.row:last-child{border-bottom:0}.row strong{color:var(--text);font-weight:600}
+button{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:7px 11px;cursor:pointer}
+button.primary{background:var(--accent);border-color:transparent;color:#fff}
+#err{color:var(--bad);white-space:pre-wrap;font:12px ui-monospace,monospace}
+</style>
+</head>
+<body>
+<header>
+  <h1>UI · 管理面</h1>
+  <span class="sp"></span>
+  <a href="/">返回对话</a>
+  <a href="/api/metrics" target="_blank" rel="noopener">metrics</a>
+  <a href="/api/audit/export" target="_blank" rel="noopener">audit export</a>
+</header>
+<main>
+  <section class="card"><h2>身份</h2><div id="who" class="mono">加载中…</div></section>
+  <section class="card"><h2>运行状态</h2><div id="state"></div></section>
+  <section class="card"><h2>最近基线</h2><div id="cps"></div></section>
+  <section class="card"><h2>最近审阅</h2><div id="reviews"></div></section>
+  <section class="card"><h2>会话</h2><div id="sessions"></div></section>
+  <section class="card"><h2>操作</h2>
+    <p class="mono" style="color:var(--muted)">M1 只读管理面；写操作仍在对话/CLI 中完成。</p>
+    <button class="primary" id="refresh">刷新</button>
+  </section>
+  <section class="card" style="grid-column:1/-1;display:none" id="errCard"><h2>错误</h2><pre id="err"></pre></section>
+</main>
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function fail(e){ $('errCard').style.display='block'; $('err').textContent = e && e.message ? e.message : String(e); }
+  async function get(url){
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    let d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((d && (d.error || d.reason)) || ('HTTP ' + r.status));
+    return d;
+  }
+  function rows(el, items, render){
+    if (!items || !items.length) { el.innerHTML = '<div class="row">无</div>'; return; }
+    el.innerHTML = items.slice(0, 8).map(render).join('');
+  }
+  async function load(){
+    try {
+      const s = await get('/api/state');
+      $('who').textContent = s.actor ? (s.actor + (s.roles && s.roles.length ? ' · ' + s.roles.join(',') : '')) : '本地单用户模式';
+      $('state').innerHTML = [
+        ['busy', s.busy ? 'yes' : 'no'],
+        ['task', s.taskId || '-'],
+        ['queued', (s.queued || []).length],
+        ['events', s.seq],
+        ['checkpoint', s.checkpoint || '-'],
+        ['label', s.checkpointLabel || '-']
+      ].map(([k,v]) => '<div class="kv"><span>' + esc(k) + '</span><b class="mono">' + esc(v) + '</b></div>').join('');
+      const cps = await get('/api/checkpoints');
+      rows($('cps'), cps, (c) => '<div class="row"><strong class="mono">' + esc(c.id) + '</strong><br>' + esc(c.label || '') + ' · ' + esc(c.files) + ' files</div>');
+      const rev = await get('/api/reviews');
+      rows($('reviews'), rev, (r) => '<div class="row"><strong>' + esc(r.kind) + '</strong> · ' + esc(r.actor || '') + ' · ' + esc(r.written || 0) + '/' + esc(r.removed || 0) + (r.path ? ' · ' + esc(r.path) : '') + '</div>');
+      const ses = await get('/api/sessions');
+      const list = (ses && ses.sessions) || [];
+      rows($('sessions'), list, (s) => '<div class="row"><strong class="mono">' + esc(s.name) + '</strong> · ' + esc(s.events) + ' events' + (s.current ? ' · current' : '') + '</div>');
+      $('errCard').style.display = 'none';
+    } catch (e) { fail(e); }
+  }
+  $('refresh').onclick = load;
+  load();
+})();
+</script>
+</body>
+</html>
