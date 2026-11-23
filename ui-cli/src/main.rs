@@ -2321,6 +2321,20 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
         }
     }
 
+    // 运行前被读过的文件是输入，不是产物。仅靠 wall-clock mtime 判定时，
+    // WSL2 墙钟回跳会让“运行前输入”看起来比首事件还新，随后 inputs 被
+    // produced 抢先吞掉（2026-11-23 的真实 flake）。用 fs/read 记录的
+    // path+sha 做一次身份判定：内容没变就绝对不能记成产物。
+    let mut read_hashes: std::collections::BTreeMap<String, String> = Default::default();
+    for e in &events {
+        if e.str_at("kind") != Some("fs/read") {
+            continue;
+        }
+        if let (Some(path), Some(hash)) = (e.str_at("path"), e.str_at("sha256")) {
+            read_hashes.insert(path.to_string(), hash.to_string());
+        }
+    }
+
     // 脚本自己写出来的文件（shell 跑实验的产物）没有 fs.write 事件。
     // 用「首事件之后被改过」做**弱血缘**，并在清单里明确标出来——不假装是强证据。
     let run_start = events.first().and_then(|e| e.u64_at("ts")).unwrap_or(0);
@@ -2361,6 +2375,14 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
     for rel in from_mtime {
         if produced.contains_key(&rel) {
             continue;
+        }
+        // 读入未变的文件是输入；即使 mtime 因墙钟回跳落到 run_start 之后，
+        // 也不能把它升级成产物。
+        if let Some(hash) = read_hashes.get(&rel) {
+            let current = sha256_file(&ws.join(&rel)).unwrap_or_default();
+            if current == *hash {
+                continue;
+            }
         }
         produced.insert(
             rel,

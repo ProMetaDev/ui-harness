@@ -1054,6 +1054,18 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
     let ws = temp_ws("labpack");
     fs::create_dir_all(ws.join("artifacts")).unwrap();
     fs::write(ws.join("fixtures_input.txt"), "input-v1\n").unwrap();
+    // 回归：WSL2 墙钟回跳会让运行前输入 mtime 落到 run_start 之后。
+    // 直接把输入 mtime 推到未来，稳定复现“输入被误判成产物”。
+    let input = fs::OpenOptions::new()
+        .write(true)
+        .open(ws.join("fixtures_input.txt"))
+        .unwrap();
+    input
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)),
+        )
+        .unwrap();
 
     let sc = ws.join("sc.json");
     fs::write(

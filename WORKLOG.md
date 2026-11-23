@@ -126,10 +126,11 @@
   `soak_status.sh` 判心跳过期（exit 1），`phase` 仍是 `running`（旧脚本没有 finished 语义）。
 - **当前 2h soak 在跑**：20:21 起 7200s、5s 一轮；22:03 检查时 `phase=running`、
   `rounds=1196`、心跳 age=4s（未杀，未改其 state/日志）。预计 22:21 结束。
-- `trusted-proxy loopback` 仍可能被本机进程伪造身份，生产需 Unix socket/mTLS/UID 校验。
-- runner 默认 token 为空时必须拒绝启动；目前只靠绑定 localhost。
-- `lab_pack` flake 根因已定位到“mtime vs wall-clock run_start”，但产品侧修复未做；
-  20+3 未再复现，需要在 WSL 时钟跳变时继续观察。
+- ~~trusted-proxy loopback 可被本机进程伪造~~：已加 `--trusted-proxy-secret`，
+  无密钥启动 fail closed；仍需生产环境用 Unix socket/mTLS 进一步收口。
+- ~~runner 默认 token 为空~~：runner 现在无 token 启动即退出。
+- ~~`lab_pack` flake~~：已修：用 journal 的 `fs/read` path+sha 识别输入，
+  mtime 扫描不再把未变输入升级成产物；回归测试把输入 mtime 推到未来。
 - checkpoint blob 没有 GC/保留期。
 - review 是“先写文件再写 journal”，中间崩溃会留下未审计修改。
 - M6 用户/角色/策略管理、审计 WORM、合规试点未做。
@@ -137,12 +138,10 @@
 ### 下一步
 
 1. 看 2h soak 跑完并确认 `phase=passed`；
-2. 修 `lab_pack` 的 mtime/wall-clock 判据（用 journal/checkpoint 边界或单调时钟），
-   并在 WSL 墙钟跳变时回归；
-3. 修 trusted-proxy 信任与 runner token 默认值；
-4. checkpoint blob GC；
-5. review 事务化/补偿审计；
-6. RC 阶段再跑 24h。
+2. checkpoint blob GC；
+3. review 事务化/补偿审计；
+4. M6 用户/角色/策略管理；
+5. RC 阶段再跑 24h。
 
 ### 常用命令
 
