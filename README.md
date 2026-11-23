@@ -24,7 +24,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 变更审阅地基（checkpoint/diff/review/restore）见 [docs/39](docs/39-checkpoint-diff.md)。
 
 零依赖代码索引见 [docs/40](docs/40-code-index.md)；企业 M1 身份边界见
-[docs/41](docs/41-enterprise-m1.md)。
+[docs/41](docs/41-enterprise-m1.md)；Postgres L2 adapter 见 [docs/42](docs/42-postgres-adapter.md)。
 
 ## 它解决什么问题
 

@@ -1,0 +1,54 @@
+# Postgres adapter（L2）
+
+> 位置：[adapters/postgres](adapters/postgres/README.md)
+>
+> 不属于 `ui-core`；core 继续零依赖。需要 `psql`/Python 时才启用。
+
+## 1. 已实现
+
+- `schema.sql`
+  - `ui_events` append-only；
+  - 触发器禁止 update/delete；
+  - `ui_tasks` / `ui_approvals` 事件派生 view。
+- `export_journal.py`
+  - journal JSONL → Postgres `COPY` 文本；
+  - 保留 `seq/prev/hash/ts`；
+  - 转义 tab/newline/backslash；
+  - 坏行 fail closed。
+- `import.sh`
+  - `psql` 建 schema；
+  - 导出并导入；
+  - 失败非零。
+- `test_export.py`
+  - 不依赖运行中的 Postgres。
+
+## 2. 用法
+
+```bash
+export DATABASE_URL='postgres://user:pass@127.0.0.1:5432/ui'
+bash adapters/postgres/import.sh \
+  /path/to/.ui/journal.jsonl default w1
+```
+
+离线验证：
+
+```bash
+bash tools/verify_postgres_adapter.sh
+```
+
+## 3. 边界
+
+未实现：
+
+- core 直连 Postgres；
+- 自动增量同步；
+- 多 worker lease；
+- 任务/审批物化状态机；
+- 保留/删除；
+- 审计签名/WORM；
+- 真实 Postgres CI（当前只验证导出文本）。
+
+## 4. 为什么不做进 core
+
+Postgres 客户端/TLS/连接池都需要第三方依赖或自写协议，会破坏 docs/38 的 L0 约束。  
+因此它保持为独立 L2 adapter，core 只保证 journal 可导出。

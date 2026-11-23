@@ -6,6 +6,7 @@ secrets/
 
 # 构建与运行产物
 target/
+__pycache__/
 .ui/
 demo/.ui/
 *.loom-tmp-*
