@@ -25,6 +25,7 @@
   - 失败非零。
 - `worker.py`
   - `ui_claim_task` → 运行 `ui run` → heartbeat → done/failed；
+  - `--sync-events` 把新 journal 事件增量写回 Postgres，再 `ui_sync_derived()`；
   - 只依赖标准库 + psql。
 - `test_export.py`
   - 不依赖运行中的 Postgres。
@@ -49,14 +50,15 @@ bash tools/verify_postgres_live.sh
 没有 docker/镜像时明确 SKIP。
 
 `verify_postgres_worker.sh` 验证 worker 协议：
-假 `ui` 的 done/failed，以及真实 `ui run --mock` 写 journal 后 `status=done`。
+假 `ui` 的 done/failed，真实 `ui run --mock` 写 journal、增量同步事件、
+`status=done`。
 
 ## 3. 边界
 
 未实现：
 
 - core 直连 Postgres；
-- 自动增量同步；
+- 自动实时同步（worker 跑完才增量同步，不是流式）；
 - 多 worker 调度器（已有真实 `ui run` 端到端 worker；没有队列公平性/优先级）；
 - 任务/审批的完整状态机（当前只做 queued/running/done 与 pending/allowed/denied）；
 - 保留/删除；
