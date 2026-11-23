@@ -21,11 +21,13 @@ ROADMAP=docs/35-enterprise-roadmap.md
 PHASE0=docs/36-enterprise-phase0.md
 RUNBOOK=docs/37-enterprise-runbook.md
 INDEP=docs/38-independence.md
+M1=docs/41-enterprise-m1.md
 
 need_file "$ROADMAP"
 need_file "$PHASE0"
 need_file "$RUNBOOK"
 need_file "$INDEP"
+need_file "$M1"
 
 need "$ROADMAP" "Enterprise Single-Tenant v1"
 need "$ROADMAP" "M6 试点"
@@ -40,6 +42,9 @@ need "$RUNBOOK" "事故响应"
 need "$INDEP" "L0 内核层"
 need "$INDEP" "L1 可选 OS 工具"
 need "$INDEP" "L2 可选 skill / 企业 adapter"
+need "$M1" "X-UI-User"
+need "$M1" "OIDC/TLS/JWT 不进入"
+need "$M1" "角色矩阵"
 
 # 明确禁止把“文档完成”说成“企业已完成”
 if grep -RqiE 'enterprise[- ]ready|已企业级|达到企业级' docs/35-enterprise-roadmap.md docs/36-enterprise-phase0.md docs/37-enterprise-runbook.md; then
