@@ -2,6 +2,16 @@
 
 > M5 基础：把当前 session 的 journal 导出为可校验 JSON；不引入外部依赖。
 
+## 范围
+
+```text
+GET /api/audit/export?since=<seq>&limit=<n>
+```
+
+- `since`：只导出 seq ≥ 该值的事件；
+- `limit`：最多导出 n 条（1–10000）；
+- 响应同时给 `total` 与 `count`，便于知道是否被截断。
+
 ## 响应
 
 ```json
@@ -9,6 +19,7 @@
   "version": 1,
   "session": "default",
   "exportedAt": 1790000000000,
+  "total": 12,
   "count": 12,
   "events": [ ... ],
   "sha256": "..."
@@ -30,7 +41,7 @@
 
 - WORM/对象存储；
 - 签名（只有 sha256，不是不可抵赖签名）；
-- 按时间/seq 范围导出；
+- 时间范围导出（当前只有 seq 范围）；
 - 审计员“只看脱敏正文”的可配置视图；
 - 导出审计事件本身（当前只导出，不额外落一条 export 事件）。
 

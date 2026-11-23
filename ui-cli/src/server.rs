@@ -1465,15 +1465,27 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         ("GET", "/api/reviews") => {
             json_response(&mut stream, &review_history(&hub).to_compact())
         }
-        ("GET", "/api/audit/export") => match audit_export(&hub) {
-            Ok(out) => json_response(&mut stream, &out.to_compact()),
-            Err(e) => json_response_status(
-                &mut stream,
-                "500 Internal Server Error",
-                &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
-                    .to_compact(),
-            ),
-        },
+        ("GET", "/api/audit/export") => {
+            let since = query
+                .split('&')
+                .find_map(|kv| kv.split_once('='))
+                .filter(|(k, _)| *k == "since")
+                .and_then(|(_, v)| v.parse::<u64>().ok());
+            let limit = query
+                .split('&')
+                .find_map(|kv| kv.split_once('='))
+                .filter(|(k, _)| *k == "limit")
+                .and_then(|(_, v)| v.parse::<usize>().ok());
+            match audit_export(&hub, since, limit) {
+                Ok(out) => json_response(&mut stream, &out.to_compact()),
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                        .to_compact(),
+                ),
+            }
+        }
         ("POST", "/api/revert") => {
             if hub_lock(&hub.active).is_some() || !hub_lock(&hub.queue).is_empty() {
                 return json_response_status(
@@ -2071,16 +2083,24 @@ fn audit_revert(
     Ok(event.u64_at("seq").unwrap_or(0))
 }
 
-fn audit_export(hub: &Hub) -> Result<Json, String> {
+fn audit_export(hub: &Hub, since: Option<u64>, limit: Option<usize>) -> Result<Json, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
         if s.is_empty() { "default".to_string() } else { s }
     };
     let path = session_file(&hub.workspace, &session);
-    let (events, corrupt) =
+    let (mut events, corrupt) =
         ui_core::Journal::read(&path).map_err(|e| format!("读审计日志失败: {}", e))?;
     if corrupt.is_some() {
         return Err("审计日志损坏，拒绝导出".to_string());
+    }
+    let total = events.len() as u64;
+    if let Some(since) = since {
+        events.retain(|e| e.u64_at("seq").unwrap_or(0) >= since);
+    }
+    let cap = limit.map(|n| n.clamp(1, 10_000));
+    if let Some(cap) = cap {
+        events.truncate(cap);
     }
     let canonical = events
         .iter()
@@ -2092,6 +2112,7 @@ fn audit_export(hub: &Hub) -> Result<Json, String> {
         ("version", Json::from(1u64)),
         ("session", Json::from(session.as_str())),
         ("exportedAt", Json::from(ui_core::time::now_ms())),
+        ("total", Json::from(total)),
         ("count", Json::from(events.len() as u64)),
         ("events", Json::Arr(events)),
         ("sha256", Json::from(digest.as_str())),
@@ -2793,12 +2814,14 @@ mod tests {
         let path = ws.join(".ui").join("journal.jsonl");
         let mut j = ui_core::Journal::open(&path).unwrap();
         j.append("note", Json::obj(vec![("text", Json::from("a"))])).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("b"))])).unwrap();
         drop(j);
 
         let hub = hub_for(&ws);
-        let (head, body) = http_get(hub.clone(), "/api/audit/export");
+        let (head, body) = http_get(hub.clone(), "/api/audit/export?since=2&limit=1");
         assert!(head.contains("200 OK"), "{}", head);
         let out = ui_core::json::parse(body.trim()).unwrap();
+        assert_eq!(out.u64_at("total"), Some(2));
         assert_eq!(out.u64_at("count"), Some(1));
         assert_eq!(out.str_at("sha256").map(str::len), Some(64));
 
