@@ -1,5 +1,19 @@
 # Worklog
 
+## 2026-11-24 · 第二轮并行：可写管理台 / WORM / 付费长跑
+
+- M6（`6b1d3ae`）：`.ui/users.json` 用户存储（禁用用户全路径 403、fallback
+  `.ui/rbac.json#users`）、可写角色矩阵/用户表单、`/api/admin/users`、OIDC
+  userinfo 适配层（Bearer → 剥离客户端头 → 注入可信头）；15 项 OIDC mock 测试。
+- WORM（`a8bf1b5`）：`adapters/worm` 本地不可变对象库、retention/tombstone、
+  append-only index；37 项门禁。边界：不是 S3 Object Lock。
+- 付费长跑（`8978e62`）：`tools/soak_paid.sh` 四道闸、预算/token 上限、
+  `paid-report.json`；真实付费 provider 未实跑，scripted e2e 通过。
+- 集成修复（`80f92a9`）：管理台表单纳入真实浏览器 e2e（`forms=ok`）；
+  `soak_real.sh` 失败路径 `printf --` 修复，失败会正确写 `phase=failed`。
+- 验证：`tools/debug.sh` **57 passed / 0 failed**；docs 79/79；独立性 PASS；
+  OIDC 15 tests；WORM 37 checks；audit sign 27 checks；paid/real soak 默认 SKIP。
+
 ## 2026-11-24 · 三路并行：M6 / 非对称签名 / 真实长跑
 
 - M6 RBAC（`c5cf606`）：`.ui/rbac.json` 配置驱动角色矩阵 + 用户映射；
