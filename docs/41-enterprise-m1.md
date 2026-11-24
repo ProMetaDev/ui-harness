@@ -1,20 +1,23 @@
 # 企业 M1：身份与 RBAC 的零依赖边界
 
-> 状态：边界设计 + 最小写权限 + M6 RBAC 管理闭环（配置/API/审计）。
-> OIDC adapter / 可写管理台表单尚未实现。
+> 状态：边界设计 + 最小写权限 + M6 RBAC 管理闭环（配置/API/可写管理台/用户存储/审计）。
+> OIDC userinfo 适配层已提供（`adapters/oidc/`）；authorization code flow 不在本适配层内。
 >
 > 已实现：`ui serve --trusted-proxy loopback --trusted-proxy-secret <secret>`、
 > `X-UI-Proxy-Secret` 共享密钥校验、`X-UI-User/UserId/Roles` 解析、
 > 无 actor 401、viewer/auditor 写操作 403、auditor 可读 `/api/reviews`；
 > 受信代理模式缺密钥时**拒绝启动**（fail closed）。
 >
-> M6 新增：`.ui/rbac.json` 角色矩阵/用户映射（缺失用内置矩阵，损坏拒绝启动）、
-> `GET /api/admin/rbac`、`PUT /api/admin/roles`（owner）、
-> `PUT/DELETE /api/admin/users`（manage），每次变更写
-> `rbac/role-update` / `rbac/user-update` 审计。
+> M6 新增：`.ui/rbac.json` 角色矩阵（缺失用内置矩阵，损坏拒绝启动）、
+> `.ui/users.json` 用户表（缺失回退 `rbac.json` 的 users；损坏 fail closed；
+> `disabled` 一律 403）、`GET /api/admin/rbac`、`GET /api/admin/users`、
+> `PUT /api/admin/roles`（owner）、`PUT/DELETE /api/admin/users`（manage，
+> owner 记录仍归 owner），每次变更写 `rbac/role-update` / `rbac/user-update`
+> 审计；`/admin` 提供可写的矩阵 checkbox 表与用户表单。
 >
 > 结论：**OIDC/TLS/JWT 不进入 `ui-core`。** 核心只接受来自受信代理的已认证身份；
 > 企业 adapter 负责 OIDC、cookie、组映射。这样不破坏 docs/38 的 L0 零依赖。
+> OIDC 边界与部署见 [docs/51](51-oidc.md)。
 
 ## 1. 为什么不能把 OIDC 塞进 core
 
@@ -98,7 +101,9 @@ X-UI-Request-Id: ...
 
 ## 5. 角色矩阵
 
-矩阵的唯一来源是 `.ui/rbac.json`（不存在时用下表的内置默认值）：
+矩阵的唯一来源是 `.ui/rbac.json`（不存在时用下表的内置默认值）。用户记录自 M6
+起在 `.ui/users.json`；`rbac.json` 的 `users` 只在 `users.json` 缺失时作为旧格式
+回退：
 
 ```json
 {
@@ -108,8 +113,15 @@ X-UI-Request-Id: ...
     "auditor":  {"write": false, "audit": true,  "manage": false},
     "admin":    {"write": true,  "audit": true,  "manage": true},
     "owner":    {"write": true,  "audit": true,  "manage": true}
-  },
-  "users": {"alice@example.com": "operator"}
+  }
+}
+```
+
+```json
+{
+  "users": [
+    {"id": "alice@example.com", "role": "operator", "disabled": false, "display": "Alice"}
+  ]
 }
 ```
 
@@ -117,48 +129,55 @@ X-UI-Request-Id: ...
 |---|---|---|---|---|---|---|
 | 写请求（`POST`/`PUT`/`DELETE`，管理面除外） | `write` | ✓ | ✓ | ✓ | | |
 | 读 `/api/reviews`、`/api/audit/export` | `audit` | ✓ | ✓ | | ✓ | |
-| 读 `GET /api/admin/rbac` | `audit` 或 `manage` | ✓ | ✓ | | ✓ | |
+| 读 `GET /api/admin/rbac` / `GET /api/admin/users` | `audit` 或 `manage` | ✓ | ✓ | | ✓ | |
 | 改角色矩阵 `PUT /api/admin/roles` | 角色名 `owner` | ✓ | | | | |
-| 改用户映射 `PUT/DELETE /api/admin/users` | `manage` | ✓ | ✓ | | | |
+| 改用户 `PUT/DELETE /api/admin/users` | `manage`（owner 记录需 `owner`） | ✓ | ✓ | | | |
 
 约定：
 
 - 角色名大小写不敏感，入库统一小写；`write/audit/manage` 必须是 JSON 布尔值，
   缺字段、字符串 `"true"`、未知字段都按配置错误拒绝；
-- `users` 映射**只覆盖角色**：用户仍必须先过受信代理密钥（或本地 token），
+- 用户表覆盖角色，但**只覆盖角色**：用户仍必须先过受信代理密钥（或本地 token），
   映射不能绕过任何一道鉴权；未映射用户按 `X-UI-Roles` 判定；
+- `.ui/users.json` 存在时是用户表的唯一事实（见 docs/47）；不存在才回退
+  `rbac.json` 的 `users` 映射；
 - 用户映射到的角色必须存在于同一份 `roles`；删除角色时若还有用户引用，写请求被
   400 拒绝，避免留下指向未知角色的映射；
 - 文件缺失 = 内置矩阵；文件不可读/JSON 非法/字段非法 = `serve` **拒绝启动**，
-  运行期内存态若为 `Invalid` 则所有 `/api/admin/*` 返回 503（fail closed）；
+  运行期内存态若为 `Invalid` 则所有 `/api/*` 返回 503（fail closed）；
 - 写盘顺序：临时文件 → `rename` 原子替换 → 更新内存态 → 写审计；
   任何一步失败都不会让响应声称成功。
 
-## 6. RBAC 管理 API
+## 6. 管理 API
 
 | 方法与路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /api/admin/rbac` | `audit` 或 `manage` | 返回 `roles`、`users`、`source`（固定 `.ui/rbac.json`） |
+| `GET /api/admin/rbac` | `audit` 或 `manage` | 返回 `roles`、生效的 `users`、`source`、`usersSource` |
+| `GET /api/admin/users` | `audit` 或 `manage` | 返回 `users`（含 `disabled/display`）、`roles`、`source` |
 | `PUT /api/admin/roles` | owner | `{"roles": {...}}` 整份替换，或 `{"name":"operator","write":true,"audit":false,"manage":false}` 改一个 |
-| `PUT /api/admin/users` | `manage` | `{"id":"alice@example.com","role":"operator"}`；`role:""` 等于删除映射 |
-| `DELETE /api/admin/users?id=...` | `manage` | 删除映射；不存在返回 404 |
+| `PUT /api/admin/users` | `manage` | `{"id":"alice@example.com","role":"operator","disabled":false,"display":"Alice"}`；`role:""` 等于删除（等价 `DELETE`） |
+| `DELETE /api/admin/users?id=...` | `manage` | 删除用户；不存在返回 404；删除 owner 需 owner |
 
 - 所有 `/api/admin/*` 都要求受信代理 actor：无 actor 一律 401，即使本地模式；
 - 变更写当前 session 的 journal（不是固定的 default）：
   `rbac/role-update` 带完整角色矩阵，`rbac/user-update` 带 `id/role/action/actor`；
 - 响应里的 `journalSeq` 是审计事件序号，便于外部核对；
-- 页面 `admin.html` 只读展示矩阵与用户映射；写操作只需 curl/API，不要求表单。
+- 页面 `admin.html` 可直接保存角色矩阵、新增/编辑/删除用户；未授权时按钮禁用并
+  显示 403 原因。
 
-## 7. 代码接入点（部分已实现）
+## 7. 代码接入点
 
 1. `serve` 增加 `--trusted-proxy loopback|<ip>` 与 `--trusted-proxy-secret <secret>`
    （已实现 loopback/精确 IP；缺密钥拒绝启动）；
 2. 请求入口先校验 `X-UI-Proxy-Secret`（定长比较，不匹配 401），再解析 `X-UI-*`
-   生成 `Actor {id, roles}`，最后用 `.ui/rbac.json` 的 `users` 覆盖角色（已实现）；
+   生成 `Actor {id, roles, disabled}`，最后按用户表覆盖角色（`users.json` 优先，
+   缺失回退 `rbac.json#users`；已实现）；停用用户在所有路径 403；
 3. `/api/approve`、`/api/review` 写 `actor`（已实现；approval/answered 记录受信 actor）；
 4. `/api/audit/export` 按矩阵 `audit` 校验（已实现）；
 5. journal 的 `review/apply`、`approval` 增加 `actorId`（已实现）；
-6. `/api/admin/*` 按矩阵判定，角色变更即时生效，不需要重启 core（已实现）。
+6. `/api/admin/*` 按矩阵判定，角色变更即时生效，不需要重启 core（已实现）；
+7. `adapters/oidc/oidc_proxy.py` 做 Bearer → userinfo → `X-UI-*` 注入
+   （已实现；不含 code flow，见 docs/51）。
 
 ## 8. 验收测试
 
@@ -167,12 +186,16 @@ X-UI-Request-Id: ...
 - 缺 `X-UI-Proxy-Secret` 或值不对：任意路径 401（含 `/`、`/snapshot`、`/api/*`）；
 - 带对代理密钥但无身份头：`/api/*` 401；
 - viewer 调 `/api/review`：403；viewer 读 `/api/admin/rbac`：403；
+- viewer 读 `/api/admin/users`：403；auditor 读：200；auditor 写用户：403；
 - auditor 读 `/api/admin/rbac`：200；operator 改角色：403；
 - owner 改角色：200，文件已原子落盘，journal 出现 `rbac/role-update`；
 - `alice` 在 `users` 里映射为 operator：同一 `X-UI-User` 下即使头里写 viewer 也可写；
   反向映射（头里写 owner、映射为 viewer）必须降权；
-- 损坏的 `.ui/rbac.json`：启动报错；已加载为 `Invalid` 的 hub 对管理面返回 503；
-- 事件流、journal、`rbac.json` 与响应正文中不出现代理密钥原文；
+- 用户表：新增写 `users.json`、删除写回空数组、`disabled` 用户任意路径 403、
+  第一次写时旧 `rbac.json#users` 映射被迁移；
+- 损坏的 `.ui/rbac.json` / `.ui/users.json`：启动报错；已加载为 `Invalid` 的 hub
+  对 `/api/*` 返回 503；
+- 事件流、journal、`rbac.json`、`users.json` 与响应正文中不出现代理密钥原文；
 - 角色变更：下一请求生效，不需要重启 core。
 
 ## 9. 兼容零依赖
@@ -190,6 +213,8 @@ X-UI-Request-Id: ...
 - 多租户；
 - 细粒度 ABAC；
 - 审计 WORM/签名；
-- 管理台的可视化角色编辑表单（当前只有只读表 + API）。
+- OIDC authorization code flow / token 签发（token 由现有 OIDC 客户端获取，
+  `adapters/oidc/` 只做 userinfo 适配）；
+- 管理台的分页与批量导入（表单只做单条增删改）。
 
 这些属于后续里程碑。
