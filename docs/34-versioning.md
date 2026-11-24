@@ -88,4 +88,9 @@
 0.2.2   ← **网页端脱敏闭合**（SSE + /snapshot + 工具全文库）：隐私两档不再有缺口
         301 个测试 / 54 项门禁 / 13 个攻击场景
         已知遗留 7 项（见 docs/33 §3.5 与 §6）
+
+0.3.0   ← 企业 L2：RBAC/用户存储/OIDC、审计签名/锚定/WORM、
+           review intent 对账、checkpoint GC、管理台写表单
+        374 个测试 / 57 项门禁 / OIDC e2e / 2h soak 通过
+        仍未：24h soak、真实付费 provider、真实 IdP、S3 Object Lock
 ```

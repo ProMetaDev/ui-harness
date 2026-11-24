@@ -18,10 +18,12 @@ tests, gates, core, cli, tl, docs, commits, tags = sys.argv[1:9]
 p = 'docs/23-status.md'
 t = io.open(p, encoding='utf-8').read()
 
-t = t.replace('# 完成度快照（2026-11-16 夜 · v0.1.1）',
-              '# 完成度快照（2026-11-20 夜 · 0.2.2）\n\n'
-              '> 本文件的**数字由脚本生成**（见 `tools/status_doc.sh`），不要手改；\n'
-              '> 手改一定会漂——上一版这里写着 133 个测试 / 38 项门禁，实际已经是 301 / 54。')
+t = __import__('re').sub(
+    r'^# 完成度快照.*$',
+    '# 完成度快照（2026-11-24 · 0.3.0）\n\n'
+    '> 本文件的**数字由脚本生成**（见 `tools/status_doc.sh`），不要手改；\n'
+    '> 手改一定会漂——上一版这里写着 133 个测试 / 38 项门禁，实际已经是 374 / 57。',
+    t, count=1, flags=__import__('re').M)
 
 old_table = '''| 指标 | 数值 |
 |---|---|
