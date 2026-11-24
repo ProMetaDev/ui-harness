@@ -479,8 +479,41 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let mut out = ui_core::checkpoint::review(&ws, report.checkpoint.as_str(), &accepted)?;
     let jp = resolve_journal(args, &ws);
+    // 先写 intent，再改文件：两步之间崩溃时，至少能看出“有人尝试过 review”。
+    let intent = ui_core::Journal::open(&jp).and_then(|mut j| {
+        j.append(
+            "review/intent",
+            Json::obj(vec![
+                ("actor", Json::from("cli")),
+                ("checkpoint", Json::from(report.checkpoint.as_str())),
+                (
+                    "accepted",
+                    Json::Arr(accepted.iter().map(|a| Json::from(a.as_str())).collect()),
+                ),
+            ]),
+        )
+    });
+    let intent_seq = match intent {
+        Ok(event) => event.u64_at("seq").unwrap_or(0),
+        Err(e) => return Err(format!("review 未执行：审计 intent 写入失败: {}", e)),
+    };
+    let mut out = match ui_core::checkpoint::review(&ws, report.checkpoint.as_str(), &accepted) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = ui_core::Journal::open(&jp).and_then(|mut j| {
+                j.append(
+                    "review/error",
+                    Json::obj(vec![
+                        ("actor", Json::from("cli")),
+                        ("checkpoint", Json::from(report.checkpoint.as_str())),
+                        ("error", Json::from(e.as_str())),
+                    ]),
+                )
+            });
+            return Err(e);
+        }
+    };
     let seq = match ui_core::Journal::open(&jp).and_then(|mut j| {
         j.append(
             "review/apply",
@@ -494,18 +527,20 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
                 ("written", Json::from(out.u64_at("written").unwrap_or(0))),
                 ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
                 ("backup", out.get("backup").cloned().unwrap_or(Json::Null)),
+                ("intentSeq", Json::from(intent_seq)),
             ]),
         )
     }) {
         Ok(event) => event.u64_at("seq").unwrap_or(0),
         Err(e) => {
             return Err(format!(
-                "review 已写回文件，但审计失败: {}；需要人工补账",
+                "review 已写回文件，但结论审计失败: {}；intent 已落账，需要人工补账",
                 e
             ))
         }
     };
     out.set("journalSeq", Json::from(seq));
+    out.set("intentSeq", Json::from(intent_seq));
     println!("{}", out.to_pretty());
     Ok(0)
 }

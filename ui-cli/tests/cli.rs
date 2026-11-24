@@ -354,6 +354,36 @@ fn run_can_checkpoint_before_tool_writes() {
 }
 
 #[test]
+fn review_failure_records_intent_and_error() {
+    let ws = temp_ws("review-error");
+    fs::write(ws.join("a.txt"), "one\n").unwrap();
+    let cp = Command::new(bin())
+        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .output()
+        .expect("checkpoint");
+    assert!(cp.status.success());
+    fs::write(ws.join("a.txt"), "two\n").unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "review", "--workspace", ws.to_str().unwrap(),
+            "--accept", "a.txt#999", "--yes",
+        ])
+        .output()
+        .expect("review");
+    assert!(!out.status.success(), "未知 hunk 必须失败");
+    assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "two\n");
+    let (events, corrupt) =
+        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(corrupt.is_none());
+    let kinds: Vec<&str> = events.iter().filter_map(|e| e.str_at("kind")).collect();
+    assert!(kinds.contains(&"review/intent"), "{:?}", kinds);
+    assert!(kinds.contains(&"review/error"), "{:?}", kinds);
+    assert!(!kinds.contains(&"review/apply"), "{:?}", kinds);
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn checkpoint_gc_dry_run_then_yes() {
     let ws = temp_ws("checkpoint-gc");
     fs::write(ws.join("a.txt"), "one\n").unwrap();

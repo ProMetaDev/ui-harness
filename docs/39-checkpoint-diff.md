@@ -61,7 +61,10 @@ ui restore --checkpoint cp-... --prune --yes
 - 二进制/过大文件没有逐行 hunk，可用文件名作为文件级接受标记；
 - 写盘前自动创建 `pre-review-<id>`；
 - 先计算全部结果再写盘，hunk 上下文不匹配时不会留下半套修改；
-- 成功后写一条 `review/apply` journal 事件（actor=cli，含 checkpoint/accepted/written/removed/backup）；
+- 写盘前先落 `review/intent`（actor/checkpoint/accepted）；
+- 成功后写 `review/apply`（含 written/removed/backup/intentSeq）；
+- 失败时写 `review/error`，不写 apply；
+- 中途崩溃会留下 intent 而没有 apply/error，启动后可按 intent 对账；
 - 审计写失败时明确报“文件已写回、需要人工补账”，不静默成功；
 - 必须显式 `--yes`。
 

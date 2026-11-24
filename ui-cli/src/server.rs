@@ -1667,22 +1667,41 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
+            let actor_id = actor.as_ref().map(|a| a.id.as_str()).unwrap_or("web");
+            let intent_seq = match audit_review_intent(&hub, checkpoint, &accepted, actor_id) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    return json_response_status(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("applied", Json::Bool(false)),
+                            ("error", Json::from(format!("review 未执行：{}", e))),
+                        ])
+                        .to_compact(),
+                    )
+                }
+            };
             match ui_core::checkpoint::review(&hub.workspace, checkpoint, &accepted) {
                 Ok(mut out) => match audit_review(
                     &hub,
                     checkpoint,
                     &accepted,
                     &out,
-                    actor.as_ref().map(|a| a.id.as_str()).unwrap_or("web"),
+                    actor_id,
+                    intent_seq,
                 ) {
                     Ok(seq) => {
                         out.set("journalSeq", Json::from(seq));
+                        out.set("intentSeq", Json::from(intent_seq));
                         hub.push(Json::obj(vec![
                             ("type", Json::from("review")),
                             ("checkpoint", Json::from(checkpoint)),
                             ("written", Json::from(out.u64_at("written").unwrap_or(0))),
                             ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
                             ("journalSeq", Json::from(seq)),
+                            ("intentSeq", Json::from(intent_seq)),
                         ]));
                         json_response(&mut stream, &out.to_compact())
                     }
@@ -1692,10 +1711,11 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                         &Json::obj(vec![
                             ("ok", Json::Bool(false)),
                             ("applied", Json::Bool(true)),
+                            ("intentSeq", Json::from(intent_seq)),
                             (
                                 "error",
                                 Json::from(format!(
-                                    "{}；文件已写回，但审计失败，需要人工补账",
+                                    "{}；文件已写回，但结论审计失败，intent 已落账，需要人工补账",
                                     e
                                 )),
                             ),
@@ -1703,12 +1723,19 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                         .to_compact(),
                     ),
                 },
-                Err(e) => json_response_status(
-                    &mut stream,
-                    "400 Bad Request",
-                    &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
+                Err(e) => {
+                    let _ = audit_review_error(&hub, checkpoint, &e, actor_id);
+                    json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("intentSeq", Json::from(intent_seq)),
+                            ("error", Json::from(e)),
+                        ])
                         .to_compact(),
-                ),
+                    )
+                }
             }
         }
         ("GET", "/api/metrics") => text_response(&mut stream, &metrics_text(&hub)),
@@ -2068,12 +2095,68 @@ fn session_file(ws: &std::path::Path, name: &str) -> std::path::PathBuf {
 }
 
 /// 列出会话：名字、事件数、最后活动时间
+fn audit_review_intent(
+    hub: &Hub,
+    checkpoint: &str,
+    accepted: &[String],
+    actor: &str,
+) -> Result<u64, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let mut journal =
+        ui_core::Journal::open(&path).map_err(|e| format!("写审计 intent 失败: {}", e))?;
+    let event = journal
+        .append(
+            "review/intent",
+            Json::obj(vec![
+                ("actor", Json::from(actor)),
+                ("checkpoint", Json::from(checkpoint)),
+                (
+                    "accepted",
+                    Json::Arr(accepted.iter().map(|a| Json::from(a.as_str())).collect()),
+                ),
+            ]),
+        )
+        .map_err(|e| format!("写审计 intent 失败: {}", e))?;
+    Ok(event.u64_at("seq").unwrap_or(0))
+}
+
+fn audit_review_error(
+    hub: &Hub,
+    checkpoint: &str,
+    error: &str,
+    actor: &str,
+) -> Result<u64, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() { "default".to_string() } else { s }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let mut journal =
+        ui_core::Journal::open(&path).map_err(|e| format!("写审计 error 失败: {}", e))?;
+    let event = journal
+        .append(
+            "review/error",
+            Json::obj(vec![
+                ("actor", Json::from(actor)),
+                ("checkpoint", Json::from(checkpoint)),
+                ("error", Json::from(error)),
+            ]),
+        )
+        .map_err(|e| format!("写审计 error 失败: {}", e))?;
+    Ok(event.u64_at("seq").unwrap_or(0))
+}
+
 fn audit_review(
     hub: &Hub,
     checkpoint: &str,
     accepted: &[String],
     out: &Json,
     actor: &str,
+    intent_seq: u64,
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
@@ -2095,6 +2178,7 @@ fn audit_review(
             "backup",
             out.get("backup").cloned().unwrap_or(Json::Null),
         ),
+        ("intentSeq", Json::from(intent_seq)),
     ]);
     let event = journal
         .append("review/apply", payload)
@@ -3120,6 +3204,15 @@ mod tests {
             events.iter().any(|e| e.str_at("kind") == Some("review/apply")),
             "review 必须写进 journal 审计链"
         );
+        let intent = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("review/intent"))
+            .expect("review/intent 必须先落账");
+        let apply = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("review/apply"))
+            .expect("review/apply");
+        assert!(intent < apply, "intent 必须先于 apply");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
