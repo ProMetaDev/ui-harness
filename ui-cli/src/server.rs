@@ -1999,6 +1999,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(r) => r,
                 Err(e) => return rbac_unavailable(&mut stream, &e),
             };
+            let actor_perms = actor.as_ref().map(|a| a.perms(&next)).unwrap_or_default();
             let value = match json::parse(body.trim()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -2036,6 +2037,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     )
                 }
             };
+            if role == "owner" && !actor_perms.owner {
+                return json_response_status(
+                    &mut stream,
+                    "403 Forbidden",
+                    &error_body("只有 owner 能授予 owner（manage 不够）"),
+                );
+            }
             let action;
             if role.is_empty() {
                 if next.users.remove(&id).is_none() {
@@ -2101,6 +2109,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(r) => r,
                 Err(e) => return rbac_unavailable(&mut stream, &e),
             };
+            let actor_perms = actor.as_ref().map(|a| a.perms(&next)).unwrap_or_default();
             let id = query
                 .split('&')
                 .find_map(|kv| kv.split_once('='))
@@ -2112,6 +2121,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     &mut stream,
                     "400 Bad Request",
                     &error_body("缺少或非法 id（?id=...）"),
+                );
+            }
+            if next.users.get(&id).map(String::as_str) == Some("owner") && !actor_perms.owner {
+                return json_response_status(
+                    &mut stream,
+                    "403 Forbidden",
+                    &error_body("只有 owner 能撤销 owner"),
                 );
             }
             if next.users.remove(&id).is_none() {
@@ -3746,6 +3762,37 @@ mod tests {
     }
 
     #[test]
+    fn admin_manage_cannot_grant_owner() {
+        let ws = temp_workspace("rbac-owner-grant");
+        let secret = "rbac-owner-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        let body = r#"{"id":"alice@example.com","role":"owner"}"#;
+
+        let (head, _) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/users",
+            body,
+            secret,
+            "admin@example.com",
+            "admin",
+        );
+        assert!(head.contains("403"), "manage 不能授予 owner: {}", head);
+
+        let (head, out) = proxy_call(
+            hub,
+            "PUT",
+            "/api/admin/users",
+            body,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "owner 应能授予 owner: {} {}", head, out);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn admin_page_is_served() {
         let ws = temp_workspace("admin-page");
         let hub = hub_for(&ws);
@@ -3820,7 +3867,7 @@ mod tests {
     #[test]
     fn viewer_cannot_read_admin_rbac_but_auditor_can() {
         let ws = temp_workspace("rbac-read");
-        let secret = "rbac-read-secret";
+        let secret = "rbac-read-secret"; // allowlist secret: 测试用假值
         let hub = trusted_hub(&ws, secret);
 
         let (head, _) = proxy_call(
@@ -3869,7 +3916,7 @@ mod tests {
     #[test]
     fn operator_cannot_change_roles_but_owner_can_and_audit_lands() {
         let ws = temp_workspace("rbac-role-update");
-        let secret = "rbac-role-secret";
+        let secret = "rbac-role-secret"; // allowlist secret: 测试用假值
         let hub = trusted_hub(&ws, secret);
         let body = r#"{"name":"operator","write":false,"audit":false,"manage":false}"#;
 
@@ -4032,7 +4079,7 @@ mod tests {
     #[test]
     fn rbac_role_update_validates_names_and_booleans() {
         let ws = temp_workspace("rbac-validate");
-        let secret = "rbac-validate-secret";
+        let secret = "rbac-validate-secret"; // allowlist secret: 测试用假值
         let hub = trusted_hub(&ws, secret);
         for body in [
             r#"{"name":"bad name","write":true,"audit":false,"manage":false}"#,
@@ -4067,7 +4114,7 @@ mod tests {
     #[test]
     fn rbac_api_never_writes_proxy_secret() {
         let ws = temp_workspace("rbac-secret");
-        let secret = "not-a-real-rbac-credential";
+        let secret = "not-a-real-rbac-credential"; // allowlist secret: 测试用假值
         let hub = trusted_hub(&ws, secret);
 
         let (head, body) = proxy_call(
@@ -4120,7 +4167,7 @@ mod tests {
     #[test]
     fn rbac_audit_goes_to_the_current_session_journal() {
         let ws = temp_workspace("rbac-session");
-        let secret = "rbac-session-secret";
+        let secret = "rbac-session-secret"; // allowlist secret: 测试用假值
         let hub = trusted_hub(&ws, secret);
         *hub.session.lock().unwrap() = "ops".to_string();
 
