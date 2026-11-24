@@ -156,7 +156,8 @@
 - ~~checkpoint blob 没有 GC~~：已加 `ui checkpoints --gc --keep N`，默认 dry-run。
 - ~~review 是“先写文件再写 journal”~~：已改成先写 `review/intent`，再 apply/error；
   `--pending` / `--reconcile` 可对账 dangling intent；`unknown` 不自动改盘。
-- M6 用户/角色/策略管理、审计 WORM、合规试点未做。
+- 审计导出已支持可选 HMAC-SHA256（`UI_AUDIT_HMAC_KEY`），但 WORM/非对称签名未做。
+- M6 用户/角色/策略管理、合规试点未做。
 
 ### 下一步
 

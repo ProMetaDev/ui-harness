@@ -156,6 +156,34 @@ pub fn hex(data: &[u8]) -> String {
     s
 }
 
+/// HMAC-SHA256（RFC 2104），零依赖。
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        let d = digest(key);
+        block[..32].copy_from_slice(&d);
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    let mut ipad = [0x36u8; 64];
+    for i in 0..64 {
+        ipad[i] ^= block[i];
+    }
+    inner.update(&ipad);
+    inner.update(msg);
+    let inner_digest = inner.finish();
+
+    let mut outer = Sha256::new();
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        opad[i] ^= block[i];
+    }
+    outer.update(&opad);
+    outer.update(&inner_digest);
+    outer.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +201,16 @@ mod tests {
         assert_eq!(
             hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    #[test]
+    fn hmac_matches_rfc4231_case2() {
+        let out = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let got: String = out.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(
+            got,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }
 

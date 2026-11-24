@@ -103,6 +103,10 @@ struct Hub {
     /// 同一台机器上的其它程序只要伪造 `X-UI-User/X-UI-Roles` 就能拿到 operator。
     /// None / 空串一律拒绝（fail closed），绝不退回"只看源地址"的旧行为。
     trusted_proxy_secret: Option<String>,
+    /// 可选：审计导出 HMAC 密钥。为空时仍导出 sha256，但不声称可认证。
+    audit_hmac_key: Option<String>,
+    /// 可选：密钥标识，给外部验证方做轮换选择。
+    audit_key_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -849,6 +853,12 @@ pub fn serve(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    hub0.audit_hmac_key = std::env::var("UI_AUDIT_HMAC_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    hub0.audit_key_id = std::env::var("UI_AUDIT_KEY_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     hub0.token = match token {
         // `--token off` 明确表示不校验（本地脚本/截图用）
         Some("off") | Some("none") => String::new(),
@@ -2275,14 +2285,37 @@ fn audit_export(hub: &Hub, since: Option<u64>, limit: Option<usize>) -> Result<J
         .collect::<Vec<_>>()
         .join("\n");
     let digest = ui_core::sha256::hex(canonical.as_bytes());
+    let since_value = since.unwrap_or(0);
+    let limit_value = cap.unwrap_or(0);
+    let key_id = hub.audit_key_id.as_deref().unwrap_or("");
+    let signed = format!(
+        "ui-audit-v1\nsession={}\ntotal={}\ncount={}\nsince={}\nlimit={}\nkeyId={}\nsha256={}\n{}",
+        session,
+        total,
+        events.len(),
+        since_value,
+        limit_value,
+        key_id,
+        digest,
+        canonical
+    );
+    let hmac = hub.audit_hmac_key.as_deref().map(|key| {
+        let bytes = ui_core::sha256::hmac_sha256(key.as_bytes(), signed.as_bytes());
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    });
     Ok(Json::obj(vec![
         ("version", Json::from(1u64)),
         ("session", Json::from(session.as_str())),
         ("exportedAt", Json::from(ui_core::time::now_ms())),
         ("total", Json::from(total)),
         ("count", Json::from(events.len() as u64)),
+        ("since", Json::from(since_value)),
+        ("limit", Json::from(limit_value)),
         ("events", Json::Arr(events)),
         ("sha256", Json::from(digest.as_str())),
+        ("hmacAlg", Json::from("HMAC-SHA256")),
+        ("keyId", Json::from(key_id)),
+        ("hmac", hmac.map(Json::from).unwrap_or(Json::Null)),
     ]))
 }
 
@@ -2998,6 +3031,35 @@ mod tests {
             "GET /api/audit/export HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: export-secret\r\nX-UI-User: v@example.com\r\nX-UI-Roles: viewer\r\nConnection: close\r\n\r\n",
         );
         assert!(viewer.0.contains("403"), "{}", viewer.0);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn audit_export_hmac_is_stable_and_optional() {
+        let ws = temp_workspace("audit-hmac");
+        std::fs::create_dir_all(ws.join(".ui")).unwrap();
+        let path = ws.join(".ui").join("journal.jsonl");
+        let mut j = ui_core::Journal::open(&path).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("a"))])).unwrap();
+        drop(j);
+
+        let mut h = Hub::default();
+        h.workspace = ws.clone();
+        let unsigned = audit_export(&Arc::new(h), None, None).unwrap();
+        assert!(matches!(unsigned.get("hmac"), Some(Json::Null)));
+
+        let mut h = Hub::default();
+        h.workspace = ws.clone();
+        h.audit_hmac_key = Some("test-key".into());
+        h.audit_key_id = Some("k1".into());
+        let hub = Arc::new(h);
+        let a = audit_export(&hub, None, None).unwrap();
+        let b = audit_export(&hub, None, None).unwrap();
+        let hmac = a.str_at("hmac").unwrap_or("");
+        assert_eq!(hmac.len(), 64);
+        assert_eq!(Some(hmac), b.str_at("hmac"), "同一批事件签名必须稳定");
+        assert_eq!(a.str_at("keyId"), Some("k1"));
+        assert_eq!(a.str_at("hmacAlg"), Some("HMAC-SHA256"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
