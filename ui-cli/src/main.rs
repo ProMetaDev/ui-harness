@@ -403,6 +403,26 @@ fn cmd_checkpoint(args: &Args) -> Result<i32, String> {
 
 fn cmd_checkpoints(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
+    if args.flag("gc") {
+        let keep = match args.get("keep") {
+            Some(v) => Some(
+                v.parse::<usize>()
+                    .map_err(|_| format!("--keep 需要非负整数: {}", v))?,
+            ),
+            None => None,
+        };
+        let dry_run = !args.flag("yes");
+        let out = ui_core::checkpoint::gc(&ws, keep, dry_run)?;
+        if args.flag("json") {
+            println!("{}", out.to_compact());
+        } else {
+            println!("{}", out.to_pretty());
+            if dry_run {
+                println!("dry-run：确认后加 --yes 才会删盘");
+            }
+        }
+        return Ok(0);
+    }
     let rows = ui_core::checkpoint::list(&ws)?;
     if args.flag("json") {
         println!("{}", Json::Arr(rows).to_compact());
@@ -985,6 +1005,7 @@ fn help() -> String {
      ui index --query \"foo\"       按路径/符号查相关文件\n\
      ui checkpoint [--label L]    给当前 workspace 存一个零依赖内容寻址快照\n\
      ui checkpoints [--json]      列出 checkpoint\n\
+     ui checkpoints --gc --keep 50 [--yes]  清理旧 checkpoint/未引用 blob（默认 dry-run）\n\
      ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
      ui review [--checkpoint ID]  列出 hunk；--accept path#n,all --yes 只保留选中的 hunk\n\
      ui revert --checkpoint ID --path P --yes   只回退一个文件（新增文件则删除）\n\

@@ -19,6 +19,8 @@
   journalChainOk=True；RSS 中位数 4484KB、max 4840KB、fd 5–8；
   first50 avg 4219KB / last50 avg 4495KB（+276KB，未证明泄漏，24h 继续看趋势）。
 - 旧 2h soak 在 1405/1440 轮后因旧脚本进程检查退出 1；不是产品失败，也没有 `phase=passed`。
+- checkpoint GC：`ui checkpoints --gc --keep N`，默认 dry-run；只保留被保留
+  manifest 引用的 blob，清理 `.tmp-*`。
 
 ## 2026-11-23 · 企业硬化与审阅闭环
 
@@ -151,17 +153,15 @@
 - ~~runner 默认 token 为空~~：runner 现在无 token 启动即退出。
 - ~~`lab_pack` flake~~：已修：用 journal 的 `fs/read` path+sha 识别输入，
   mtime 扫描不再把未变输入升级成产物；回归测试把输入 mtime 推到未来。
-- checkpoint blob 没有 GC/保留期。
+- ~~checkpoint blob 没有 GC~~：已加 `ui checkpoints --gc --keep N`，默认 dry-run。
 - review 是“先写文件再写 journal”，中间崩溃会留下未审计修改。
 - M6 用户/角色/策略管理、审计 WORM、合规试点未做。
 
 ### 下一步
 
-1. 看 2h soak 跑完并确认 `phase=passed`；
-2. checkpoint blob GC；
-3. review 事务化/补偿审计；
-4. M6 用户/角色/策略管理；
-5. RC 阶段再跑 24h。
+1. review 事务化/补偿审计；
+2. M6 用户/角色/策略管理；
+3. RC 阶段再跑 24h。
 
 ### 常用命令
 

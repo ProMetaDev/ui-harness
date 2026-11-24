@@ -268,6 +268,82 @@ pub fn list(ws: &Path) -> Result<Vec<Json>, String> {
     Ok(out)
 }
 
+/// 清理 checkpoint blob。
+///
+/// - `keep` 为 Some(n) 时只保留最近 n 个 checkpoint，其余目录删除；
+/// - blob 只保留仍被保留 manifest 引用的内容；
+/// - `dry_run=true` 只统计，不动盘；
+/// - `.tmp-*` 是崩溃遗留的临时 blob，也一并算作可删。
+pub fn gc(ws: &Path, keep: Option<usize>, dry_run: bool) -> Result<Json, String> {
+    let all = list(ws)?;
+    let keep_n = keep.unwrap_or(all.len()).min(all.len());
+    let kept = &all[..keep_n];
+    let dropped = &all[keep_n..];
+
+    let mut referenced = std::collections::BTreeSet::new();
+    for c in kept {
+        let id = c.str_at("id").unwrap_or("");
+        let manifest = load_manifest(ws, id)?;
+        for e in manifest
+            .get("entries")
+            .and_then(|v| v.as_arr())
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(hash) = e.str_at("sha256") {
+                referenced.insert(hash.to_string());
+            }
+        }
+    }
+
+    let mut removed_checkpoints = 0u64;
+    if !dry_run {
+        for c in dropped {
+            let id = c.str_at("id").unwrap_or("");
+            if !id.is_empty() {
+                fs::remove_dir_all(cp_dir(ws, id))
+                    .map_err(|e| format!("删除 checkpoint {} 失败: {}", id, e))?;
+                removed_checkpoints += 1;
+            }
+        }
+    } else {
+        removed_checkpoints = dropped.len() as u64;
+    }
+
+    let mut removed_blobs = 0u64;
+    let blob_dir = blob_dir(ws);
+    if let Ok(rd) = fs::read_dir(&blob_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let orphan = name.starts_with(".tmp-") || !referenced.contains(&name);
+            if !orphan {
+                continue;
+            }
+            removed_blobs += 1;
+            if !dry_run {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    Ok(Json::obj(vec![
+        ("dryRun", Json::Bool(dry_run)),
+        ("totalCheckpoints", Json::from(all.len() as u64)),
+        ("keptCheckpoints", Json::from(kept.len() as u64)),
+        (
+            "droppedCheckpoints",
+            Json::Arr(
+                dropped
+                    .iter()
+                    .filter_map(|c| c.str_at("id").map(Json::from))
+                    .collect(),
+            ),
+        ),
+        ("removedCheckpoints", Json::from(removed_checkpoints)),
+        ("removedBlobs", Json::from(removed_blobs)),
+    ]))
+}
+
 pub fn latest_id(ws: &Path) -> Result<String, String> {
     list(ws)?
         .first()
@@ -1019,6 +1095,32 @@ mod tests {
             .map(|a| a.iter().filter_map(|e| e.str_at("path")).collect())
             .unwrap_or_default();
         assert_eq!(paths, vec!["a.txt"], "checkpoint 不能复制私有文件: {:?}", paths);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gc_keeps_recent_and_removes_orphans() {
+        let ws = scratch("gc");
+        fs::write(ws.join("a.txt"), "one\n").unwrap();
+        let c1 = create(&ws, "one").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(ws.join("a.txt"), "two\n").unwrap();
+        create(&ws, "two").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(ws.join("a.txt"), "three\n").unwrap();
+        create(&ws, "three").unwrap();
+        fs::write(blob_dir(&ws).join("orphan"), "x").unwrap();
+
+        let dry = gc(&ws, Some(2), true).unwrap();
+        assert_eq!(dry.u64_at("removedCheckpoints"), Some(1));
+        assert_eq!(dry.u64_at("removedBlobs"), Some(2));
+        assert!(cp_dir(&ws, c1.str_at("id").unwrap()).exists(), "dry-run 不删盘");
+
+        let out = gc(&ws, Some(2), false).unwrap();
+        assert_eq!(out.u64_at("removedCheckpoints"), Some(1));
+        assert_eq!(out.u64_at("removedBlobs"), Some(2));
+        assert_eq!(list(&ws).unwrap().len(), 2);
+        assert!(!blob_dir(&ws).join("orphan").exists());
         let _ = fs::remove_dir_all(&ws);
     }
 

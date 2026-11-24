@@ -354,6 +354,42 @@ fn run_can_checkpoint_before_tool_writes() {
 }
 
 #[test]
+fn checkpoint_gc_dry_run_then_yes() {
+    let ws = temp_ws("checkpoint-gc");
+    fs::write(ws.join("a.txt"), "one\n").unwrap();
+    for _ in 0..2 {
+        let cp = Command::new(bin())
+            .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "x"])
+            .output()
+            .expect("checkpoint");
+        assert!(cp.status.success());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let dry = Command::new(bin())
+        .args([
+            "checkpoints", "--workspace", ws.to_str().unwrap(),
+            "--gc", "--keep", "1", "--json",
+        ])
+        .output()
+        .expect("gc dry");
+    assert!(dry.status.success(), "{}", String::from_utf8_lossy(&dry.stderr));
+    let out = ui_core::json::parse(String::from_utf8_lossy(&dry.stdout).trim()).unwrap();
+    assert_eq!(out.bool_at("dryRun"), Some(true));
+    assert_eq!(ui_core::checkpoint::list(&ws).unwrap().len(), 2, "dry-run 不删");
+
+    let yes = Command::new(bin())
+        .args([
+            "checkpoints", "--workspace", ws.to_str().unwrap(),
+            "--gc", "--keep", "1", "--yes", "--json",
+        ])
+        .output()
+        .expect("gc yes");
+    assert!(yes.status.success(), "{}", String::from_utf8_lossy(&yes.stderr));
+    assert_eq!(ui_core::checkpoint::list(&ws).unwrap().len(), 1);
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn journal_flag_redirects_the_log() {
     let ws = temp_ws("journal");
     let sc = scenario(&ws);

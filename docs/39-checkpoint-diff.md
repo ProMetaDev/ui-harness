@@ -10,6 +10,8 @@
 ui run --task "..." --checkpoint   # 开跑前自动存基线
 ui checkpoint --label before-edit
 ui checkpoints
+ui checkpoints --gc --keep 50 --dry-run
+ui checkpoints --gc --keep 50 --yes
 ui diff
 ui diff --checkpoint cp-... --json
 ui review --checkpoint cp-...
@@ -106,6 +108,14 @@ POST /api/revert
 `POST /api/review` 需要同源请求 + token + `confirm:true`；写盘前自动建
 `pre-review-<id>`，成功后写 `review/apply` journal 事件（actor=web），并在响应
 里返回 `journalSeq`。
+
+### gc
+
+- 默认 dry-run，只统计不删盘；
+- `--keep N` 只保留最近 N 个 checkpoint，其余目录删除；
+- blob 只保留仍被保留 manifest 引用的内容；
+- 崩溃遗留 `.tmp-*` 也算可删；
+- 必须显式 `--yes` 才真正删除。
 
 ## 3. 数据布局
 
