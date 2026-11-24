@@ -1190,6 +1190,7 @@ fn help() -> String {
      模型:     --mock 剧本.json   或   UI_MODEL_CMD=\"node adapters/deepseek.mjs\"\n\
      网页端:   --port N  --bundles 目录  --bench-cmd \"命令\"\n\
                --trusted-proxy loopback|<ip>  --trusted-proxy-secret <secret>（两者必须同时给）\n\
+               RBAC: .ui/rbac.json（roles/users；缺失用内置矩阵，损坏拒绝启动）\n\
      外部工具: --mcp mcp.json（stdio JSON-RPC，工具效果记为 proc.exec mcp:<server>:<tool>）"
         .to_string()
 }

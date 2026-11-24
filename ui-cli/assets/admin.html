@@ -18,6 +18,11 @@ main{max-width:1100px;margin:0 auto;padding:22px;display:grid;gap:16px;grid-temp
 .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
 .row{padding:6px 0;border-bottom:1px dashed var(--border);font-size:12.5px;color:var(--muted)}
 .row:last-child{border-bottom:0}.row strong{color:var(--text);font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px dashed var(--border)}
+th{color:var(--muted);font-weight:600}
+td.y{color:var(--ok);font-weight:600}td.n{color:var(--muted)}
+h3{font-size:12px;color:var(--muted);margin:14px 0 6px;font-weight:600}
 button{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:7px 11px;cursor:pointer}
 button.primary{background:var(--accent);border-color:transparent;color:#fff}
 #err{color:var(--bad);white-space:pre-wrap;font:12px ui-monospace,monospace}
@@ -37,8 +42,12 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}
   <section class="card"><h2>最近基线</h2><div id="cps"></div></section>
   <section class="card"><h2>最近审阅</h2><div id="reviews"></div></section>
   <section class="card"><h2>会话</h2><div id="sessions"></div></section>
+  <section class="card" style="grid-column:1/-1"><h2>RBAC（只读）</h2><div id="rbac">加载中…</div>
+    <p class="mono" style="color:var(--muted);margin:12px 0 0">写操作走 API：<code>PUT /api/admin/roles</code>（owner）与
+      <code>PUT/DELETE /api/admin/users</code>（manage），每次变更写当前 session journal。</p>
+  </section>
   <section class="card"><h2>操作</h2>
-    <p class="mono" style="color:var(--muted)">M1 只读管理面；写操作仍在对话/CLI 中完成。</p>
+    <p class="mono" style="color:var(--muted)">管理面只读；RBAC 写操作通过上述 API 完成（curl）。</p>
     <button class="primary" id="refresh">刷新</button>
   </section>
   <section class="card" style="grid-column:1/-1;display:none" id="errCard"><h2>错误</h2><pre id="err"></pre></section>
@@ -77,8 +86,30 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}
       const ses = await get('/api/sessions');
       const list = (ses && ses.sessions) || [];
       rows($('sessions'), list, (s) => '<div class="row"><strong class="mono">' + esc(s.name) + '</strong> · ' + esc(s.events) + ' events' + (s.current ? ' · current' : '') + '</div>');
+      await loadRbac();
       $('errCard').style.display = 'none';
     } catch (e) { fail(e); }
+  }
+  async function loadRbac(){
+    try {
+      const rbac = await get('/api/admin/rbac');
+      const roles = rbac.roles || {};
+      const users = rbac.users || {};
+      const names = Object.keys(roles).sort();
+      const head = '<tr><th>角色</th><th>write</th><th>audit</th><th>manage</th></tr>';
+      const body = names.map((n) => {
+        const p = roles[n] || {};
+        const cell = (on) => '<td class="' + (on ? 'y' : 'n') + '">' + (on ? '✓' : '·') + '</td>';
+        return '<tr><td class="mono">' + esc(n) + '</td>' + cell(p.write) + cell(p.audit) + cell(p.manage) + '</tr>';
+      }).join('');
+      const ids = Object.keys(users).sort();
+      const userRows = ids.length
+        ? ids.map((id) => '<div class="row"><strong class="mono">' + esc(id) + '</strong> → <span class="mono">' + esc(users[id]) + '</span></div>').join('')
+        : '<div class="row">无用户映射（角色取自 X-UI-Roles）</div>';
+      $('rbac').innerHTML = '<table>' + head + body + '</table><h3>用户映射</h3>' + userRows;
+    } catch (e) {
+      $('rbac').innerHTML = '<div class="row">RBAC 不可读：' + esc(e && e.message ? e.message : e) + '</div>';
+    }
   }
   $('refresh').onclick = load;
   load();
