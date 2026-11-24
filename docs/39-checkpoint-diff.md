@@ -64,7 +64,11 @@ ui restore --checkpoint cp-... --prune --yes
 - 写盘前先落 `review/intent`（actor/checkpoint/accepted）；
 - 成功后写 `review/apply`（含 written/removed/backup/intentSeq）；
 - 失败时写 `review/error`，不写 apply；
-- 中途崩溃会留下 intent 而没有 apply/error，启动后可按 intent 对账；
+- 中途崩溃会留下 intent 而没有 apply/error：
+  - `ui review --pending` 列出 dangling intent；
+  - `ui review --reconcile --yes` 对照 `pre-review-<id>` 给出
+    `applied / not-applied / unknown`，写 `review/reconciled`；
+  - `unknown` 不自动改盘，需要人工判断；
 - 审计写失败时明确报“文件已写回、需要人工补账”，不静默成功；
 - 必须显式 `--yes`。
 

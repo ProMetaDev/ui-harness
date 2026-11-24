@@ -155,14 +155,13 @@
   mtime 扫描不再把未变输入升级成产物；回归测试把输入 mtime 推到未来。
 - ~~checkpoint blob 没有 GC~~：已加 `ui checkpoints --gc --keep N`，默认 dry-run。
 - ~~review 是“先写文件再写 journal”~~：已改成先写 `review/intent`，再 apply/error；
-  崩溃时仍可能留下 intent 无结论，需要启动对账命令（尚未实现）。
+  `--pending` / `--reconcile` 可对账 dangling intent；`unknown` 不自动改盘。
 - M6 用户/角色/策略管理、审计 WORM、合规试点未做。
 
 ### 下一步
 
-1. review intent 的启动对账/恢复命令；
-2. M6 用户/角色/策略管理；
-3. RC 阶段再跑 24h。
+1. M6 用户/角色/策略管理；
+2. RC 阶段再跑 24h。
 
 ### 常用命令
 

@@ -1724,7 +1724,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     ),
                 },
                 Err(e) => {
-                    let _ = audit_review_error(&hub, checkpoint, &e, actor_id);
+                    let _ = audit_review_error(&hub, checkpoint, &e, actor_id, intent_seq);
                     json_response_status(
                         &mut stream,
                         "400 Bad Request",
@@ -2129,6 +2129,7 @@ fn audit_review_error(
     checkpoint: &str,
     error: &str,
     actor: &str,
+    intent_seq: u64,
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
@@ -2144,6 +2145,7 @@ fn audit_review_error(
                 ("actor", Json::from(actor)),
                 ("checkpoint", Json::from(checkpoint)),
                 ("error", Json::from(error)),
+                ("intentSeq", Json::from(intent_seq)),
             ]),
         )
         .map_err(|e| format!("写审计 error 失败: {}", e))?;

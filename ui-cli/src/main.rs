@@ -458,6 +458,10 @@ fn cmd_diff(args: &Args) -> Result<i32, String> {
 
 fn cmd_review(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
+    let jp = resolve_journal(args, &ws);
+    if args.flag("pending") || args.flag("reconcile") {
+        return review_pending(args, &ws, &jp);
+    }
     let id = args.get("checkpoint");
     let report = ui_core::checkpoint::diff(&ws, id.as_deref())?;
     let accept = args.get("accept");
@@ -508,6 +512,7 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
                         ("actor", Json::from("cli")),
                         ("checkpoint", Json::from(report.checkpoint.as_str())),
                         ("error", Json::from(e.as_str())),
+                        ("intentSeq", Json::from(intent_seq)),
                     ]),
                 )
             });
@@ -542,6 +547,131 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
     out.set("journalSeq", Json::from(seq));
     out.set("intentSeq", Json::from(intent_seq));
     println!("{}", out.to_pretty());
+    Ok(0)
+}
+
+fn review_pending(args: &Args, ws: &std::path::Path, jp: &std::path::Path) -> Result<i32, String> {
+    let (events, corrupt) =
+        ui_core::Journal::read(jp).map_err(|e| format!("读审计日志失败: {}", e))?;
+    if corrupt.is_some() {
+        return Err("审计日志损坏，拒绝 review 对账".to_string());
+    }
+    let resolved: std::collections::BTreeSet<u64> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.str_at("kind"),
+                Some("review/apply") | Some("review/error") | Some("review/reconciled")
+            )
+        })
+        .filter_map(|e| e.u64_at("intentSeq"))
+        .collect();
+    let pending: Vec<&Json> = events
+        .iter()
+        .filter(|e| e.str_at("kind") == Some("review/intent"))
+        .filter(|e| !resolved.contains(&e.u64_at("seq").unwrap_or(0)))
+        .collect();
+    let count = pending.len() as u64;
+
+    if !args.flag("reconcile") {
+        if args.flag("json") {
+            println!(
+                "{}",
+                Json::obj(vec![
+                    ("pending", Json::Arr(pending.iter().map(|e| (*e).clone()).collect())),
+                    ("count", Json::from(count)),
+                ])
+                .to_compact()
+            );
+            return Ok(0);
+        }
+        if pending.is_empty() {
+            println!("没有待对账的 review intent");
+            return Ok(0);
+        }
+        println!("{:>5}  {:<28}  accepted", "seq", "checkpoint");
+        for e in &pending {
+            let accepted = e
+                .arr_at("accepted")
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+                .unwrap_or_default();
+            println!(
+                "{:>5}  {:<28}  {}",
+                e.u64_at("seq").unwrap_or(0),
+                e.str_at("checkpoint").unwrap_or("?"),
+                accepted
+            );
+        }
+        println!("\n用 --reconcile --yes 按 pre-review checkpoint 对账。");
+        return Ok(0);
+    }
+
+    let dry = !args.flag("yes");
+    let mut rows: Vec<Json> = Vec::new();
+    for e in &pending {
+        let seq = e.u64_at("seq").unwrap_or(0);
+        let checkpoint = e.str_at("checkpoint").unwrap_or("");
+        let pre_label = format!("pre-review-{}", checkpoint);
+        let pre = ui_core::checkpoint::list(ws)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|c| c.str_at("label") == Some(pre_label.as_str()));
+        let (resolution, changed) = match pre.and_then(|c| c.str_at("id").map(str::to_string)) {
+            Some(pre_id) => match ui_core::checkpoint::diff(ws, Some(pre_id.as_str())) {
+                Ok(d) if d.changes.is_empty() => ("not-applied", 0u64),
+                Ok(d) => ("applied", d.changes.len() as u64),
+                Err(_) => ("unknown", 0u64),
+            },
+            None => ("unknown", 0u64),
+        };
+        rows.push(Json::obj(vec![
+            ("intentSeq", Json::from(seq)),
+            ("checkpoint", Json::from(checkpoint)),
+            ("resolution", Json::from(resolution)),
+            ("changedFiles", Json::from(changed)),
+            ("dryRun", Json::Bool(dry)),
+        ]));
+        if !dry {
+            let mut journal = ui_core::Journal::open(jp)
+                .map_err(|e| format!("写对账日志失败: {}", e))?;
+            journal
+                .append(
+                    "review/reconciled",
+                    Json::obj(vec![
+                        ("actor", Json::from("cli")),
+                        ("intentSeq", Json::from(seq)),
+                        ("checkpoint", Json::from(checkpoint)),
+                        ("resolution", Json::from(resolution)),
+                        ("changedFiles", Json::from(changed)),
+                    ]),
+                )
+                .map_err(|e| format!("写对账日志失败: {}", e))?;
+        }
+    }
+    if args.flag("json") {
+        println!(
+            "{}",
+            Json::obj(vec![
+                ("dryRun", Json::Bool(dry)),
+                ("pending", Json::Arr(rows)),
+                ("count", Json::from(count)),
+            ])
+            .to_compact()
+        );
+    } else {
+        for r in &rows {
+            println!(
+                "intentSeq={} checkpoint={} resolution={} changedFiles={}",
+                r.u64_at("intentSeq").unwrap_or(0),
+                r.str_at("checkpoint").unwrap_or("?"),
+                r.str_at("resolution").unwrap_or("?"),
+                r.u64_at("changedFiles").unwrap_or(0)
+            );
+        }
+        if dry {
+            println!("dry-run：加 --yes 才写 review/reconciled");
+        }
+    }
     Ok(0)
 }
 
@@ -1043,6 +1173,8 @@ fn help() -> String {
      ui checkpoints --gc --keep 50 [--yes]  清理旧 checkpoint/未引用 blob（默认 dry-run）\n\
      ui diff [--checkpoint ID]    对比当前 workspace 与 checkpoint（默认最新）\n\
      ui review [--checkpoint ID]  列出 hunk；--accept path#n,all --yes 只保留选中的 hunk\n\
+     ui review --pending          列出没有 apply/error 结论的 intent\n\
+     ui review --reconcile --yes  按 pre-review checkpoint 对账并写 reconciled\n\
      ui revert --checkpoint ID --path P --yes   只回退一个文件（新增文件则删除）\n\
      ui restore --checkpoint ID [--prune] --yes   从 checkpoint 写回（--prune 删除未跟踪新文件）\n\
      ui tui                       全屏终端界面\n\

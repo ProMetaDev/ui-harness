@@ -384,6 +384,60 @@ fn review_failure_records_intent_and_error() {
 }
 
 #[test]
+fn review_pending_and_reconcile_dangling_intent() {
+    let ws = temp_ws("review-reconcile");
+    fs::create_dir_all(ws.join(".ui")).unwrap();
+    let jp = ws.join(".ui").join("journal.jsonl");
+    let mut j = ui_core::Journal::open(&jp).unwrap();
+    j.append(
+        "review/intent",
+        ui_core::json::Json::obj(vec![
+            ("actor", ui_core::json::Json::from("cli")),
+            ("checkpoint", ui_core::json::Json::from("cp-x")),
+            ("accepted", ui_core::json::Json::Arr(vec![])),
+        ]),
+    )
+    .unwrap();
+    drop(j);
+
+    let pending = Command::new(bin())
+        .args([
+            "review", "--workspace", ws.to_str().unwrap(),
+            "--pending", "--json",
+        ])
+        .output()
+        .expect("pending");
+    assert!(pending.status.success(), "{}", String::from_utf8_lossy(&pending.stderr));
+    let out = ui_core::json::parse(String::from_utf8_lossy(&pending.stdout).trim()).unwrap();
+    assert_eq!(out.u64_at("count"), Some(1));
+
+    let rec = Command::new(bin())
+        .args([
+            "review", "--workspace", ws.to_str().unwrap(),
+            "--reconcile", "--yes", "--json",
+        ])
+        .output()
+        .expect("reconcile");
+    assert!(rec.status.success(), "{}", String::from_utf8_lossy(&rec.stderr));
+    let out = ui_core::json::parse(String::from_utf8_lossy(&rec.stdout).trim()).unwrap();
+    assert_eq!(out.u64_at("count"), Some(1));
+    assert_eq!(
+        out.arr_at("pending")
+            .and_then(|a| a.first())
+            .and_then(|r| r.str_at("resolution")),
+        Some("unknown")
+    );
+    let (events, _) = ui_core::Journal::read(&jp).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.str_at("kind") == Some("review/reconciled")),
+        "对账必须落账"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn checkpoint_gc_dry_run_then_yes() {
     let ws = temp_ws("checkpoint-gc");
     fs::write(ws.join("a.txt"), "one\n").unwrap();
