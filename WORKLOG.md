@@ -15,8 +15,10 @@
   - `lab_pack` 用 journal `fs/read` path+sha 判定输入，mtime 回跳不再把输入误判成产物；
   - 回归测试把输入 mtime 推到未来。
 - `tools/debug.sh`：**57 passed / 0 failed**。
-- 2h soak 旧脚本在 1405/1440 轮后因自身进程检查退出 1；**不是产品失败**，
-  但也没有 `phase=passed`，不能算通过。新 soak 脚本已用 8s/10s 短跑验证。
+- **2h soak（新脚本）通过**：`phase=passed`、rounds=1429、failedRounds=0、
+  journalChainOk=True；RSS 中位数 4484KB、max 4840KB、fd 5–8；
+  first50 avg 4219KB / last50 avg 4495KB（+276KB，未证明泄漏，24h 继续看趋势）。
+- 旧 2h soak 在 1405/1440 轮后因旧脚本进程检查退出 1；不是产品失败，也没有 `phase=passed`。
 
 ## 2026-11-23 · 企业硬化与审阅闭环
 
