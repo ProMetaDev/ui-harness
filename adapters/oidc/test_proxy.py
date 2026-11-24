@@ -47,6 +47,11 @@ USERINFO = {
         "aud": "some-other-client",
         "roles": [],
     },
+    "groups-token": {
+        "sub": "sub-5",
+        "email": "erin@example.com",
+        "groups": ["owner", "viewer", "bad role"],
+    },
 }
 
 
@@ -326,6 +331,37 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(header(seen["headers"], "X-UI-User"), "bob")
         self.assertEqual(header(seen["headers"], "X-UI-Roles"), "admin")
 
+    def test_groups_claim_and_email_identity(self):
+        """OIDC 常见声明名 `groups`：`OIDC_ROLES_CLAIM` 可配置，别硬编码 roles。"""
+        config = oidc_proxy.Config(
+            userinfo_url=self.config.userinfo_url,
+            client_id="",
+            roles_claim="groups",
+            upstream_url=self.config.upstream_url,
+            proxy_secret=SECRET,
+            listen="127.0.0.1:0",
+            timeout=3.0,
+        )
+        proxy = oidc_proxy.ProxyServer(("127.0.0.1", 0), config)
+        proxy.daemon_threads = True
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        try:
+            conn = HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=10)
+            try:
+                conn.request("GET", "/echo", headers={"Authorization": "Bearer groups-token"})
+                resp = conn.getresponse()
+                resp.read()
+                self.assertEqual(resp.status, 200)
+            finally:
+                conn.close()
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+        seen = UpstreamHandler.seen[-1]
+        self.assertEqual(header(seen["headers"], "X-UI-User"), "erin@example.com")
+        # 小写、去重、丢弃不认识的角色。
+        self.assertEqual(header(seen["headers"], "X-UI-Roles"), "owner,viewer")
+
     # ── 配置边界：只监听回环、密钥必填 ──
     def test_listen_must_be_loopback(self):
         for value in ("0.0.0.0:7789", "192.168.1.5:7789", "[::]:7789"):
@@ -402,4 +438,10 @@ class ProxyTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    # Windows 管道默认 GBK：中文用例名在 CI 日志里会乱码。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     unittest.main(verbosity=2)

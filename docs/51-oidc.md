@@ -114,7 +114,9 @@ X-UI-Proxy-Secret: <UI_PROXY_SECRET>
 - 适配层不校验 JWT 签名，安全性依赖「userinfo 会拒绝无效 token」这一 OIDC
   事实；如果 IdP 的 userinfo 实现有缺陷，适配层无法补救。
 
-## 6. 测试
+## 6. 验证
+
+### 6.1 适配层单测
 
 ```bash
 python3 adapters/oidc/test_proxy.py
@@ -127,9 +129,77 @@ python3 adapters/oidc/test_proxy.py
 - 502：userinfo 5xx（fail closed）；
 - 上游 500 与 SSE 流式透传；
 - 客户端自带/重复的 `X-UI-*` 被剥离，`Authorization` 不转发；
-- roles 声明是字符串/数组/嵌套点路径时的归一；
+- roles 声明是字符串/数组/嵌套点路径/`groups` 时的归一；
 - `OIDC_LISTEN` 非回环、缺 `UI_PROXY_SECRET`、上游非回环时拒绝启动；
 - 真进程测试：日志里不出现 token 与代理密钥。
+
+### 6.2 端到端（mock IdP → 代理 → `ui serve` → `/api/admin`）
+
+```bash
+python3 tools/oidc_e2e.py          # 直接跑；--ui 可指定二进制，--no-browser 跳过浏览器
+bash tools/verify_oidc_e2e.sh      # 门禁包装器；没有 out/ui.exe 时先尝试构建
+```
+
+`tools/oidc_e2e.py` 自己启动三段进程，不联网、不调用真实模型：
+
+1. 本进程内的 mock IdP（`127.0.0.1` 随机端口）：`/userinfo` 只认
+   `owner-token`（owner@example.com / `groups: ["owner"]`）和
+   `viewer-token`（viewer@example.com / `groups: ["viewer"]`），其它 token 一律 401；
+2. `adapters/oidc/oidc_proxy.py`：`OIDC_ROLES_CLAIM=groups`，上游指向下面这个
+   `ui serve`，共享密钥随机生成；
+3. `out/ui.exe serve --trusted-proxy loopback --trusted-proxy-secret <随机> --token off`，
+   在 `out/` 下的临时工作区跑 `--mock` 剧本（gitignored，结束删除）；结束后（含失败
+   路径）Windows 用 `taskkill /T`、POSIX 用 `terminate` 收掉所有进程。
+
+HTTP 断言：
+
+| 场景 | 期望 |
+|---|---|
+| 无 `Authorization` | 401 |
+| 无效 token | 401 |
+| viewer 读 `/api/admin/rbac` | 403 |
+| owner 读 `/api/admin/rbac` | 200，矩阵含 `owner` |
+| viewer token + 伪造 `X-UI-User`/`X-UI-Roles: owner`/`X-UI-Proxy-Secret` | 仍按 viewer → 403（证明剥离） |
+| 只有伪造 `X-UI-*`、无 Bearer | 401 |
+| owner `PUT /api/admin/roles` | 200 |
+| owner `PUT /api/admin/users`（新增 operator） | 200，随后 `GET` 能看到 |
+| viewer `PUT /api/admin/users` | 403 |
+| 工作区 `.ui/journal.jsonl` | 出现 `rbac/role-update`、`rbac/user-update`，actor 是 owner@example.com |
+| mock IdP / 代理 / `ui serve` 日志 | 不含 owner/viewer/无效 token，也不含代理密钥 |
+
+浏览器部分是**可选**断言：找到 Chrome/Edge 时，用 CDP
+`Network.setExtraHTTPHeaders` 注入 `Authorization: Bearer owner-token`，打开
+`/admin`，断言 `userForm`/`matrixBody` 存在；若注入生效，再确认矩阵/身份区出现
+`owner`。没有 Chrome/Edge、或 CDP 注入不稳定时，浏览器部分明确 SKIP/WARN，
+HTTP 断言仍是硬门禁。
+
+SKIP 规则：
+
+- 没有 `out/ui.exe`（也没有 `--ui` / `UI_EXE`）→ 明确 SKIP，并提示先
+  `bash tools/build_windows.sh`；不再假装链路验证过；
+- 没有 Chrome/Edge → 只 SKIP 浏览器，HTTP e2e 必须全绿；
+- `tools/verify_oidc_e2e.sh` 在缺二进制时会先尝试本机或 WSL 构建，构建环境不可用
+  才 SKIP（退出码 0）。
+
+### 6.3 mock IdP 与真实 IdP 的差距
+
+这条 e2e 证明的是「适配层 → 受信代理 → 管理 API」的接线和权限边界，**不是**
+OIDC 协议一致性。差距清单：
+
+| 维度 | mock IdP | 真实 IdP |
+|---|---|---|
+| token 真伪 | 两张硬编码字符串，非 JWT | 签名、`exp`/`nbf`/`iss` 由 userinfo 端点判定 |
+| 发现/元数据 | 没有 `.well-known`、JWKS、issuer | 可能要求 discovery、JWKS、issuer 校验 |
+| 传输 | 明文 HTTP，仅回环 | 生产必须 HTTPS；适配层不终止 TLS |
+| `aud` | 固定 `ui-oidc-e2e` | 可能是字符串/数组、多 audience，未覆盖全部形状 |
+| claims | 只有 `sub`/`email`/`aud`/`groups` | 常见 `preferred_username`、嵌套 `realm_access.roles`、空/缺失 `sub`（单测覆盖归一，e2e 只跑 `groups`） |
+| 故障注入 | 正常响应 + 401 | 网络错误、5xx、超时、重定向、坏 JSON（单测覆盖，e2e 未注入） |
+| 登录流程 | 无 | authorization code + PKCE、refresh、logout、cookie 由上游客户端负责，本适配层不做 |
+| 多用户/并发 | 两个固定用户，串行请求 | 真实用户规模、并发、限流、token 撤销时延 |
+| 角色来源 | `groups` 声明 | 可能是 `roles`、`realm_access.roles` 或自定义 claim；矩阵仍由 `ui serve` 决定 |
+
+因此上线前还应在预发环境用真实 IdP 复跑这张表，尤其是 HTTPS、真实 token 过期、
+`aud` 形状与角色 claim 的实际字段名。
 
 ## 7. 与文档 41/47 的关系
 

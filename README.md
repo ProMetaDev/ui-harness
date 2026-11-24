@@ -144,6 +144,7 @@ OIDC_LISTEN=127.0.0.1:7789 python3 adapters/oidc/oidc_proxy.py
 - `/admin`：可写管理面（角色矩阵 checkbox + 用户新增/编辑/删除表单）；`/api/admin/roles`（owner）、`/api/admin/users`（manage，owner 记录仍归 owner）每次变更写 journal；
 - 用户表 `.ui/users.json`（`{"users":[{"id","role","disabled","display"}]}`）：不存在时回退 `.ui/rbac.json` 的 `users`；损坏 fail closed；`disabled` 用户一律 403；
 - `adapters/oidc/oidc_proxy.py`：校验 Bearer → 调 userinfo → 校验 `sub` → 剥离客户端 `X-UI-*` 后注入身份头转发给 `ui serve`；不做 code flow；
+- OIDC 端到端：`python3 tools/oidc_e2e.py` 用本地 mock IdP 串起「userinfo → 代理 → `ui serve --trusted-proxy` → `/api/admin`」，覆盖 401/403/200、伪造头剥离与 `rbac/*` 审计；mock 与真实 IdP 的差距见 [docs/51](docs/51-oidc.md) 的「验证」；
 - `adapters/postgres/worker.py`：claim → 真实 `ui run` → heartbeat → done/failed；
 - `adapters/runner/runner.py`：workspace-only 挂载、无网络、资源/超时限制。
 
@@ -292,6 +293,8 @@ UI_MODEL_CMD="node tools/chat_compat.mjs" bash tools/lab_real.sh   # 真模型 3
 
 bash tools/verify_flake.sh               # 20 次 lab_pack 稳定性循环
 python tools/browser_e2e.py --ui out/ui.exe   # 真实浏览器：聊天 + /admin
+python3 tools/oidc_e2e.py               # mock IdP → OIDC 代理 → ui serve → /api/admin
+bash tools/verify_oidc_e2e.sh           # 同上；缺 out/ui.exe 时先尝试构建，否则明确 SKIP
 bash tools/verify_postgres_live.sh       # 真实 Postgres schema/COPY/lease
 bash tools/verify_runner_live.sh         # 真实 Docker runner 隔离
 bash tools/soak_status.sh /tmp/ui-soak-long-state.json
