@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>UI · 管理面</title>
 <style>
-:root{--bg:#f6f7f9;--panel:#fff;--text:#17202a;--muted:#68737d;--border:#dfe3e8;--accent:#2d6cdf;--ok:#2e7d4f;--bad:#b3261e}
-@media(prefers-color-scheme:dark){:root{--bg:#111418;--panel:#181d23;--text:#e6e9ec;--muted:#9aa4ae;--border:#2b333c;--accent:#7aa7ff;--ok:#8bc49a;--bad:#ff8a80}}
+:root{--bg:#f6f7f9;--panel:#fff;--text:#17202a;--muted:#68737d;--border:#dfe3e8;--accent:#2d6cdf;--ok:#2e7d4f;--bad:#b3261e;--warn:#8a5a00}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--panel:#181d23;--text:#e6e9ec;--muted:#9aa4ae;--border:#2b333c;--accent:#7aa7ff;--ok:#8bc49a;--bad:#ff8a80;--warn:#e0b060}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--border);background:var(--panel)}
 header h1{font-size:16px;margin:0}header .sp{flex:1}header a{color:var(--accent);text-decoration:none;font-size:13px}
@@ -19,12 +19,26 @@ main{max-width:1100px;margin:0 auto;padding:22px;display:grid;gap:16px;grid-temp
 .row{padding:6px 0;border-bottom:1px dashed var(--border);font-size:12.5px;color:var(--muted)}
 .row:last-child{border-bottom:0}.row strong{color:var(--text);font-weight:600}
 table{border-collapse:collapse;width:100%;font-size:12.5px}
-th,td{text-align:left;padding:5px 8px;border-bottom:1px dashed var(--border)}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px dashed var(--border);vertical-align:middle}
 th{color:var(--muted);font-weight:600}
 td.y{color:var(--ok);font-weight:600}td.n{color:var(--muted)}
+td.cb{text-align:center}
 h3{font-size:12px;color:var(--muted);margin:14px 0 6px;font-weight:600}
-button{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:7px 11px;cursor:pointer}
+button{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:7px 11px;cursor:pointer;font:inherit}
 button.primary{background:var(--accent);border-color:transparent;color:#fff}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.note{font-size:12.5px;color:var(--warn);margin:0 0 8px;min-height:1em;white-space:pre-wrap}
+.actions{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+.status{font:12px ui-monospace,monospace;color:var(--muted);white-space:pre-wrap}
+.badge{display:inline-block;border:1px solid var(--bad);color:var(--bad);border-radius:999px;padding:0 7px;font-size:11px}
+form.user-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;align-items:end;margin-top:10px}
+form.user-form label{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+input[type=text],input[type=email],select{padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font:inherit;width:100%}
+label.inline{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text)}
+label.inline input{width:auto}
+.form-actions{display:flex;gap:8px;align-items:center;grid-column:1/-1;flex-wrap:wrap}
+.hint{font-size:12px;color:var(--muted);margin:12px 0 0}
 #err{color:var(--bad);white-space:pre-wrap;font:12px ui-monospace,monospace}
 </style>
 </head>
@@ -42,35 +56,119 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}
   <section class="card"><h2>最近基线</h2><div id="cps"></div></section>
   <section class="card"><h2>最近审阅</h2><div id="reviews"></div></section>
   <section class="card"><h2>会话</h2><div id="sessions"></div></section>
-  <section class="card" style="grid-column:1/-1"><h2>RBAC（只读）</h2><div id="rbac">加载中…</div>
-    <p class="mono" style="color:var(--muted);margin:12px 0 0">写操作走 API：<code>PUT /api/admin/roles</code>（owner）与
-      <code>PUT/DELETE /api/admin/users</code>（manage），每次变更写当前 session journal。</p>
+
+  <section class="card" id="matrixCard" style="grid-column:1/-1">
+    <h2>角色矩阵</h2>
+    <p class="note" id="matrixNote"></p>
+    <table id="roleMatrix">
+      <thead><tr><th>角色</th><th style="width:90px">write</th><th style="width:90px">audit</th><th style="width:90px">manage</th></tr></thead>
+      <tbody id="matrixBody"><tr><td colspan="4" class="row">加载中…</td></tr></tbody>
+    </table>
+    <div class="actions">
+      <button class="primary" id="matrixSave" disabled>保存角色矩阵</button>
+      <span class="status" id="matrixStatus"></span>
+    </div>
+    <p class="hint">保存走 <code>PUT /api/admin/roles</code>，只有角色名 <code>owner</code> 能写；
+      保存后立即生效，并写 <code>rbac/role-update</code> 审计。</p>
   </section>
+
+  <section class="card" id="usersCard" style="grid-column:1/-1">
+    <h2>用户</h2>
+    <p class="note" id="usersNote"></p>
+    <table id="userTable">
+      <thead><tr><th>用户 ID</th><th>角色</th><th>状态</th><th>显示名</th><th style="width:170px">操作</th></tr></thead>
+      <tbody id="userBody"><tr><td colspan="5" class="row">加载中…</td></tr></tbody>
+    </table>
+    <h3>新增 / 编辑用户</h3>
+    <form class="user-form" id="userForm" autocomplete="off">
+      <label>用户 ID（email / preferred_username）
+        <input type="text" id="userId" maxlength="256" placeholder="alice@example.com" required>
+      </label>
+      <label>角色
+        <select id="userRole"></select>
+      </label>
+      <label>显示名（可选）
+        <input type="text" id="userDisplay" maxlength="128" placeholder="Alice">
+      </label>
+      <label class="inline"><input type="checkbox" id="userDisabled"> 停用（403）</label>
+      <div class="form-actions">
+        <button class="primary" type="submit" id="userSave" disabled>保存用户</button>
+        <button type="button" id="userReset">清空表单</button>
+        <span class="status" id="usersStatus"></span>
+      </div>
+    </form>
+    <p class="hint">用户表写入 <code>.ui/users.json</code>（不存在时先回退 <code>.ui/rbac.json</code> 的 users 映射）；
+      owner 的授予/修改/删除只有 <code>owner</code> 能做，其余用户管理需要 <code>manage</code>。</p>
+  </section>
+
   <section class="card"><h2>操作</h2>
-    <p class="mono" style="color:var(--muted)">管理面只读；RBAC 写操作通过上述 API 完成（curl）。</p>
+    <p class="mono" style="color:var(--muted)">上面的表单直接写 API；页面只做展示与提交，不缓存权限。</p>
     <button class="primary" id="refresh">刷新</button>
   </section>
   <section class="card" style="grid-column:1/-1;display:none" id="errCard"><h2>错误</h2><pre id="err"></pre></section>
 </main>
 <script>
 (function(){
-  const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  function fail(e){ $('errCard').style.display='block'; $('err').textContent = e && e.message ? e.message : String(e); }
-  async function get(url){
-    const r = await fetch(url, {headers:{'Accept':'application/json'}});
-    let d = {}; try { d = await r.json(); } catch (e) {}
-    if (!r.ok) throw new Error((d && (d.error || d.reason)) || ('HTTP ' + r.status));
+  var $ = function(id){ return document.getElementById(id); };
+  var esc = function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  var perms = null;
+  var canRead = false, canManage = false, canOwner = false;
+  var roles = {};
+
+  function fail(e){
+    $('errCard').style.display = 'block';
+    $('err').textContent = e && e.message ? e.message : String(e);
+  }
+  function clearFail(){ $('errCard').style.display = 'none'; }
+
+  async function api(url, opts){
+    var init = Object.assign({ headers: { 'Accept': 'application/json' } }, opts || {});
+    var r = await fetch(url, init);
+    var d = {};
+    try { d = await r.json(); } catch (e) {}
+    if (!r.ok) {
+      var err = new Error((d && (d.error || d.reason)) || ('HTTP ' + r.status));
+      err.status = r.status;
+      throw err;
+    }
     return d;
   }
-  function rows(el, items, render){
-    if (!items || !items.length) { el.innerHTML = '<div class="row">无</div>'; return; }
-    el.innerHTML = items.slice(0, 8).map(render).join('');
+  function jsonPut(url, body){
+    return api(url, {
+      method: 'PUT',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
   }
+
+  function renderPerms(){
+    var who = stateActor ? (stateActor + (stateRoles.length ? ' · ' + stateRoles.join(',') : '')) : '本地单用户模式';
+    var lines = [];
+    if (perms) {
+      lines.push(['write', perms.write ? 'yes' : 'no']);
+      lines.push(['audit', perms.audit ? 'yes' : 'no']);
+      lines.push(['manage', perms.manage ? 'yes' : 'no']);
+      lines.push(['owner', perms.owner ? 'yes' : 'no']);
+    } else {
+      lines.push(['actor', '无受信代理身份（管理 API 401）']);
+    }
+    $('who').innerHTML = '<div class="mono">' + esc(who) + '</div>' +
+      lines.map(function(kv){ return '<div class="kv"><span>' + esc(kv[0]) + '</span><b class="mono">' + esc(kv[1]) + '</b></div>'; }).join('');
+  }
+
+  var stateActor = null, stateRoles = [];
+
   async function load(){
     try {
-      const s = await get('/api/state');
-      $('who').textContent = s.actor ? (s.actor + (s.roles && s.roles.length ? ' · ' + s.roles.join(',') : '')) : '本地单用户模式';
+      var s = await api('/api/state');
+      stateActor = s.actor || null;
+      stateRoles = (s.roles || []).slice();
+      perms = s.perms || null;
+      canRead = !!(perms && (perms.audit || perms.manage));
+      canManage = !!(perms && perms.manage);
+      canOwner = !!(perms && perms.owner);
+      renderPerms();
+
       $('state').innerHTML = [
         ['busy', s.busy ? 'yes' : 'no'],
         ['task', s.taskId || '-'],
@@ -78,39 +176,203 @@ button.primary{background:var(--accent);border-color:transparent;color:#fff}
         ['events', s.seq],
         ['checkpoint', s.checkpoint || '-'],
         ['label', s.checkpointLabel || '-']
-      ].map(([k,v]) => '<div class="kv"><span>' + esc(k) + '</span><b class="mono">' + esc(v) + '</b></div>').join('');
-      const cps = await get('/api/checkpoints');
-      rows($('cps'), cps, (c) => '<div class="row"><strong class="mono">' + esc(c.id) + '</strong><br>' + esc(c.label || '') + ' · ' + esc(c.files) + ' files</div>');
-      const rev = await get('/api/reviews');
-      rows($('reviews'), rev, (r) => '<div class="row"><strong>' + esc(r.kind) + '</strong> · ' + esc(r.actor || '') + ' · ' + esc(r.written || 0) + '/' + esc(r.removed || 0) + (r.path ? ' · ' + esc(r.path) : '') + '</div>');
-      const ses = await get('/api/sessions');
-      const list = (ses && ses.sessions) || [];
-      rows($('sessions'), list, (s) => '<div class="row"><strong class="mono">' + esc(s.name) + '</strong> · ' + esc(s.events) + ' events' + (s.current ? ' · current' : '') + '</div>');
-      await loadRbac();
-      $('errCard').style.display = 'none';
+      ].map(function(kv){ return '<div class="kv"><span>' + esc(kv[0]) + '</span><b class="mono">' + esc(kv[1]) + '</b></div>'; }).join('');
+
+      var cps = await api('/api/checkpoints');
+      rows($('cps'), cps, function(c){
+        return '<div class="row"><strong class="mono">' + esc(c.id) + '</strong><br>' + esc(c.label || '') + ' · ' + esc(c.files) + ' files</div>';
+      });
+      var rev = await api('/api/reviews');
+      rows($('reviews'), rev, function(r){
+        return '<div class="row"><strong>' + esc(r.kind) + '</strong> · ' + esc(r.actor || '') + ' · ' + esc(r.written || 0) + '/' + esc(r.removed || 0) + (r.path ? ' · ' + esc(r.path) : '') + '</div>';
+      });
+      var ses = await api('/api/sessions');
+      rows($('sessions'), (ses && ses.sessions) || [], function(x){
+        return '<div class="row"><strong class="mono">' + esc(x.name) + '</strong> · ' + esc(x.events) + ' events' + (x.current ? ' · current' : '') + '</div>';
+      });
+      await loadAdmin();
+      clearFail();
     } catch (e) { fail(e); }
   }
-  async function loadRbac(){
-    try {
-      const rbac = await get('/api/admin/rbac');
-      const roles = rbac.roles || {};
-      const users = rbac.users || {};
-      const names = Object.keys(roles).sort();
-      const head = '<tr><th>角色</th><th>write</th><th>audit</th><th>manage</th></tr>';
-      const body = names.map((n) => {
-        const p = roles[n] || {};
-        const cell = (on) => '<td class="' + (on ? 'y' : 'n') + '">' + (on ? '✓' : '·') + '</td>';
-        return '<tr><td class="mono">' + esc(n) + '</td>' + cell(p.write) + cell(p.audit) + cell(p.manage) + '</tr>';
-      }).join('');
-      const ids = Object.keys(users).sort();
-      const userRows = ids.length
-        ? ids.map((id) => '<div class="row"><strong class="mono">' + esc(id) + '</strong> → <span class="mono">' + esc(users[id]) + '</span></div>').join('')
-        : '<div class="row">无用户映射（角色取自 X-UI-Roles）</div>';
-      $('rbac').innerHTML = '<table>' + head + body + '</table><h3>用户映射</h3>' + userRows;
-    } catch (e) {
-      $('rbac').innerHTML = '<div class="row">RBAC 不可读：' + esc(e && e.message ? e.message : e) + '</div>';
+
+  function rows(el, items, render){
+    if (!items || !items.length) { el.innerHTML = '<div class="row">无</div>'; return; }
+    el.innerHTML = items.slice(0, 8).map(render).join('');
+  }
+
+  async function loadAdmin(){
+    if (!canRead) {
+      $('matrixBody').innerHTML = '<tr><td colspan="4" class="row">401/403：读取角色矩阵需要 audit 或 manage</td></tr>';
+      $('matrixSave').disabled = true;
+      $('matrixNote').textContent = perms ? '当前身份没有 audit/manage：矩阵只读。' : '没有受信代理身份：管理面的读取接口返回 401（本机单用户模式不带 X-UI-*）。';
+      $('userBody').innerHTML = '<tr><td colspan="5" class="row">401/403：读取用户列表需要 audit 或 manage</td></tr>';
+      $('usersNote').textContent = $('matrixNote').textContent;
+      $('userSave').disabled = true;
+      $('userId').disabled = true;
+      $('userRole').disabled = true;
+      $('userDisplay').disabled = true;
+      $('userDisabled').disabled = true;
+      return;
+    }
+    $('userId').disabled = !canManage;
+    $('userRole').disabled = !canManage;
+    $('userDisplay').disabled = !canManage;
+    $('userDisabled').disabled = !canManage;
+    $('userSave').disabled = !canManage;
+
+    var rb = await api('/api/admin/rbac');
+    roles = rb.roles || {};
+    renderMatrix(rb);
+
+    var us = await api('/api/admin/users');
+    renderUsers(us);
+  }
+
+  function renderMatrix(rb){
+    var names = Object.keys(roles).sort();
+    var body = names.map(function(n){
+      var p = roles[n] || {};
+      var cell = function(perm){
+        return '<td class="cb"><input type="checkbox" data-role="' + esc(n) + '" data-perm="' + perm + '"' +
+          (p[perm] ? ' checked' : '') + (canOwner ? '' : ' disabled') + '></td>';
+      };
+      return '<tr><td class="mono">' + esc(n) + '</td>' + cell('write') + cell('audit') + cell('manage') + '</tr>';
+    }).join('');
+    $('matrixBody').innerHTML = body || '<tr><td colspan="4" class="row">没有角色（至少保留 owner）</td></tr>';
+    $('matrixSave').disabled = !canOwner;
+    if (!canOwner) {
+      $('matrixNote').textContent = '当前身份没有 owner：矩阵只读，保存会 403（只有角色名 owner 能改矩阵）。';
+    } else {
+      $('matrixNote').textContent = '来源：' + (rb.source || '.ui/rbac.json') + '；勾选后点保存，整份矩阵原子落盘。';
     }
   }
+
+  function collectRoles(){
+    var out = {};
+    var boxes = $('matrixBody').querySelectorAll('input[type=checkbox]');
+    for (var i = 0; i < boxes.length; i++) {
+      var cb = boxes[i];
+      var role = cb.getAttribute('data-role');
+      if (!out[role]) { out[role] = { write: false, audit: false, manage: false }; }
+      out[role][cb.getAttribute('data-perm')] = cb.checked;
+    }
+    return out;
+  }
+
+  $('matrixSave').onclick = async function(){
+    if (!canOwner) { fail(new Error('只有 owner 能修改角色矩阵（403）')); return; }
+    var next = collectRoles();
+    if (!Object.keys(next).length) { fail(new Error('角色矩阵不能为空：至少保留 owner')); return; }
+    this.disabled = true;
+    try {
+      var d = await jsonPut('/api/admin/roles', { roles: next });
+      await load();
+      $('matrixStatus').textContent = '已保存 · journalSeq=' + (d.journalSeq == null ? '-' : d.journalSeq);
+    } catch (e) {
+      $('matrixStatus').textContent = '保存失败：' + e.message;
+      fail(e);
+    } finally {
+      $('matrixSave').disabled = !canOwner;
+    }
+  };
+
+  function renderUsers(us){
+    var list = us.users || [];
+    lastUsers = list;
+    var allRoles = us.roles || Object.keys(roles);
+    if (list.length) {
+      $('userBody').innerHTML = list.map(function(u){
+        var ownerRow = u.role === 'owner';
+        var canTouch = canManage && (!ownerRow || canOwner);
+        var why = ownerRow && !canOwner ? 'owner 只有 owner 能改/删' : (canManage ? '' : '需要 manage');
+        var edit = '<button type="button" data-edit="' + esc(u.id) + '"' + (canTouch ? '' : ' disabled') + (why ? ' title="' + esc(why) + '"' : '') + '>编辑</button>';
+        var del = '<button type="button" class="danger" data-del="' + esc(u.id) + '"' + (canTouch ? '' : ' disabled') + (why ? ' title="' + esc(why) + '"' : '') + '>删除</button>';
+        return '<tr><td class="mono">' + esc(u.id) + '</td><td class="mono">' + esc(u.role) + '</td>' +
+          '<td>' + (u.disabled ? '<span class="badge">停用</span>' : '启用') + '</td>' +
+          '<td>' + esc(u.display || '-') + '</td><td>' + edit + ' ' + del + '</td></tr>';
+      }).join('');
+    } else {
+      $('userBody').innerHTML = '<tr><td colspan="5" class="row">还没有用户记录：角色取自 <code>X-UI-Roles</code>；新增后写入 .ui/users.json</td></tr>';
+    }
+    $('userRole').innerHTML = allRoles.map(function(r){ return '<option>' + esc(r) + '</option>'; }).join('');
+    $('usersNote').textContent = canManage
+      ? '来源：' + (us.source || '.ui/users.json') + '；每次变更写 rbac/user-update 审计。'
+      : (perms ? '当前身份没有 manage：用户表单只读，提交会 403。' : '没有受信代理身份：用户接口返回 401。');
+    var edits = $('userBody').querySelectorAll('button[data-edit]');
+    for (var i = 0; i < edits.length; i++) {
+      (function(btn){ btn.onclick = function(){ editUser(btn.getAttribute('data-edit')); }; })(edits[i]);
+    }
+    var dels = $('userBody').querySelectorAll('button[data-del]');
+    for (var j = 0; j < dels.length; j++) {
+      (function(btn){ btn.onclick = function(){ deleteUser(btn.getAttribute('data-del')); }; })(dels[j]);
+    }
+  }
+
+  var lastUsers = [];
+  function editUser(id){
+    var u = null;
+    for (var i = 0; i < lastUsers.length; i++) { if (lastUsers[i].id === id) { u = lastUsers[i]; break; } }
+    if (!u) { return; }
+    $('userId').value = u.id;
+    $('userId').readOnly = true;
+    $('userRole').value = u.role;
+    $('userDisplay').value = u.display || '';
+    $('userDisabled').checked = !!u.disabled;
+    $('userSave').disabled = !canManage;
+    $('usersStatus').textContent = '正在编辑 ' + u.id + '（用户 ID 不可改）';
+    $('userId').focus();
+  }
+
+  function resetUserForm(){
+    $('userForm').reset();
+    $('userId').readOnly = false;
+    if ($('userRole').options.length) { $('userRole').selectedIndex = 0; }
+    $('userSave').disabled = !canManage;
+  }
+  $('userReset').onclick = function(){ resetUserForm(); $('usersStatus').textContent = ''; };
+
+  $('userForm').onsubmit = async function(ev){
+    ev.preventDefault();
+    if (!canManage) { fail(new Error('修改用户需要 manage（403）')); return; }
+    var id = $('userId').value.trim();
+    if (!id) { fail(new Error('用户 ID 不能为空')); return; }
+    var body = { id: id, role: $('userRole').value, disabled: $('userDisabled').checked };
+    var display = $('userDisplay').value.trim();
+    body.display = display ? display : null;
+    $('userSave').disabled = true;
+    try {
+      var d = await jsonPut('/api/admin/users', body);
+      var msg = '已保存 ' + id + ' · journalSeq=' + (d.journalSeq == null ? '-' : d.journalSeq);
+      resetUserForm();
+      await load();
+      $('usersStatus').textContent = msg;
+    } catch (e) {
+      $('usersStatus').textContent = '保存失败：' + e.message;
+      fail(e);
+    } finally {
+      $('userSave').disabled = !canManage;
+    }
+  };
+
+  async function deleteUser(id){
+    if (!canManage) { fail(new Error('删除用户需要 manage（403）')); return; }
+    if (!window.confirm('删除用户 ' + id + ' ？')) { return; }
+    try {
+      var r = await fetch('/api/admin/users?id=' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: { 'Accept': 'application/json' }
+      });
+      var d = {};
+      try { d = await r.json(); } catch (e) {}
+      if (!r.ok) { throw new Error((d && d.error) || ('HTTP ' + r.status)); }
+      await load();
+      $('usersStatus').textContent = '已删除 ' + id + ' · journalSeq=' + (d.journalSeq == null ? '-' : d.journalSeq);
+    } catch (e) {
+      $('usersStatus').textContent = '删除失败：' + e.message;
+      fail(e);
+    }
+  }
+
   $('refresh').onclick = load;
   load();
 })();

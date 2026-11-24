@@ -16,8 +16,8 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 ## 当前状态（2026-11-23）
 
 - **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
-- **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入；Postgres/runner/metrics/audit/admin 是可选 L2。
-- **未完成**：24h soak、M6 可写管理台表单/合规、checkpoint blob GC、review 事务化。
+- **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入，`/admin` 提供可写的角色矩阵与用户表单，本地用户表 `.ui/users.json` 是唯一事实；OIDC userinfo 适配层在 `adapters/oidc/`；Postgres/runner/metrics/audit/admin 是可选 L2。
+- **未完成**：24h soak、OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、checkpoint blob GC、review 事务化。
 - 门禁：`tools/debug.sh` 当前 **57 passed / 0 failed**（以实际输出为准）。
 
 企业单租户的长期路线、Phase 0 架构和运维 runbook 在
@@ -34,7 +34,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 [docs/41](docs/41-enterprise-m1.md)；Postgres L2 adapter 见 [docs/42](docs/42-postgres-adapter.md)；
 真实浏览器 e2e 见 [docs/43](docs/43-browser-e2e.md)；M3 容器 runner 见
 [docs/44](docs/44-container-runner.md)；可观测性见 [docs/45](docs/45-metrics.md)；
-审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。
+审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；OIDC userinfo 适配层见 [docs/51](docs/51-oidc.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。
 
 ## 它解决什么问题
 
@@ -131,17 +131,26 @@ bash adapters/postgres/import.sh .ui/journal.jsonl default w1
 # 容器 runner（需要 Docker）
 python3 adapters/runner/runner.py --port 18089 \
   --workspace-root /srv/ui/workspaces --token "$RUNNER_TOKEN"
+
+# OIDC userinfo 适配层（stdlib，只监听 127.0.0.1；token 由现有 OIDC 客户端获取）
+OIDC_USERINFO_URL=https://idp.example.com/userinfo \
+OIDC_CLIENT_ID=ui-enterprise OIDC_ROLES_CLAIM=roles \
+UI_UPSTREAM_URL=http://127.0.0.1:7788 UI_PROXY_SECRET="$PROXY_SECRET" \
+OIDC_LISTEN=127.0.0.1:7789 python3 adapters/oidc/oidc_proxy.py
 ```
 
 - `/api/metrics`：受保护的 Prometheus 文本指标；
 - `/api/audit/export?since=&limit=`：带 sha256 的 journal 导出；
-- `/admin`：只读管理面（含 RBAC 角色矩阵/用户映射）；`/api/admin/roles`、`/api/admin/users` 是受 owner/manage 保护的写接口，变更写 journal；
+- `/admin`：可写管理面（角色矩阵 checkbox + 用户新增/编辑/删除表单）；`/api/admin/roles`（owner）、`/api/admin/users`（manage，owner 记录仍归 owner）每次变更写 journal；
+- 用户表 `.ui/users.json`（`{"users":[{"id","role","disabled","display"}]}`）：不存在时回退 `.ui/rbac.json` 的 `users`；损坏 fail closed；`disabled` 用户一律 403；
+- `adapters/oidc/oidc_proxy.py`：校验 Bearer → 调 userinfo → 校验 `sub` → 剥离客户端 `X-UI-*` 后注入身份头转发给 `ui serve`；不做 code flow；
 - `adapters/postgres/worker.py`：claim → 真实 `ui run` → heartbeat → done/failed；
 - `adapters/runner/runner.py`：workspace-only 挂载、无网络、资源/超时限制。
 
 详见 [docs/41](docs/41-enterprise-m1.md) / [docs/42](docs/42-postgres-adapter.md) /
 [docs/44](docs/44-container-runner.md) / [docs/45](docs/45-metrics.md) /
-[docs/46](docs/46-audit-export.md) / [docs/47](docs/47-admin.md)。
+[docs/46](docs/46-audit-export.md) / [docs/47](docs/47-admin.md) /
+[docs/51](docs/51-oidc.md)。
 
 ## 四个不一样的地方
 
@@ -218,7 +227,7 @@ $ ui replay
 | ![能力](docs/images/capabilities.png) | ![实验室](docs/images/lab.png) |
 
 首开有 3 步教练，工作区 / 能力 / 实验室各有一次性上下文提示；`?` 或 `⋯ → 重新看引导` 可重开。
-另有只读 [`/admin`](docs/47-admin.md) 管理面（含 RBAC 矩阵/用户映射），以及顶部「变更」审阅面板（diff/hunk/回退）。
+另有可写的 [`/admin`](docs/47-admin.md) 管理面（角色矩阵 + 用户表单），以及顶部「变更」审阅面板（diff/hunk/回退）。
 
 ![首开引导](docs/images/onboarding.png)
 
