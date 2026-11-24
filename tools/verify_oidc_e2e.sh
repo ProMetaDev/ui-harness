@@ -18,12 +18,12 @@ native_build() {
   if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 \
     && [ ! -x "$HOME/mingw64/root/usr/bin/x86_64-w64-mingw32-gcc-posix" ] \
     && [ ! -x "$HOME/mingw64/root/usr/bin/x86_64-w64-mingw32-gcc" ]; then
-    return 1
+    return 1  # 没有链接器：不是"构建失败"，是这台机器不适用
   fi
   echo "== 没有 $UI_EXE，先构建 ui.exe =="
-  bash "$UI_ROOT/tools/build_windows.sh" || return 1
+  bash "$UI_ROOT/tools/build_windows.sh" || return 3
   mkdir -p "$UI_ROOT/out"
-  cp "$UI_TARGET_DIR/x86_64-pc-windows-gnu/release/ui.exe" "$UI_EXE" || return 1
+  cp "$UI_TARGET_DIR/x86_64-pc-windows-gnu/release/ui.exe" "$UI_EXE" || return 3
 }
 
 wsl_build() {
@@ -52,19 +52,29 @@ wsl_build() {
   echo "== 没有 $UI_EXE，尝试用 WSL($chosen) 里的 cargo/mingw 构建 =="
   # 内层变量必须留给 WSL 的 bash 展开：wsl.exe 的命令行还会做一层变量替换，
   # 所以用 \$ 把 `$` 保留到 bash（否则 source env.sh 之前就被替换成空串）。
-  wsl.exe -d "$chosen" bash -lc 'cd '"$wsl_root"' && source tools/env.sh && bash tools/build_windows.sh && mkdir -p out && cp "\$UI_TARGET_DIR/x86_64-pc-windows-gnu/release/ui.exe" out/ui.exe' </dev/null
-  [ -f "$UI_EXE" ] || return 2
+  wsl.exe -d "$chosen" bash -lc 'cd '"$wsl_root"' && source tools/env.sh && bash tools/build_windows.sh && mkdir -p out && cp "\$UI_TARGET_DIR/x86_64-pc-windows-gnu/release/ui.exe" out/ui.exe' </dev/null || return 3
+  [ -f "$UI_EXE" ] || return 3
 }
 
 if [ ! -f "$UI_EXE" ]; then
-  if native_build; then
-    :
-  elif wsl_build; then
-    :
-  else
-    echo "SKIP: 找不到 $UI_EXE，也没有可用的 cargo/mingw（或 WSL）构建环境。"
-    echo "      先 bash tools/build_windows.sh，把产物复制到 out/ui.exe，或用 UI_EXE=... 指定。"
-    exit 0
+  native_build
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "FAIL: ui.exe 构建失败（native）" >&2
+    exit 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    wsl_build
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+      echo "FAIL: ui.exe 构建失败（WSL）" >&2
+      exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+      echo "SKIP: 找不到 $UI_EXE，也没有可用的 cargo/mingw（或 WSL）构建环境。"
+      echo "      先 bash tools/build_windows.sh，把产物复制到 out/ui.exe，或用 UI_EXE=... 指定。"
+      exit 0
+    fi
   fi
 fi
 
