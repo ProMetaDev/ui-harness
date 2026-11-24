@@ -107,6 +107,9 @@ struct Hub {
     audit_hmac_key: Option<String>,
     /// 可选：密钥标识，给外部验证方做轮换选择。
     audit_key_id: Option<String>,
+    /// `.ui/rbac.json` 的内存态。启动时加载；损坏时 `Invalid`，所有管理面请求
+    /// fail closed（503），绝不静默退回默认矩阵。
+    rbac: Mutex<RbacConfig>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -115,17 +118,291 @@ struct Actor {
     roles: Vec<String>,
 }
 
+/// 一个角色在三个能力上的取值。矩阵是唯一的权限来源：
+/// 硬编码的 `matches!(role, "owner" | ...)` 已经删掉，避免文件和代码各说一套。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RolePerms {
+    write: bool,
+    audit: bool,
+    manage: bool,
+}
+
+/// 解析后的 `.ui/rbac.json`。`BTreeMap` 让 GET 输出和落盘顺序稳定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Rbac {
+    roles: std::collections::BTreeMap<String, RolePerms>,
+    users: std::collections::BTreeMap<String, String>,
+}
+
+impl Rbac {
+    /// 文件不存在时的内置矩阵：与 M6 文档一致，也是旧硬编码行为。
+    fn default_matrix() -> Rbac {
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("viewer".into(), RolePerms::default());
+        roles.insert(
+            "operator".into(),
+            RolePerms {
+                write: true,
+                audit: false,
+                manage: false,
+            },
+        );
+        roles.insert(
+            "auditor".into(),
+            RolePerms {
+                write: false,
+                audit: true,
+                manage: false,
+            },
+        );
+        roles.insert(
+            "admin".into(),
+            RolePerms {
+                write: true,
+                audit: true,
+                manage: true,
+            },
+        );
+        roles.insert(
+            "owner".into(),
+            RolePerms {
+                write: true,
+                audit: true,
+                manage: true,
+            },
+        );
+        Rbac {
+            roles,
+            users: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn to_json(&self) -> Json {
+        let roles = self
+            .roles
+            .iter()
+            .map(|(name, p)| {
+                (
+                    name.clone(),
+                    Json::obj(vec![
+                        ("write", Json::Bool(p.write)),
+                        ("audit", Json::Bool(p.audit)),
+                        ("manage", Json::Bool(p.manage)),
+                    ]),
+                )
+            })
+            .collect();
+        let users = self
+            .users
+            .iter()
+            .map(|(id, role)| (id.clone(), Json::from(role.as_str())))
+            .collect();
+        Json::obj(vec![
+            ("roles", Json::Obj(roles)),
+            ("users", Json::Obj(users)),
+        ])
+    }
+
+    fn from_json(value: &Json) -> Result<Rbac, String> {
+        let Json::Obj(fields) = value else {
+            return Err("顶层必须是 JSON 对象".to_string());
+        };
+        if let Some((key, _)) = fields.iter().find(|(k, _)| k != "roles" && k != "users") {
+            return Err(format!("未知顶层字段 {}（只允许 roles/users）", key));
+        }
+        let roles_json = fields
+            .iter()
+            .find(|(k, _)| k == "roles")
+            .map(|(_, v)| v)
+            .ok_or("缺少 roles 对象")?;
+        let Json::Obj(role_items) = roles_json else {
+            return Err("roles 必须是对象".to_string());
+        };
+        let roles = parse_roles(role_items)?;
+        if roles.is_empty() {
+            return Err("roles 不能为空：至少保留 owner".to_string());
+        }
+        let mut users = std::collections::BTreeMap::new();
+        if let Some((_, users_json)) = fields.iter().find(|(k, _)| k == "users") {
+            let Json::Obj(user_items) = users_json else {
+                return Err("users 必须是对象".to_string());
+            };
+            for (raw_id, raw_role) in user_items {
+                let id = raw_id.trim();
+                if !valid_user_id(id) {
+                    return Err(format!("非法用户 id: {:?}", raw_id));
+                }
+                let role = raw_role
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .ok_or_else(|| format!("用户 {} 的角色必须是非空字符串", id))?
+                    .to_ascii_lowercase();
+                if !roles.contains_key(&role) {
+                    return Err(format!("用户 {} 映射到未知角色 {}", id, role));
+                }
+                if users.insert(id.to_string(), role).is_some() {
+                    return Err(format!("重复的用户 id: {}", id));
+                }
+            }
+        }
+        Ok(Rbac { roles, users })
+    }
+}
+
+/// 配置状态单独建模：`Invalid` 不是"当作默认矩阵"，而是整条请求 fail closed。
+#[derive(Clone, Debug)]
+enum RbacConfig {
+    Valid(Rbac),
+    Invalid(String),
+}
+
+impl Default for RbacConfig {
+    fn default() -> Self {
+        RbacConfig::Valid(Rbac::default_matrix())
+    }
+}
+
+fn valid_role_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+fn valid_user_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.chars().any(|c| c.is_control())
+}
+
+fn role_perms(value: &Json, allow_name: bool) -> Result<RolePerms, String> {
+    let Json::Obj(items) = value else {
+        return Err("角色定义必须是对象".to_string());
+    };
+    if let Some((key, _)) = items.iter().find(|(k, _)| {
+        !matches!(k.as_str(), "write" | "audit" | "manage") && !(allow_name && k == "name")
+    }) {
+        return Err(format!(
+            "未知权限字段 {}（只允许 write/audit/manage）",
+            key
+        ));
+    }
+    let bool_at = |name: &str| match value.get(name) {
+        Some(Json::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("{} 必须是布尔值", name)),
+        None => Err(format!("缺少 {} 布尔字段", name)),
+    };
+    Ok(RolePerms {
+        write: bool_at("write")?,
+        audit: bool_at("audit")?,
+        manage: bool_at("manage")?,
+    })
+}
+
+fn parse_roles(
+    items: &[(String, Json)],
+) -> Result<std::collections::BTreeMap<String, RolePerms>, String> {
+    let mut roles = std::collections::BTreeMap::new();
+    for (raw_name, spec) in items {
+        let name = raw_name.trim().to_ascii_lowercase();
+        if !valid_role_name(&name) {
+            return Err(format!("非法角色名: {:?}（只允许字母数字 _ - .）", raw_name));
+        }
+        if roles.contains_key(&name) {
+            return Err(format!("重复的角色名: {}", name));
+        }
+        let perms = role_perms(spec, false).map_err(|e| format!("角色 {}: {}", name, e))?;
+        roles.insert(name, perms);
+    }
+    Ok(roles)
+}
+
+fn load_rbac(workspace: &std::path::Path) -> RbacConfig {
+    let path = workspace.join(".ui").join("rbac.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return RbacConfig::Valid(Rbac::default_matrix())
+        }
+        Err(e) => return RbacConfig::Invalid(format!(".ui/rbac.json 不可读: {}", e)),
+    };
+    let parsed = match json::parse(text.trim()) {
+        Ok(v) => v,
+        Err(e) => return RbacConfig::Invalid(format!(".ui/rbac.json 不是合法 JSON: {}", e)),
+    };
+    match Rbac::from_json(&parsed) {
+        Ok(rbac) => RbacConfig::Valid(rbac),
+        Err(e) => RbacConfig::Invalid(format!(".ui/rbac.json 无效: {}", e)),
+    }
+}
+
+fn save_rbac(workspace: &std::path::Path, rbac: &Rbac) -> Result<(), String> {
+    let path = workspace.join(".ui").join("rbac.json");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("创建 {} 失败: {}", dir.display(), e))?;
+    }
+    let mut text = rbac.to_json().to_pretty();
+    text.push('\n');
+    // 写临时文件再 rename：读者要么看到旧矩阵，要么看到新矩阵，不会读到半个 JSON。
+    // 序号只用于避免同一毫秒内的两个写者抢同一个临时名。
+    static RBAC_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = RBAC_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        "rbac.json.tmp-{}-{}-{}",
+        std::process::id(),
+        ui_core::time::now_ms(),
+        seq
+    ));
+    std::fs::write(&tmp, text.as_bytes())
+        .map_err(|e| format!("写 {} 失败: {}", tmp.display(), e))?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("替换 {} 失败: {}", path.display(), e))
+        }
+    }
+}
+
+/// 权限快照：一次请求只解析一次，避免同一请求里矩阵被并发改动后前后不一致。
+#[derive(Clone, Copy, Debug, Default)]
+struct Perms {
+    write: bool,
+    audit: bool,
+    manage: bool,
+    owner: bool,
+}
+
 impl Actor {
-    fn can_write(&self) -> bool {
-        self.roles
-            .iter()
-            .any(|r| matches!(r.as_str(), "owner" | "admin" | "operator"))
+    fn perms(&self, rbac: &Rbac) -> Perms {
+        let mut out = Perms::default();
+        for role in &self.roles {
+            let Some(p) = rbac.roles.get(role) else {
+                continue;
+            };
+            out.write |= p.write;
+            out.audit |= p.audit;
+            out.manage |= p.manage;
+            // "owner only" 是角色名约束，不是"manage 更大一点"。
+            if role == "owner" {
+                out.owner = true;
+            }
+        }
+        out
     }
-    fn can_audit(&self) -> bool {
-        self.roles
-            .iter()
-            .any(|r| matches!(r.as_str(), "owner" | "admin" | "auditor"))
+}
+
+/// `.ui/rbac.json` 的用户映射只覆盖角色；代理密钥/token 仍然是前置门槛，
+/// 没通过那两道门的请求根本走不到这里。
+fn apply_user_mapping(hub: &Hub, mut actor: Actor) -> Actor {
+    let cfg = hub_lock(&hub.rbac);
+    if let RbacConfig::Valid(rbac) = &*cfg {
+        if let Some(role) = rbac.users.get(&actor.id) {
+            actor.roles = vec![role.clone()];
+        }
     }
+    actor
 }
 
 /// 定长比较：不按字节提前返回，避免用响应时间猜前缀。
@@ -870,6 +1147,12 @@ pub fn serve(
         None => std::path::Path::new(ready.str_at("workspace").unwrap_or(".")).join("experiments"),
     };
     hub0.workspace = std::path::PathBuf::from(ready.str_at("workspace").unwrap_or("."));
+    // RBAC 在监听之前加载：文件坏了宁可起不来，也不能带着一份"看起来正常"的
+    // 权限矩阵对外服务。缺失 = 内置矩阵；损坏 = 拒绝启动。
+    hub0.rbac = Mutex::new(load_rbac(&hub0.workspace));
+    if let RbacConfig::Invalid(e) = &*hub_lock(&hub0.rbac) {
+        return Err(format!("RBAC 配置不可用，拒绝启动（fail closed）: {}", e));
+    }
     hub0.epoch = ui_core::time::now_ms();
     let initial_session = session_arg.unwrap_or("default").to_string();
     *hub0.session.lock().unwrap() = initial_session.clone();
@@ -1205,7 +1488,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
     if hub.trusted_proxy.is_some() && !proxy_secret_ok(&hub, &headers) {
         return unauthorized(&mut stream, path.starts_with("/api"));
     }
-    let actor = actor_from(&hub, &headers, peer);
+    let actor = actor_from(&hub, &headers, peer).map(|a| apply_user_mapping(&hub, a));
 
     // CSRF：Cookie 是 SameSite=Lax，但 Lax 只保证 same-site，不保证 same-origin；
     // 127.0.0.1 上另一个端口的页面也能带 Cookie 发简单 POST。浏览器会自动带
@@ -1242,30 +1525,105 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         }
     }
 
+    // 管理面没有 actor 就 401：即使本地单用户模式也不给匿名改权限的机会。
+    if path.starts_with("/api/admin/") && actor.is_none() {
+        return unauthorized(&mut stream, true);
+    }
+
     if hub.trusted_proxy.is_some() && path.starts_with("/api/") && path != "/api/ready" {
         let Some(actor) = actor.as_ref() else {
             return unauthorized(&mut stream, true);
         };
-        if method != "GET" && !actor.can_write() {
-            return json_response_status(
-                &mut stream,
-                "403 Forbidden",
-                "{\"ok\":false,\"error\":\"当前角色没有写权限\"}",
-            );
-        }
-        if path == "/api/reviews" && !(actor.can_write() || actor.can_audit()) {
-            return json_response_status(
-                &mut stream,
-                "403 Forbidden",
-                "{\"ok\":false,\"error\":\"当前角色没有审计权限\"}",
-            );
-        }
-        if path == "/api/audit/export" && !actor.can_audit() {
-            return json_response_status(
-                &mut stream,
-                "403 Forbidden",
-                "{\"ok\":false,\"error\":\"audit export 需要 auditor/admin\"}",
-            );
+        let perms = {
+            let cfg = hub_lock(&hub.rbac);
+            match &*cfg {
+                RbacConfig::Valid(rbac) => actor.perms(rbac),
+                RbacConfig::Invalid(e) => {
+                    let message = format!("RBAC 配置不可用：{}", e);
+                    return json_response_status(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("error", Json::from(message)),
+                        ])
+                        .to_compact(),
+                    );
+                }
+            }
+        };
+        match path.as_str() {
+            "/api/admin/rbac" => {
+                if method != "GET" {
+                    return json_response_status(
+                        &mut stream,
+                        "405 Method Not Allowed",
+                        "{\"ok\":false,\"error\":\"GET only\"}",
+                    );
+                }
+                if !(perms.audit || perms.manage) {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"读取 RBAC 需要 audit 或 manage\"}",
+                    );
+                }
+            }
+            "/api/admin/roles" => {
+                if method != "PUT" {
+                    return json_response_status(
+                        &mut stream,
+                        "405 Method Not Allowed",
+                        "{\"ok\":false,\"error\":\"PUT only\"}",
+                    );
+                }
+                if !perms.owner {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"只有 owner 能修改角色矩阵\"}",
+                    );
+                }
+            }
+            "/api/admin/users" => {
+                if method != "PUT" && method != "DELETE" {
+                    return json_response_status(
+                        &mut stream,
+                        "405 Method Not Allowed",
+                        "{\"ok\":false,\"error\":\"PUT/DELETE only\"}",
+                    );
+                }
+                if !perms.manage {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"修改用户映射需要 manage\"}",
+                    );
+                }
+            }
+            _ => {
+                if method != "GET" && !perms.write {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"当前角色没有写权限\"}",
+                    );
+                }
+                if path == "/api/reviews" && !(perms.write || perms.audit) {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"当前角色没有审计权限\"}",
+                    );
+                }
+                if path == "/api/audit/export" && !perms.audit {
+                    return json_response_status(
+                        &mut stream,
+                        "403 Forbidden",
+                        "{\"ok\":false,\"error\":\"audit export 需要 auditor/admin\"}",
+                    );
+                }
+            }
         }
     }
 
@@ -1574,6 +1932,231 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     "500 Internal Server Error",
                     &Json::obj(vec![("ok", Json::Bool(false)), ("error", Json::from(e))])
                         .to_compact(),
+                ),
+            }
+        }
+        // ── RBAC 管理 API ──（权限在请求入口按矩阵判定，这里只做校验与落盘）
+        ("GET", "/api/admin/rbac") => match current_rbac(&hub) {
+            Ok(rbac) => json_response(&mut stream, &rbac_payload(&rbac).to_compact()),
+            Err(e) => rbac_unavailable(&mut stream, &e),
+        },
+        ("PUT", "/api/admin/roles") => {
+            let mut next = match current_rbac(&hub) {
+                Ok(r) => r,
+                Err(e) => return rbac_unavailable(&mut stream, &e),
+            };
+            let value = match json::parse(body.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_body(&format!("JSON 解析失败: {}", e)),
+                    )
+                }
+            };
+            if let Err(e) = apply_role_update(&mut next, &value) {
+                return json_response_status(&mut stream, "400 Bad Request", &error_body(&e));
+            }
+            if let Err(e) = persist_rbac(&hub, &next) {
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &error_body(&format!("角色矩阵未更新：{}", e)),
+                );
+            }
+            let actor_id = actor
+                .as_ref()
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let roles_json = next.to_json().get("roles").cloned().unwrap_or(Json::Null);
+            match audit_rbac(
+                &hub,
+                "rbac/role-update",
+                &actor_id,
+                Json::obj(vec![("roles", roles_json)]),
+            ) {
+                Ok(seq) => {
+                    let mut out = rbac_payload(&next);
+                    out.set("ok", Json::Bool(true));
+                    out.set("journalSeq", Json::from(seq));
+                    json_response(&mut stream, &out.to_compact())
+                }
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &Json::obj(vec![
+                        ("ok", Json::Bool(false)),
+                        ("applied", Json::Bool(true)),
+                        ("error", Json::from(format!("角色矩阵已更新，但审计失败: {}", e))),
+                    ])
+                    .to_compact(),
+                ),
+            }
+        }
+        ("PUT", "/api/admin/users") => {
+            let mut next = match current_rbac(&hub) {
+                Ok(r) => r,
+                Err(e) => return rbac_unavailable(&mut stream, &e),
+            };
+            let value = match json::parse(body.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_body(&format!("JSON 解析失败: {}", e)),
+                    )
+                }
+            };
+            let id = match value.get("id").and_then(Json::as_str) {
+                Some(s) => s.trim().to_string(),
+                None => {
+                    return json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_body("缺少字符串字段 id"),
+                    )
+                }
+            };
+            if !valid_user_id(&id) {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_body("非法用户 id（1..=256，不能含控制字符）"),
+                );
+            }
+            let role = match value.get("role").and_then(Json::as_str) {
+                Some(s) => s.trim().to_ascii_lowercase(),
+                None => {
+                    return json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_body("缺少字符串字段 role（空串 = 删除映射）"),
+                    )
+                }
+            };
+            let action;
+            if role.is_empty() {
+                if next.users.remove(&id).is_none() {
+                    return json_response_status(
+                        &mut stream,
+                        "404 Not Found",
+                        &error_body("用户映射不存在"),
+                    );
+                }
+                action = "revoke";
+            } else {
+                if !next.roles.contains_key(&role) {
+                    return json_response_status(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_body(&format!("未知角色 {}（先写角色矩阵）", role)),
+                    );
+                }
+                next.users.insert(id.clone(), role.clone());
+                action = "grant";
+            }
+            if let Err(e) = persist_rbac(&hub, &next) {
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &error_body(&format!("用户映射未更新：{}", e)),
+                );
+            }
+            let actor_id = actor
+                .as_ref()
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            match audit_rbac(
+                &hub,
+                "rbac/user-update",
+                &actor_id,
+                Json::obj(vec![
+                    ("id", Json::from(id.as_str())),
+                    ("role", Json::from(role.as_str())),
+                    ("action", Json::from(action)),
+                ]),
+            ) {
+                Ok(seq) => {
+                    let mut out = rbac_payload(&next);
+                    out.set("ok", Json::Bool(true));
+                    out.set("journalSeq", Json::from(seq));
+                    json_response(&mut stream, &out.to_compact())
+                }
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &Json::obj(vec![
+                        ("ok", Json::Bool(false)),
+                        ("applied", Json::Bool(true)),
+                        ("error", Json::from(format!("用户映射已更新，但审计失败: {}", e))),
+                    ])
+                    .to_compact(),
+                ),
+            }
+        }
+        ("DELETE", "/api/admin/users") => {
+            let mut next = match current_rbac(&hub) {
+                Ok(r) => r,
+                Err(e) => return rbac_unavailable(&mut stream, &e),
+            };
+            let id = query
+                .split('&')
+                .find_map(|kv| kv.split_once('='))
+                .filter(|(k, _)| *k == "id")
+                .map(|(_, v)| pct_decode(v).trim().to_string())
+                .unwrap_or_default();
+            if !valid_user_id(&id) {
+                return json_response_status(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_body("缺少或非法 id（?id=...）"),
+                );
+            }
+            if next.users.remove(&id).is_none() {
+                return json_response_status(
+                    &mut stream,
+                    "404 Not Found",
+                    &error_body("用户映射不存在"),
+                );
+            }
+            if let Err(e) = persist_rbac(&hub, &next) {
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &error_body(&format!("用户映射未更新：{}", e)),
+                );
+            }
+            let actor_id = actor
+                .as_ref()
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            match audit_rbac(
+                &hub,
+                "rbac/user-update",
+                &actor_id,
+                Json::obj(vec![
+                    ("id", Json::from(id.as_str())),
+                    ("role", Json::from("")),
+                    ("action", Json::from("revoke")),
+                ]),
+            ) {
+                Ok(seq) => {
+                    let mut out = rbac_payload(&next);
+                    out.set("ok", Json::Bool(true));
+                    out.set("journalSeq", Json::from(seq));
+                    json_response(&mut stream, &out.to_compact())
+                }
+                Err(e) => json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &Json::obj(vec![
+                        ("ok", Json::Bool(false)),
+                        ("applied", Json::Bool(true)),
+                        ("error", Json::from(format!("用户映射已更新，但审计失败: {}", e))),
+                    ])
+                    .to_compact(),
                 ),
             }
         }
@@ -2317,6 +2900,105 @@ fn audit_export(hub: &Hub, since: Option<u64>, limit: Option<usize>) -> Result<J
         ("keyId", Json::from(key_id)),
         ("hmac", hmac.map(Json::from).unwrap_or(Json::Null)),
     ]))
+}
+
+fn current_rbac(hub: &Hub) -> Result<Rbac, String> {
+    match &*hub_lock(&hub.rbac) {
+        RbacConfig::Valid(rbac) => Ok(rbac.clone()),
+        RbacConfig::Invalid(e) => Err(e.clone()),
+    }
+}
+
+/// GET /api/admin/rbac 的输出。`source` 明确告诉人这份矩阵是从哪来的。
+fn rbac_payload(rbac: &Rbac) -> Json {
+    let mut out = rbac.to_json();
+    out.set("source", Json::from(".ui/rbac.json"));
+    out
+}
+
+fn rbac_unavailable(stream: &mut TcpStream, error: &str) -> std::io::Result<()> {
+    json_response_status(
+        stream,
+        "503 Service Unavailable",
+        &Json::obj(vec![
+            ("ok", Json::Bool(false)),
+            ("error", Json::from(format!("RBAC 配置不可用：{}", error))),
+        ])
+        .to_compact(),
+    )
+}
+
+fn error_body(message: &str) -> String {
+    Json::obj(vec![
+        ("ok", Json::Bool(false)),
+        ("error", Json::from(message)),
+    ])
+    .to_compact()
+}
+
+/// 先原子落盘，再换内存态：盘上失败时内存保持旧矩阵，避免"响应说成功、重启就回退"。
+fn persist_rbac(hub: &Hub, next: &Rbac) -> Result<(), String> {
+    save_rbac(&hub.workspace, next)?;
+    *hub_lock(&hub.rbac) = RbacConfig::Valid(next.clone());
+    Ok(())
+}
+
+/// 写当前 session 的 journal。kind 固定为 `rbac/role-update` / `rbac/user-update`。
+fn audit_rbac(hub: &Hub, kind: &str, actor: &str, payload: Json) -> Result<u64, String> {
+    let session = {
+        let s = hub_lock(&hub.session).clone();
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
+    };
+    let path = session_file(&hub.workspace, &session);
+    let mut journal =
+        ui_core::Journal::open(&path).map_err(|e| format!("写审计日志失败: {}", e))?;
+    let mut payload = payload;
+    payload.set("actor", Json::from(actor));
+    let event = journal
+        .append(kind, payload)
+        .map_err(|e| format!("写审计日志失败: {}", e))?;
+    Ok(event.u64_at("seq").unwrap_or(0))
+}
+
+/// PUT /api/admin/roles 的两种形状：
+/// - `{"roles": {...}}`：整份替换（用户映射必须仍指向存在的角色）；
+/// - `{"name": "operator", "write": true, "audit": false, "manage": false}`：改一个。
+fn apply_role_update(rbac: &mut Rbac, value: &Json) -> Result<(), String> {
+    if let Some(roles) = value.get("roles") {
+        let Json::Obj(items) = roles else {
+            return Err("roles 必须是对象".to_string());
+        };
+        let parsed = parse_roles(items)?;
+        if parsed.is_empty() {
+            return Err("roles 不能为空：至少保留 owner".to_string());
+        }
+        if let Some((id, role)) = rbac
+            .users
+            .iter()
+            .find(|(_, role)| !parsed.contains_key(*role))
+        {
+            return Err(format!("用户 {} 映射的角色 {} 会被删除，先改用户", id, role));
+        }
+        rbac.roles = parsed;
+        return Ok(());
+    }
+    let name = value
+        .get("name")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("缺少 roles 对象或 name 字段")?
+        .to_ascii_lowercase();
+    if !valid_role_name(&name) {
+        return Err(format!("非法角色名: {}（只允许字母数字 _ - .）", name));
+    }
+    let perms = role_perms(value, true)?;
+    rbac.roles.insert(name, perms);
+    Ok(())
 }
 
 fn session_list(ws: &std::path::Path, current: &str) -> Json {
@@ -3071,6 +3753,10 @@ mod tests {
         assert!(head.contains("200 OK"), "{}", head);
         assert!(body.contains("管理面"), "admin page missing title");
         assert!(body.contains("/api/audit/export"), "admin page missing audit link");
+        assert!(
+            body.contains("/api/admin/rbac"),
+            "admin page missing read-only RBAC table"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -3095,6 +3781,368 @@ mod tests {
         hub.trusted_proxy = Some("loopback".into());
         hub.trusted_proxy_secret = Some(secret.to_string());
         Arc::new(hub)
+    }
+
+    fn write_rbac_config(ws: &std::path::Path, rbac: &Rbac) {
+        std::fs::create_dir_all(ws.join(".ui")).unwrap();
+        std::fs::write(
+            ws.join(".ui").join("rbac.json"),
+            rbac.to_json().to_pretty() + "\n",
+        )
+        .unwrap();
+    }
+
+    /// 带受信代理密钥与身份头的请求。
+    fn proxy_call(
+        hub: Arc<Hub>,
+        method: &str,
+        path: &str,
+        body: &str,
+        secret: &str,
+        user: &str,
+        roles: &str,
+    ) -> (String, String) {
+        http_request(
+            hub,
+            &format!(
+                "{} {} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nX-UI-Proxy-Secret: {}\r\nX-UI-User: {}\r\nX-UI-Roles: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method,
+                path,
+                secret,
+                user,
+                roles,
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    #[test]
+    fn viewer_cannot_read_admin_rbac_but_auditor_can() {
+        let ws = temp_workspace("rbac-read");
+        let secret = "rbac-read-secret";
+        let hub = trusted_hub(&ws, secret);
+
+        let (head, _) = proxy_call(
+            hub.clone(),
+            "GET",
+            "/api/admin/rbac",
+            "",
+            secret,
+            "v@example.com",
+            "viewer",
+        );
+        assert!(head.contains("403"), "viewer 读 RBAC 必须 403: {}", head);
+
+        let (head, body) = proxy_call(
+            hub.clone(),
+            "GET",
+            "/api/admin/rbac",
+            "",
+            secret,
+            "a@example.com",
+            "auditor",
+        );
+        assert!(head.contains("200"), "auditor 应能读 RBAC: {} {}", head, body);
+        let parsed = json::parse(body.trim()).unwrap();
+        let roles = parsed.get("roles").expect("roles");
+        assert_eq!(
+            roles.bool_at("owner").or_else(|| roles.get("owner").and_then(|r| r.bool_at("manage"))),
+            Some(true),
+            "应返回角色矩阵: {}",
+            body
+        );
+        assert!(parsed.get("users").is_some(), "应返回用户映射: {}", body);
+
+        // 没有身份头像 /api/admin/* 一样 401，而不是把空 actor 当 viewer。
+        let (head, _) = http_request(
+            hub.clone(),
+            &format!(
+                "GET /api/admin/rbac HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: {}\r\nConnection: close\r\n\r\n",
+                secret
+            ),
+        );
+        assert!(head.contains("401"), "无 actor 必须 401: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn operator_cannot_change_roles_but_owner_can_and_audit_lands() {
+        let ws = temp_workspace("rbac-role-update");
+        let secret = "rbac-role-secret";
+        let hub = trusted_hub(&ws, secret);
+        let body = r#"{"name":"operator","write":false,"audit":false,"manage":false}"#;
+
+        let (head, _) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/roles",
+            body,
+            secret,
+            "o@example.com",
+            "operator",
+        );
+        assert!(head.contains("403"), "operator 改角色必须 403: {}", head);
+        assert!(
+            !ws.join(".ui").join("rbac.json").exists(),
+            "403 不能留下任何落盘副作用"
+        );
+
+        let (head, out) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/roles",
+            body,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "owner 应能改角色: {} {}", head, out);
+        let saved = std::fs::read_to_string(ws.join(".ui").join("rbac.json")).unwrap();
+        let parsed = json::parse(saved.trim()).unwrap();
+        assert_eq!(
+            parsed
+                .get("roles")
+                .and_then(|r| r.get("operator"))
+                .and_then(|r| r.bool_at("write")),
+            Some(false),
+            "新矩阵必须原子落盘: {}",
+            saved
+        );
+
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "审计日志不该损坏");
+        assert!(
+            events.iter().any(|e| {
+                e.str_at("kind") == Some("rbac/role-update")
+                    && e.str_at("actor") == Some("owner@example.com")
+            }),
+            "角色更新必须写审计事件"
+        );
+
+        // 权限立即生效：同一 operator 现在没有 write，连 /api/say 都 403。
+        let (head, _) = proxy_call(
+            hub,
+            "POST",
+            "/api/say",
+            "{\"text\":\"hi\"}",
+            secret,
+            "o@example.com",
+            "operator",
+        );
+        assert!(head.contains("403"), "矩阵更新后 operator 不能写: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rbac_user_mapping_overrides_header_roles() {
+        let ws = temp_workspace("rbac-user-map");
+        let secret = "rbac-map-secret";
+        let mut rbac = Rbac::default_matrix();
+        rbac.users
+            .insert("alice@example.com".into(), "operator".into());
+        rbac.users.insert("bob@example.com".into(), "viewer".into());
+        write_rbac_config(&ws, &rbac);
+
+        let hub = trusted_hub(&ws, secret);
+        *hub.rbac.lock().unwrap() = load_rbac(&ws);
+
+        // 代理给的是 viewer，配置把 alice 映射为 operator：映射覆盖头里的角色。
+        let (head, out) = proxy_call(
+            hub.clone(),
+            "POST",
+            "/api/say",
+            "{\"text\":\"hi\"}",
+            secret,
+            "alice@example.com",
+            "viewer",
+        );
+        assert!(head.contains("200"), "用户映射应抬到 operator: {} {}", head, out);
+
+        // 反向也必须成立：头里写 owner，映射为 viewer 就只能读，管理面 403。
+        let (head, _) = proxy_call(
+            hub.clone(),
+            "GET",
+            "/api/admin/rbac",
+            "",
+            secret,
+            "bob@example.com",
+            "owner",
+        );
+        assert!(head.contains("403"), "用户映射必须能降权: {}", head);
+
+        // 未映射用户仍按头里的 viewer：不能写。
+        let (head, _) = proxy_call(
+            hub,
+            "POST",
+            "/api/say",
+            "{\"text\":\"hi\"}",
+            secret,
+            "eve@example.com",
+            "viewer",
+        );
+        assert!(head.contains("403"), "未映射用户按原角色判定: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn corrupt_rbac_json_fails_closed() {
+        let ws = temp_workspace("rbac-corrupt");
+        std::fs::create_dir_all(ws.join(".ui")).unwrap();
+        std::fs::write(ws.join(".ui").join("rbac.json"), "{ not-json").unwrap();
+        assert!(
+            matches!(load_rbac(&ws), RbacConfig::Invalid(_)),
+            "损坏的 rbac.json 必须解析失败，不能静默回退默认矩阵"
+        );
+
+        let hub = trusted_hub(&ws, "rbac-corrupt-secret");
+        *hub.rbac.lock().unwrap() = load_rbac(&ws);
+        let (head, _) = proxy_call(
+            hub.clone(),
+            "GET",
+            "/api/admin/rbac",
+            "",
+            "rbac-corrupt-secret",
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("503"), "损坏后读 RBAC 必须 fail closed: {}", head);
+        let (head, _) = proxy_call(
+            hub,
+            "PUT",
+            "/api/admin/roles",
+            r#"{"name":"operator","write":true,"audit":false,"manage":false}"#,
+            "rbac-corrupt-secret",
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("503"), "损坏后写 RBAC 必须 fail closed: {}", head);
+
+        // 结构合法但字段类型错误，同样拒绝。
+        std::fs::write(
+            ws.join(".ui").join("rbac.json"),
+            r#"{"roles":{"operator":{"write":"yes","audit":false,"manage":false}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(load_rbac(&ws), RbacConfig::Invalid(_)));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rbac_role_update_validates_names_and_booleans() {
+        let ws = temp_workspace("rbac-validate");
+        let secret = "rbac-validate-secret";
+        let hub = trusted_hub(&ws, secret);
+        for body in [
+            r#"{"name":"bad name","write":true,"audit":false,"manage":false}"#,
+            r#"{"name":"operator","write":true}"#,
+            r#"{"roles":{"operator":{"write":true,"audit":"no","manage":false}}}"#,
+            r#"{"roles":{"operator":{"write":true,"audit":false,"manage":false,"typo":true}}}"#,
+        ] {
+            let (head, out) = proxy_call(
+                hub.clone(),
+                "PUT",
+                "/api/admin/roles",
+                body,
+                secret,
+                "owner@example.com",
+                "owner",
+            );
+            assert!(head.contains("400"), "非法角色定义应 400: {} {}", head, out);
+        }
+        let (head, out) = proxy_call(
+            hub,
+            "PUT",
+            "/api/admin/users",
+            r#"{"id":"x@example.com","role":"no-such-role"}"#,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("400"), "未知角色应 400: {} {}", head, out);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rbac_api_never_writes_proxy_secret() {
+        let ws = temp_workspace("rbac-secret");
+        let secret = "not-a-real-rbac-credential";
+        let hub = trusted_hub(&ws, secret);
+
+        let (head, body) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/users",
+            r#"{"id":"alice@example.com","role":"operator"}"#,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "{} {}", head, body);
+        assert!(!body.contains(secret), "响应里不得出现代理密钥");
+
+        let (head, body) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/roles",
+            r#"{"name":"custom","write":true,"audit":false,"manage":false}"#,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "{} {}", head, body);
+
+        let (head, body) = proxy_call(
+            hub.clone(),
+            "DELETE",
+            "/api/admin/users?id=alice%40example.com",
+            "",
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "{} {}", head, body);
+        assert!(!body.contains(secret), "响应里不得出现代理密钥");
+
+        let rbac_text = std::fs::read_to_string(ws.join(".ui").join("rbac.json")).unwrap();
+        assert!(!rbac_text.contains(secret), "rbac.json 不得写进代理密钥");
+        let journal_text = std::fs::read_to_string(ws.join(".ui").join("journal.jsonl"))
+            .unwrap_or_default();
+        assert!(
+            journal_text.contains("rbac/user-update") && journal_text.contains("rbac/role-update"),
+            "两类变更都要落审计"
+        );
+        assert!(!journal_text.contains(secret), "journal 不得写进代理密钥");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rbac_audit_goes_to_the_current_session_journal() {
+        let ws = temp_workspace("rbac-session");
+        let secret = "rbac-session-secret";
+        let hub = trusted_hub(&ws, secret);
+        *hub.session.lock().unwrap() = "ops".to_string();
+
+        let (head, out) = proxy_call(
+            hub,
+            "PUT",
+            "/api/admin/users",
+            r#"{"id":"alice@example.com","role":"operator"}"#,
+            secret,
+            "owner@example.com",
+            "owner",
+        );
+        assert!(head.contains("200"), "{} {}", head, out);
+        let session_journal = ws.join(".ui").join("sessions").join("ops.jsonl");
+        assert!(session_journal.exists(), "审计必须写当前 session journal");
+        let text = std::fs::read_to_string(&session_journal).unwrap();
+        assert!(text.contains("rbac/user-update"), "{}", text);
+        assert!(
+            !ws.join(".ui").join("journal.jsonl").exists(),
+            "不能误写到 default session"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

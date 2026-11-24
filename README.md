@@ -16,8 +16,8 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 ## 当前状态（2026-11-23）
 
 - **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
-- **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；Postgres/runner/metrics/audit/admin 是可选 L2。
-- **未完成**：24h soak、M6 可写管理台/合规、checkpoint blob GC、review 事务化。
+- **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入；Postgres/runner/metrics/audit/admin 是可选 L2。
+- **未完成**：24h soak、M6 可写管理台表单/合规、checkpoint blob GC、review 事务化。
 - 门禁：`tools/debug.sh` 当前 **57 passed / 0 failed**（以实际输出为准）。
 
 企业单租户的长期路线、Phase 0 架构和运维 runbook 在
@@ -135,7 +135,7 @@ python3 adapters/runner/runner.py --port 18089 \
 
 - `/api/metrics`：受保护的 Prometheus 文本指标；
 - `/api/audit/export?since=&limit=`：带 sha256 的 journal 导出；
-- `/admin`：只读管理面；
+- `/admin`：只读管理面（含 RBAC 角色矩阵/用户映射）；`/api/admin/roles`、`/api/admin/users` 是受 owner/manage 保护的写接口，变更写 journal；
 - `adapters/postgres/worker.py`：claim → 真实 `ui run` → heartbeat → done/failed；
 - `adapters/runner/runner.py`：workspace-only 挂载、无网络、资源/超时限制。
 
@@ -218,7 +218,7 @@ $ ui replay
 | ![能力](docs/images/capabilities.png) | ![实验室](docs/images/lab.png) |
 
 首开有 3 步教练，工作区 / 能力 / 实验室各有一次性上下文提示；`?` 或 `⋯ → 重新看引导` 可重开。
-另有只读 [`/admin`](docs/47-admin.md) 管理面，以及顶部「变更」审阅面板（diff/hunk/回退）。
+另有只读 [`/admin`](docs/47-admin.md) 管理面（含 RBAC 矩阵/用户映射），以及顶部「变更」审阅面板（diff/hunk/回退）。
 
 ![首开引导](docs/images/onboarding.png)
 
