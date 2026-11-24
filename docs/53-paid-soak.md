@@ -248,7 +248,7 @@ done
 （它不联网、不读 key），只是换成付费入口：
 
 ```bash
-UI_PAID_API_KEY="sk-selftest-not-a-real-key" \
+UI_PAID_API_KEY="test-key-not-real" \
 UI_PAID_MODEL="scripted-paid-e2e" \
 UI_PAID_MODEL_CMD="python3 /tmp/scripted_provider.py" \
 SOAK_PROVIDER_STATE=/tmp/paid-provider-state.json \

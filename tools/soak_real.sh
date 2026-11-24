@@ -457,7 +457,7 @@ for ((i = 1; i <= ROUNDS; i++)); do
     SHELL_CALLS=${_sh:-0}
     LAST_ROUND_JSON="{\"round\":$i,\"ok\":false,\"run\":$run_json,\"verify\":null,\"durationMs\":$RUN_MS,\"workspaceBytes\":$WS_BYTES,\"writeCalls\":$WRITE_CALLS,\"shellCalls\":$SHELL_CALLS,\"tokens\":${run_tokens:-0}}"
     printf '%s\n' "$LAST_ROUND_JSON" >>"$ROUNDS_LOG"
-    printf '--- ui run 输出尾部（rc=%s）---\n' "$run_rc" >&2
+    printf '%s\n' "--- ui run 输出尾部（rc=$run_rc）---" >&2
     tail -n 25 "$run_out" >&2 || true
     if [ "$run_rc" -eq 124 ]; then
       fail_round run "ui run 超时（UI_SOAK_RUN_TIMEOUT=${RUN_TIMEOUT}s）"

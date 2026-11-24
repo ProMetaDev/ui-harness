@@ -182,6 +182,9 @@ def main():
         if not page:
             raise RuntimeError("no page target: " + repr(targets))
         ws = WS(page["webSocketDebuggerUrl"])
+        # 不依赖 Chrome 的初始 target 是否已经加载；显式导航一次。
+        cdp(ws, "Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
+        time.sleep(0.8)
         value = evaluate(ws, """(() => {
           const b = document.getElementById('diffBtn');
           return {
@@ -208,12 +211,22 @@ def main():
         admin = evaluate(ws, """(() => ({
           title: document.title,
           text: document.body ? document.body.innerText : '',
-          cards: document.querySelectorAll('.card').length
+          cards: document.querySelectorAll('.card').length,
+          userForm: !!document.getElementById('userForm'),
+          matrix: !!document.getElementById('matrixBody'),
+          userBody: !!document.getElementById('userBody')
         }))()""")
-        if not admin or "管理面" not in admin.get("text", "") or admin.get("cards", 0) < 4:
+        if (
+            not admin
+            or "管理面" not in admin.get("text", "")
+            or admin.get("cards", 0) < 4
+            or not admin.get("userForm")
+            or not admin.get("matrix")
+            or not admin.get("userBody")
+        ):
             raise RuntimeError("admin page not mounted: " + repr(admin))
         print(
-            f"PASS browser e2e: title={value.get('title')} diff=ok overlay=ok admin=ok"
+            f"PASS browser e2e: title={value.get('title')} diff=ok overlay=ok admin=ok forms=ok"
         )
         return 0
     finally:

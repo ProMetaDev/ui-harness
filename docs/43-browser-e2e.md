@@ -24,13 +24,14 @@ Linux CI 没有 Chrome 时脚本明确 `SKIP`。
    - `#diffBtn` 存在；
    - 按钮文本包含「变更」；
 4. 点击「变更」，确认 `#diffOverlay` 真的打开（无 checkpoint 时显示明确空态）；
-5. `Page.navigate` 到 `/admin`，确认真实 DOM 有「管理面」和至少 4 个 `.card`；
+5. `Page.navigate` 到 `/admin`，确认真实 DOM 有「管理面」、至少 4 个 `.card`、
+   角色矩阵表与用户表单（`userForm`/`matrixBody`/`userBody`）；
 6. `taskkill /T` 清理浏览器与 server 进程树。
 
 ## 3. 实测
 
 ```text
-PASS browser e2e: title=... diff=ok overlay=ok admin=ok
+PASS browser e2e: title=... diff=ok overlay=ok admin=ok forms=ok
 ```
 
 ## 4. 边界
