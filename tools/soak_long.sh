@@ -56,14 +56,79 @@ case "$SAMPLE_MS" in ''|*[!0-9]*) echo "WARN: UI_SOAK_SAMPLE_MS 非整数，回�
 mkdir -p "$(dirname "$WS")" "$(dirname "$LOG")" "$(dirname "$STATE")"
 ROUNDS="${UI_SOAK_ROUNDS_LOG:-$STATE.rounds.jsonl}"
 mkdir -p "$(dirname "$ROUNDS")"
-rm -rf "$WS"
-mkdir -p "$WS"
-: >"$LOG"
-: >"$ROUNDS"
-start=$(date +%s)
-deadline=$((start + SECONDS_TOTAL))
-i=0
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+
+RESUME="${UI_SOAK_RESUME:-0}"
+case "$RESUME" in
+  0|1) ;;
+  *) echo "FAIL: UI_SOAK_RESUME 只能是 0 或 1: $RESUME" >&2; exit 2 ;;
+esac
+state_field() {
+  python3 - "$STATE" "$1" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(2)
+v = d.get(sys.argv[2])
+print("" if v is None else v)
+PY
+}
+
+if [ "$RESUME" = "1" ]; then
+  [ -f "$STATE" ] || { echo "FAIL: 没有可续跑的 state: $STATE" >&2; exit 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "FAIL: 续跑需要 python3" >&2; exit 2; }
+  phase=$(state_field phase) || { echo "FAIL: state 不是合法 JSON: $STATE" >&2; exit 2; }
+  case "$phase" in
+    passed) echo "已通过，无需续跑: $STATE"; exit 0 ;;
+    failed)
+      if [ "${UI_SOAK_RESUME_FAILED:-0}" != "1" ]; then
+        echo "FAIL: 上次 state=phase=failed；确认要续跑请加 UI_SOAK_RESUME_FAILED=1" >&2
+        exit 2
+      fi
+      ;;
+    running|interrupted) ;;
+    *) echo "FAIL: 未知 phase=$phase" >&2; exit 2 ;;
+  esac
+  prev_rounds=$(state_field rounds)
+  prev_start=$(state_field startedAt)
+  prev_updated=$(state_field updatedAt)
+  prev_seconds=$(state_field seconds)
+  prev_run_id=$(state_field runId)
+  prev_binary=$(state_field binary)
+  prev_failed=$(state_field failedRounds)
+  case "$prev_rounds$prev_start$prev_updated$prev_seconds" in
+    *[!0-9]*|'') echo "FAIL: state 缺少数值字段，拒绝续跑" >&2; exit 2 ;;
+  esac
+  [ -n "$prev_failed" ] || prev_failed=0
+  [ "$prev_seconds" = "$SECONDS_TOTAL" ] || {
+    echo "WARN: 续跑沿用 state 的 seconds=$prev_seconds（当前环境是 $SECONDS_TOTAL）" >&2
+    SECONDS_TOTAL="$prev_seconds"
+  }
+  [ -z "$prev_binary" ] || [ "$prev_binary" = "$BIN" ] || {
+    echo "FAIL: 续跑的二进制路径变了: $prev_binary -> $BIN" >&2
+    exit 2
+  }
+  active=$((prev_updated - prev_start))
+  [ "$active" -ge 0 ] || active=0
+  # 停机时间不算已跑时间：新 start 向前回拨 active 秒，deadline 只补剩余活跃时长。
+  start=$(( $(date +%s) - active ))
+  deadline=$((start + SECONDS_TOTAL))
+  i="$prev_rounds"
+  RUN_ID="$prev_run_id"
+  [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+  STATE_FAILED_ROUNDS="$prev_failed"
+  printf 'soak resume runId=%s rounds=%s active=%ss seconds=%s workspace=%s\n' \
+    "$RUN_ID" "$i" "$active" "$SECONDS_TOTAL" "$WS" | tee -a "$LOG"
+else
+  rm -rf "$WS"
+  mkdir -p "$WS"
+  : >"$LOG"
+  : >"$ROUNDS"
+  start=$(date +%s)
+  deadline=$((start + SECONDS_TOTAL))
+  i=0
+  RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+fi
 
 # ── 平台/指标路径探测 ────────────────────────────────────────────────
 HAVE_PROC=0
@@ -424,7 +489,7 @@ STATE_FAILED_ROUNDS=0
 state() {
   local phase=$1 tmp="$STATE.tmp.$$" finished_json=null err_json=null
   case "$phase" in
-    passed|failed) finished_json=$(date +%s) ;;
+    passed|failed|interrupted) finished_json=$(date +%s) ;;
   esac
   if [ -n "$STATE_LAST_ERROR" ]; then
     err_json="\"$(json_escape "$STATE_LAST_ERROR")\""
@@ -469,7 +534,7 @@ state running
 
 on_signal() {
   STATE_LAST_ERROR="interrupted by signal (round=$i)"
-  state failed
+  state interrupted
   exit 130
 }
 trap on_signal INT TERM

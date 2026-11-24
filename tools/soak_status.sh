@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 读取 soak state，检查 phase/rounds/心跳，并显示指标来源与最近一轮明细。
 # 用法: tools/soak_status.sh [state-file]
-# 退出码: 0=passed/健康 running；1=心跳过期或进程已死；2=failed/state 不可读。
+# 退出码: 0=passed/健康 running；1=interrupted/心跳过期/进程已死；2=failed/state 不可读。
 set -euo pipefail
 
 # Windows+core.autocrlf=true 的 worktree 会把 env.sh 写成 CRLF（env.sh 不在本次改动范围），
@@ -116,6 +116,9 @@ if phase == "failed":
     sys.exit(2)
 if phase == "passed":
     sys.exit(0)
+if phase == "interrupted":
+    print("interrupted：可用 UI_SOAK_RESUME=1 续跑", file=sys.stderr)
+    sys.exit(1)
 if phase != "running":
     print(f"FAIL: 未知 phase: {phase!r}", file=sys.stderr)
     sys.exit(2)

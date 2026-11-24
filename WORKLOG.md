@@ -1,5 +1,16 @@
 # Worklog
 
+## 2026-11-24 · 版本 0.3.0 + soak 断点续跑
+
+- 版本号 `0.2.2 → 0.3.0`，未打 tag；tag 等 24h 与真实外部验证后。
+- `tools/soak_long.sh` 支持 `UI_SOAK_RESUME=1`：
+  - 保留 workspace/journal/轮次；
+  - 停机时间不计入已跑时间，只补剩余活跃时长；
+  - Ctrl-C/TERM 记 `phase=interrupted`，可直接续；
+  - `phase=failed` 默认拒绝续，需 `UI_SOAK_RESUME_FAILED=1`；
+  - 二进制路径变化拒绝续跑。
+- 实测：10s soak 中断后从 round=4 续到 round=7，`phase=passed`。
+
 ## 2026-11-24 · 第三轮并行：OIDC e2e / 导出到 WORM / 付费 smoke
 
 - OIDC e2e（`1534b14` + wrapper `38e95a2`）：mock IdP → oidc_proxy → ui serve →
