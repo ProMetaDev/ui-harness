@@ -1,5 +1,19 @@
 # Worklog
 
+## 2026-11-24 · 三路并行：M6 / 非对称签名 / 真实长跑
+
+- M6 RBAC（`c5cf606`）：`.ui/rbac.json` 配置驱动角色矩阵 + 用户映射；
+  `GET /api/admin/rbac`，`PUT /api/admin/roles`（owner），`PUT/DELETE /api/admin/users`（manage）；
+  写 `rbac/role-update` / `rbac/user-update`；管理页只读表。
+- 安全复核补丁（`e156d85`）：admin 的 manage 不能授予/撤销 owner，只有 owner 可以。
+- 非对称签名（`83e4b3e`）：`adapters/audit/sign_export.py` 用 OpenSSH sign/verify；
+  `anchor.py` 追加锚定链；`tools/verify_audit_sign.sh` 27 checks。
+- 真实长跑（`9a7cf27`）：`tools/soak_real.sh` 默认 SKIP，需 `UI_MODEL_CMD` +
+  `UI_SOAK_ALLOW_COST=1`；每轮真实 run + verify + 工具证据检查。
+- 集成门禁：`tools/debug.sh` **57 passed / 0 failed**；docs 79/79；独立性 PASS。
+- 边界：真实付费 provider 未实际调用（环境无可用 provider）；M6 页面仍只读；
+  签名是 OpenSSH 非对称 + 锚定，不是 WORM；24h 未跑。
+
 ## 2026-11-23 · 多智能体第一轮集成
 
 三个独立 worktree 并行，主 worktree 不参与实现；合并顺序 security → data → verify。
