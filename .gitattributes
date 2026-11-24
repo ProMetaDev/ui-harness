@@ -2,3 +2,4 @@
 # Windows checkouts do not turn `source .../env.sh` into a path ending in \r.
 *.sh text eol=lf
 *.py text eol=lf
+Cargo.lock text eol=lf
