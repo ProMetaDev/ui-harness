@@ -73,4 +73,7 @@ bash tools/soak_status.sh /tmp/ui-soak-24h-state.json
 - mock 模型，不是真实 provider 成本/限流；
 - 只检查 journal 链、进程、基本 RSS/fd，不是完整资源剖析；
 - 续跑不会补回停机时间，只补剩余活跃时长；
-- 机器关机期间不计入 24h。
+- 机器关机期间不计入 24h；
+- 可能关机时不要把 workspace/state 放 `/tmp`：改用 `$HOME/ui-soak-...`，避免
+  WSL 重启或 tmp 清理把证据删掉；
+- 系统睡眠可能被计入活跃时长，跑的时候不要让机器休眠。
