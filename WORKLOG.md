@@ -1,5 +1,28 @@
 # Worklog
 
+## 2026-11-26 · 二轮评审 P1/P2 并行收口
+
+- `feat/protected-search` / `f92d3c6`：grep / literal_search / fs_search / tree
+  与写入口统一过滤敏感名；grep 结果行按所有候选路径 fail closed。
+- `feat/admin-consistency` / `28006f5`：管理面专用写锁；intent → persist →
+  final audit；owner 不变量；lab report/run、token 常量比较、viewer metrics。
+- `feat/worker-hardening` / `fe3b3ba`：claim JSON、session/workspace registry、
+  workspace lease、lease_lost 终止、psql stdin 批量同步；live 6.2MB 事件通过。
+- `feat/p2-cleanup` / `160dbf2`：BOOL_FLAGS 补 6 项；`checkpoint` 因双语义保留
+  为例外并加防遗漏测试；WORM `--now` 仅 `UI_WORM_TEST_CLOCK=1`；乱码注释、
+  README/CHANGELOG/docs 同步。
+- 集成：`tools/debug.sh` 57/57；Rust 全量；Postgres live/worker；runner live；
+  OIDC e2e 20；WORM 38；audit→WORM 33。
+- 24h soak 未受代码合并影响，继续跑；但仍是旧二进制证据，最终版需重跑。
+
+残余（不假装完成）：
+
+- 硬链接别名仍无法按路径识别；
+- `checkpoint` 严格 BOOL_FLAGS 需要 command-aware 解析；
+- docs 32/33 重号未改名；
+- 4 个 soak 脚本未合并公共层；
+- 真实 IdP/付费 provider/S3 Object Lock/24h 最终版未完成。
+
 ## 2026-11-26 · 二轮评审 P0 并行修复
 
 按老师评审表 2 的三条 P0 并行，各自 worktree，互不抢文件：
