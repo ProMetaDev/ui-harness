@@ -42,4 +42,15 @@ values ('002_priority_cancel', 'task priority ordering and cooperative cancellat
 on conflict (version) do nothing;
 \endif
 
+select case
+         when exists (select 1 from ui_schema_migrations where version = '003_worker_workspace_lease')
+         then 'false' else 'true'
+       end as apply_003 \gset
+\if :apply_003
+\ir migrations/003_worker_workspace_lease.sql
+insert into ui_schema_migrations (version, description)
+values ('003_worker_workspace_lease', 'workspace lease, JSON claim, worker error recording')
+on conflict (version) do nothing;
+\endif
+
 commit;
