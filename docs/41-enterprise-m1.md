@@ -12,8 +12,10 @@
 > `.ui/users.json` 用户表（缺失回退 `rbac.json` 的 users；损坏 fail closed；
 > `disabled` 一律 403）、`GET /api/admin/rbac`、`GET /api/admin/users`、
 > `PUT /api/admin/roles`（owner）、`PUT/DELETE /api/admin/users`（manage，
-> owner 记录仍归 owner），每次变更写 `rbac/role-update` / `rbac/user-update`
-> 审计；`/admin` 提供可写的矩阵 checkbox 表与用户表单。
+> owner 记录仍归 owner），写操作由一把管理写锁串行，审计按
+> `*-intent` → 落盘/换内存 → `rbac/role-update` / `rbac/user-update`（含
+> `intentSeq`）记账，落盘失败补 `rbac/update-error`；`/admin` 提供可写的
+> 矩阵 checkbox 表与用户表单。
 >
 > 结论：**OIDC/TLS/JWT 不进入 `ui-core`。** 核心只接受来自受信代理的已认证身份；
 > 企业 adapter 负责 OIDC、cookie、组映射。这样不破坏 docs/38 的 L0 零依赖。
@@ -132,6 +134,8 @@ X-UI-Request-Id: ...
 | 读 `GET /api/admin/rbac` / `GET /api/admin/users` | `audit` 或 `manage` | ✓ | ✓ | | ✓ | |
 | 改角色矩阵 `PUT /api/admin/roles` | 角色名 `owner` | ✓ | | | | |
 | 改用户 `PUT/DELETE /api/admin/users` | `manage`（owner 记录需 `owner`） | ✓ | ✓ | | | |
+| 读 `/api/metrics`（只读运维指标） | 无额外能力（任何通过身份校验的角色） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 读 `/api/file`（只读工作区预览） | 无额外能力；路径守卫与敏感文件策略仍生效 | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 约定：
 
@@ -145,8 +149,17 @@ X-UI-Request-Id: ...
   400 拒绝，避免留下指向未知角色的映射；
 - 文件缺失 = 内置矩阵；文件不可读/JSON 非法/字段非法 = `serve` **拒绝启动**，
   运行期内存态若为 `Invalid` 则所有 `/api/*` 返回 503（fail closed）；
-- 写盘顺序：临时文件 → `rename` 原子替换 → 更新内存态 → 写审计；
-  任何一步失败都不会让响应声称成功。
+- owner 不变量：矩阵必须始终存在 `owner` 角色，且 `owner.manage=true`；整份替换
+  删掉 owner、或把 owner 的 `manage` 清成 false 都会被 400 拒绝。授予/修改/撤销
+  映射到 owner 的用户仍只有 owner 本人能做；
+- 管理写操作由 `Hub` 内独立的 `admin_write` 锁串行（不复用 `rbac` / `users`
+  读写锁，避免死锁）：读当前配置 → 校验 → 写 intent 审计 → 原子落盘 + 换内存
+  → 写最终审计。读请求只在换内存的短临界区碰 `rbac/users`，不会被落盘或审计 IO
+  挡住；两个并发更新不会各自基于旧快照把对方覆盖掉；
+- 审计顺序：先 `rbac/role-update-intent` / `rbac/user-update-intent`（actor +
+  变更摘要），成功落盘后写 `rbac/role-update` / `rbac/user-update` 并带
+  `intentSeq`；落盘失败写 `rbac/update-error`（带 `intentSeq` 和错误原文）。
+  intent 写不进去就不执行变更，不会出现"已落盘但无审计"的静默成功。
 
 ## 6. 管理 API
 
@@ -159,9 +172,13 @@ X-UI-Request-Id: ...
 | `DELETE /api/admin/users?id=...` | `manage` | 删除用户；不存在返回 404；删除 owner 需 owner |
 
 - 所有 `/api/admin/*` 都要求受信代理 actor：无 actor 一律 401，即使本地模式；
-- 变更写当前 session 的 journal（不是固定的 default）：
+- 变更写当前 session 的 journal（不是固定的 default）：先写 `-intent`，成功落盘
+  后再写 `rbac/role-update` / `rbac/user-update`（带 `intentSeq`）；
   `rbac/role-update` 带完整角色矩阵，`rbac/user-update` 带 `id/role/action/actor`；
-- 响应里的 `journalSeq` 是审计事件序号，便于外部核对；
+- 落盘失败写 `rbac/update-error`（`target` = `roles`/`users`、`intentSeq`、`error`），
+  响应 `applied:false`，内存保持旧状态；
+- 响应里的 `journalSeq` 是最终审计事件序号，`intentSeq` 是对应的 intent 序号，
+  便于外部核对；
 - 页面 `admin.html` 可直接保存角色矩阵、新增/编辑/删除用户；未授权时按钮禁用并
   显示 403 原因。
 
@@ -196,7 +213,15 @@ X-UI-Request-Id: ...
 - 损坏的 `.ui/rbac.json` / `.ui/users.json`：启动报错；已加载为 `Invalid` 的 hub
   对 `/api/*` 返回 503；
 - 事件流、journal、`rbac.json`、`users.json` 与响应正文中不出现代理密钥原文；
-- 角色变更：下一请求生效，不需要重启 core。
+- 角色变更：下一请求生效，不需要重启 core；
+- 并发两个角色/用户更新：最终文件同时包含两笔（管理写锁串行，不丢更新）；
+- owner 不变量：整表删掉 owner / 把 owner `manage` 改成 false 一律 400，内存与
+  磁盘保持旧矩阵；
+- 落盘失败（目标路径被目录占住）：响应 `applied:false`，journal 依次出现
+  `<kind>-intent` 与 `rbac/update-error`，不会静默成功；
+- viewer 读 `/api/metrics` 与普通 `/api/file` 为 200；敏感文件仍 403；
+- `/api/lab/report` 对 URL 编码的 `..`、反斜杠、绝对路径、包内路径返回错误，
+  只接受单段包名。
 
 ## 9. 兼容零依赖
 
