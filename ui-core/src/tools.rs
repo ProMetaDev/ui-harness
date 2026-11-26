@@ -7,8 +7,8 @@
 use crate::json::Json;
 use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC};
 use crate::protected::{
-    has_declarations, is_allowed_read, is_private_dir_name, is_private_path, is_private_real_path,
-    is_sensitive_read_path, private_dir_names, private_entries,
+    is_allowed_read, is_private_dir_name, is_private_path, is_private_real_path,
+    is_sensitive_or_private, is_sensitive_read_path, private_dir_names, private_entries,
 };
 use crate::skill::Catalog;
 use std::fs;
@@ -192,12 +192,12 @@ fn blocked_read(ctx: &Ctx, path: &Path) -> bool {
             && !is_allowed_read(&ctx.workspace, path))
 }
 
-/// 写入口：没有例外。
+/// 写入口：没有例外，敏感名单文件同样按名字拒绝。
 ///
 /// `is_allowed_read` 只放宽读——往截断缓存里写文件，就是往模型下一轮的
-/// "原文"里塞伪造内容，它自己会被骗。
+/// "原文"里塞伪造内容，它自己会被骗。`.env` / 私钥也不许通过编辑写回或改掉。
 fn blocked_write(ctx: &Ctx, path: &Path) -> bool {
-    is_private_path(&ctx.workspace, path) || is_private_real_path(&ctx.workspace, path)
+    is_sensitive_or_private(&ctx.workspace, path)
 }
 
 fn fs_read_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
@@ -418,12 +418,12 @@ fn fs_search_run(args: &Json, ctx: &Ctx) -> ToolResult {
 
 /// 扫描时这个目录条目能不能进。
 ///
-/// 名字判定（默认清单 + 单段声明）先挡住绝大多数，`path` 那一次只在
-/// **有人追加过声明**时才付：多段声明（`vendor/keys`）按名字永远排不掉，
-/// 只有拿到完整路径才判得出来。反过来，绝对路径声明（`--private ~/.aws`）
-/// 在工作区内没有对应条目，这一句也不会误伤。
+/// 名字判定（默认清单 + 单段声明 + 敏感文件名）先挡住绝大多数，`path` 那一次
+/// 只在**有人追加过声明**时才付：多段声明（`vendor/keys`）按名字永远排不掉，
+/// 只有拿到完整路径才判得出来。敏感名按真实路径再判一次，挡住 `notes.txt -> .env`。
+/// 绝对路径声明（`--private ~/.aws`）在工作区内没有对应条目，这一句也不会误伤。
 fn private_subtree(workspace: &Path, path: &Path, name: &str) -> bool {
-    is_private_dir_name(name) || (has_declarations() && is_private_path(workspace, path))
+    is_private_dir_name(name) || is_sensitive_or_private(workspace, path)
 }
 
 fn walk(workspace: &Path, dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
@@ -1504,8 +1504,352 @@ mod tests {
         let _ = fs::remove_dir_all(&c.workspace);
         crate::protected::clear_private();
     }
+
+    // ── 敏感名：所有读入口与写入口统一拒绝（二轮评审 N-P0-1 残余） ──
+
+    fn run_tool(c: &Ctx, tool: &str, args: Vec<(&str, Json)>) -> ToolResult {
+        (find(&registry(), tool).unwrap().run)(&Json::obj(args), c)
+    }
+
+    fn assert_no_leak(result: &ToolResult, needles: &[&str], what: &str) {
+        for needle in needles {
+            assert!(
+                !result.content.contains(needle),
+                "{} 泄露了 {}：{}",
+                what,
+                needle,
+                result.content
+            );
+        }
+    }
+
+    /// `grep` 与无 grep 时的 `literal_search` 都不能成为 `fs_read` 之外的
+    /// 第二个读入口：敏感文件既不进结果，`path=.env` 也要被拒。
+    #[test]
+    fn grep_and_literal_search_hide_sensitive_files() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("grep-sensitive");
+        let ws = &c.workspace;
+        fs::write(ws.join(".env"), "ENV-SEARCH-CANARY\n").unwrap();
+        fs::write(ws.join("server.key"), "KEY-SEARCH-CANARY\n").unwrap();
+        fs::create_dir_all(ws.join("certs")).unwrap();
+        fs::write(ws.join("certs/deploy.pem"), "PEM-SEARCH-CANARY\n").unwrap();
+        fs::write(ws.join("main.rs"), "fn hit() { /* SEARCH-CANARY */ }\n").unwrap();
+        // 文件名里带 `:数字:` 的敏感扩展名（大写绕开 `--exclude=*.key` 的
+        // 大小写敏感匹配）：结果行解析必须按候选路径判，不能只看第一个冒号。
+        #[cfg(unix)]
+        fs::write(ws.join("A:1:SERVER.KEY"), "AMBIG-SEARCH-CANARY\n").unwrap();
+
+        let leaked = [
+            ".env",
+            "server.key",
+            "deploy.pem",
+            "SERVER.KEY",
+            "ENV-SEARCH-CANARY",
+            "KEY-SEARCH-CANARY",
+            "PEM-SEARCH-CANARY",
+            "AMBIG-SEARCH-CANARY",
+        ];
+
+        // 整体搜索：敏感文件被过滤，普通文件仍然返回。
+        let r = run_tool(
+            &c,
+            "grep",
+            vec![
+                ("pattern", Json::from("CANARY")),
+                ("path", Json::from(".")),
+            ],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_no_leak(&r, &leaked, "grep");
+        assert!(r.content.contains("main.rs"), "grep 丢了普通文件：{}", r.content);
+
+        // 只出现在敏感文件里的串必须零命中。
+        let r = run_tool(
+            &c,
+            "grep",
+            vec![
+                ("pattern", Json::from("ENV-SEARCH-CANARY")),
+                ("path", Json::from(".")),
+            ],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_no_leak(&r, &["ENV-SEARCH-CANARY"], "grep");
+
+        // 把敏感文件本身当搜索根：按真实名字拒绝，不是安静地返回空。
+        let r = run_tool(
+            &c,
+            "grep",
+            vec![
+                ("pattern", Json::from("CANARY")),
+                ("path", Json::from(".env")),
+            ],
+        );
+        assert!(!r.ok, "grep(path=.env) 必须被拒绝：{}", r.content);
+        assert_no_leak(&r, &["ENV-SEARCH-CANARY"], "grep(path=.env)");
+
+        // 没有 grep 时的兜底实现同一档：普通文件返回，敏感文件不读。
+        let body = literal_search(ws, ws, "CANARY", None, false, 100).unwrap();
+        assert_no_leak(
+            &ToolResult::ok(body.clone()),
+            &leaked,
+            "literal_search",
+        );
+        assert!(body.contains("main.rs"), "literal_search 丢了普通文件：{}", body);
+        let body = literal_search(ws, ws, "ENV-SEARCH-CANARY", None, false, 100).unwrap();
+        assert!(!body.contains("ENV-SEARCH-CANARY"), "literal_search 泄露：{}", body);
+
+        let _ = fs::remove_dir_all(&c.workspace);
+        crate::protected::clear_private();
+    }
+
+    /// `fs_search` 与 `tree` 不列出敏感名；正常文件照旧可见。
+    #[test]
+    fn fs_search_and_tree_hide_sensitive_files() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("listing-sensitive");
+        let ws = &c.workspace;
+        fs::write(ws.join(".env"), "ENV-LIST-CANARY\n").unwrap();
+        fs::write(ws.join("server.key"), "KEY-LIST-CANARY\n").unwrap();
+        fs::write(ws.join("id_rsa"), "ID-LIST-CANARY\n").unwrap();
+        fs::create_dir_all(ws.join("certs")).unwrap();
+        fs::write(ws.join("certs/deploy.pem"), "PEM-LIST-CANARY\n").unwrap();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let r = run_tool(
+            &c,
+            "fs_search",
+            vec![("pattern", Json::from("LIST-CANARY"))],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_no_leak(
+            &r,
+            &[".env", "server.key", "id_rsa", "deploy.pem", "LIST-CANARY"],
+            "fs_search",
+        );
+
+        // 正常文件仍然能被搜到（过滤不是把搜索关掉）。
+        let r = run_tool(
+            &c,
+            "fs_search",
+            vec![("pattern", Json::from("fn main"))],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert!(r.content.contains("src/main.rs"), "{}", r.content);
+
+        let r = run_tool(
+            &c,
+            "tree",
+            vec![("path", Json::from(".")), ("depth", Json::from(3u64))],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_no_leak(&r, &[".env", "server.key", "id_rsa", "deploy.pem"], "tree");
+        assert!(r.content.contains("main.rs"), "tree 丢了普通文件：{}", r.content);
+
+        // 把敏感文件当列目录的根：同样拒绝。
+        let r = run_tool(&c, "tree", vec![("path", Json::from(".env"))]);
+        assert!(!r.ok, "tree(path=.env) 必须被拒绝：{}", r.content);
+
+        let _ = fs::remove_dir_all(&c.workspace);
+        crate::protected::clear_private();
+    }
+
+    /// 写入口同样拒绝敏感名：`fs_write` / `fs_edit` / `patch` 都不能把密钥
+    /// 写回或改掉；普通文件照旧可编辑。
+    #[test]
+    fn write_entries_refuse_sensitive_names() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("write-sensitive");
+        let ws = &c.workspace;
+        fs::write(ws.join(".env"), "ENV-WRITE-CANARY\n").unwrap();
+        fs::write(ws.join("server.key"), "KEY-WRITE-CANARY\n").unwrap();
+        fs::write(ws.join("notes.txt"), "safe\n").unwrap();
+
+        for path in [".env", "server.key"] {
+            let r = run_tool(
+                &c,
+                "fs_write",
+                vec![
+                    ("path", Json::from(path)),
+                    ("content", Json::from("pwned\n")),
+                ],
+            );
+            assert!(!r.ok, "fs_write({}) 必须拒绝：{}", path, r.content);
+            let r = run_tool(
+                &c,
+                "fs_edit",
+                vec![
+                    ("path", Json::from(path)),
+                    ("old", Json::from("CANARY")),
+                    ("new", Json::from("pwned")),
+                ],
+            );
+            assert!(!r.ok, "fs_edit({}) 必须拒绝：{}", path, r.content);
+        }
+        assert_eq!(
+            fs::read_to_string(ws.join(".env")).unwrap(),
+            "ENV-WRITE-CANARY\n",
+            "敏感文件内容被改掉了"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("server.key")).unwrap(),
+            "KEY-WRITE-CANARY\n",
+            "敏感文件内容被改掉了"
+        );
+
+        // patch 是第三条写路径，同一条判定。
+        let r = run_tool(
+            &c,
+            "patch",
+            vec![
+                ("path", Json::from(".env")),
+                ("diff", Json::from("@@ -1 +1 @@\n-ENV-WRITE-CANARY\n+pwned\n")),
+            ],
+        );
+        assert!(!r.ok, "patch(.env) 必须拒绝：{}", r.content);
+
+        // 正常文件不受牵连。
+        let r = run_tool(
+            &c,
+            "fs_edit",
+            vec![
+                ("path", Json::from("notes.txt")),
+                ("old", Json::from("safe")),
+                ("new", Json::from("ok")),
+            ],
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(fs::read_to_string(ws.join("notes.txt")).unwrap(), "ok\n");
+
+        let _ = fs::remove_dir_all(&c.workspace);
+        crate::protected::clear_private();
+    }
+
+    /// 不能只靠字面名：`notes.txt -> .env` 在每个入口都按真实名字隐藏/拒绝。
+    #[test]
+    fn symlink_alias_to_sensitive_is_hidden_everywhere() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("alias-sensitive");
+        let ws = &c.workspace;
+        fs::write(ws.join(".env"), "ENV-ALIAS-CANARY\n").unwrap();
+        fs::write(ws.join("main.rs"), "fn main() {}\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.join(".env"), ws.join("notes.txt")).unwrap();
+
+            // grep 不列别名、不读它的内容；直接把别名当 path 也要拒绝。
+            let r = run_tool(
+                &c,
+                "grep",
+                vec![
+                    ("pattern", Json::from("ENV-ALIAS-CANARY")),
+                    ("path", Json::from(".")),
+                ],
+            );
+            assert!(r.ok, "{:?}", r.error);
+            assert_no_leak(&r, &["notes.txt", "ENV-ALIAS-CANARY"], "grep(别名)");
+            let r = run_tool(
+                &c,
+                "grep",
+                vec![
+                    ("pattern", Json::from("ENV-ALIAS-CANARY")),
+                    ("path", Json::from("notes.txt")),
+                ],
+            );
+            assert!(!r.ok, "grep(path=别名) 必须拒绝：{}", r.content);
+
+            // literal_search 的 walk 同样按真实名字跳过。
+            let body = literal_search(ws, ws, "ENV-ALIAS-CANARY", None, false, 100).unwrap();
+            assert!(
+                !body.contains("ENV-ALIAS-CANARY") && !body.contains("notes.txt"),
+                "literal_search 泄露了别名：{}",
+                body
+            );
+
+            // fs_search / tree 不列出别名。
+            let r = run_tool(
+                &c,
+                "fs_search",
+                vec![("pattern", Json::from("ENV-ALIAS-CANARY"))],
+            );
+            assert_no_leak(&r, &["notes.txt", "ENV-ALIAS-CANARY"], "fs_search(别名)");
+            let r = run_tool(
+                &c,
+                "tree",
+                vec![("path", Json::from(".")), ("depth", Json::from(2u64))],
+            );
+            assert_no_leak(&r, &["notes.txt", ".env"], "tree(别名)");
+
+            // 写入口按真实名字拒绝：别名既不能改掉 `.env`，也不能把内容写回去。
+            let r = run_tool(
+                &c,
+                "fs_edit",
+                vec![
+                    ("path", Json::from("notes.txt")),
+                    ("old", Json::from("ENV-ALIAS-CANARY")),
+                    ("new", Json::from("pwned")),
+                ],
+            );
+            assert!(!r.ok, "fs_edit(别名) 必须拒绝：{}", r.content);
+            let r = run_tool(
+                &c,
+                "fs_write",
+                vec![
+                    ("path", Json::from("notes.txt")),
+                    ("content", Json::from("pwned\n")),
+                ],
+            );
+            assert!(!r.ok, "fs_write(别名) 必须拒绝：{}", r.content);
+            assert_eq!(
+                fs::read_to_string(ws.join(".env")).unwrap(),
+                "ENV-ALIAS-CANARY\n",
+                "通过软链别名改掉了敏感文件"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&c.workspace);
+        crate::protected::clear_private();
+    }
 }
 // ── 新增工具的实现 ──────────────────────────────────────────────
+
+/// `grep -n` 的一行能不能返回。
+///
+/// 不能按第一个 `:` 切：Windows 盘符（`C:\...`）本身带冒号，文件名里也可能
+/// 带 `:数字:`。所以把每个「冒号 + 数字 + 冒号」之前的片段都当候选路径，
+/// **任何一个**候选命中敏感/隐私判定就丢弃整行；完全认不出路径也丢弃
+/// （fail closed：宁可少一行结果，也不把没判过的路径放出去）。
+fn grep_line_is_hidden(workspace: &Path, line: &str) -> bool {
+    let mut saw_path = false;
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(':') {
+        let at = start + pos;
+        let rest = &line[at + 1..];
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits > 0 && rest.as_bytes().get(digits) == Some(&b':') {
+            let p = &line[..at];
+            if !p.is_empty() {
+                saw_path = true;
+                let target = if Path::new(p).is_absolute() {
+                    PathBuf::from(p)
+                } else {
+                    workspace.join(p)
+                };
+                if is_sensitive_or_private(workspace, &target) {
+                    return true;
+                }
+            }
+        }
+        start = at + 1;
+    }
+    !saw_path
+}
 
 fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     let pattern = args.str_at("pattern").unwrap_or("");
@@ -1516,8 +1860,9 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     let root = ctx.resolve(path);
     // `grep(path="secrets")` 的效果目标是 `<ws>/secrets` 目录本身；策略层
     // 现在也会拒，但工具自身再挡一次：直接调用 run 的代码不经过策略层。
-    // 真实路径检查挡住 `alias -> secrets` 这类符号链接别名。
-    if is_private_path(&ctx.workspace, &root) || is_private_real_path(&ctx.workspace, &root) {
+    // 真实路径检查挡住 `alias -> secrets` 这类符号链接别名；敏感单文件
+    // （`.env`、私钥）同样在这里拒绝，grep 不能成为绕过 `fs_read` 的第二个读入口。
+    if is_sensitive_or_private(&ctx.workspace, &root) {
         return ToolResult::err(protected_error(&root));
     }
     let include = args.str_at("include");
@@ -1531,6 +1876,11 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     // path 指向目录本身的调用。
     for dir in private_dir_names() {
         cmd.arg(format!("--exclude-dir={}", dir));
+    }
+    // 敏感单文件没有 `--exclude-dir` 可用：先按 glob 在**读取前**粗筛，
+    // 结果行再按真实路径过滤（大小写变体与 `notes.txt -> .env` 只能在那里判）。
+    for pat in crate::protected::sensitive_file_globs() {
+        cmd.arg(format!("--exclude={}", pat));
     }
     if args.bool_at("ignoreCase") == Some(true) {
         cmd.arg("-i");
@@ -1586,10 +1936,7 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
             // ——边界必须取决于清单，不取决于哪条命令更快。
             let mut lines: Vec<&str> = text
                 .lines()
-                .filter(|l| {
-                    let p = l.split(':').next().unwrap_or("");
-                    !p.is_empty() && !is_private_path(&ctx.workspace, &ctx.resolve(p))
-                })
+                .filter(|l| !grep_line_is_hidden(&ctx.workspace, l))
                 .collect();
             let total = lines.len();
             if total == 0 {
@@ -1622,7 +1969,7 @@ fn literal_search(
     ignore_case: bool,
     max_hits: usize,
 ) -> Result<String, String> {
-    if is_private_path(workspace, root) || is_private_real_path(workspace, root) {
+    if is_sensitive_or_private(workspace, root) {
         return Err(protected_error(root));
     }
     let needle = if ignore_case {
@@ -1884,7 +2231,7 @@ fn run_todo(args: &Json, ctx: &Ctx) -> ToolResult {
 fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
     let rel = args.str_at("path").unwrap_or(".");
     let root = ctx.resolve(rel);
-    if is_private_path(&ctx.workspace, &root) || is_private_real_path(&ctx.workspace, &root) {
+    if is_sensitive_or_private(&ctx.workspace, &root) {
         return ToolResult::err(protected_error(&root));
     }
     let depth = args.u64_at("depth").unwrap_or(2).min(6) as usize;
