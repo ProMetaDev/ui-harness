@@ -1713,6 +1713,10 @@ fn is_blocked_component(name: &str) -> bool {
 /// `walk` 已经按同一形状做了，两边不一致的话「看得见」和「读得到」就分家了。
 fn blocked_entry(workspace: &std::path::Path, path: &std::path::Path, name: &str) -> bool {
     is_blocked_component(name)
+        // 文件级敏感名（`.env*`、私钥、证书）与工具读入口共用一份清单：
+        // 浏览器里能看见的名字不该比模型能读到的更宽。按真实名字判，所以
+        // `looks-safe.txt -> .env` 这类别名也不会出现在列表里。
+        || ui_core::protected::is_sensitive_read_path(path)
         || (ui_core::protected::has_declarations()
             && ui_core::protected::is_private_path(workspace, path))
 }
@@ -2068,6 +2072,13 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(_) => return file_error(&mut stream, "路径越界或不是文件"),
                 Err(e) => return file_error(&mut stream, &e),
             };
+            // 文件级敏感名（`.env*`、私钥、证书）不给预览：判据与工具读入口
+            // 共用 `is_sensitive_read_path`，所以 `notes.txt -> .env` 这种别名
+            // 也按真实名字挡住。这里用 403 而不是「200 + error」：这不是
+            // 「没找到」，是策略拒绝。
+            if ui_core::protected::is_sensitive_read_path(&path) {
+                return file_forbidden(&mut stream, "敏感文件不允许预览");
+            }
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let truncated = size > 512 * 1024;
             let mut bytes = Vec::new();
@@ -3712,6 +3723,16 @@ fn file_error(stream: &mut TcpStream, message: &str) -> std::io::Result<()> {
         ("error", Json::from(message)),
     ]);
     json_response(stream, &out.to_compact())
+}
+
+/// 敏感文件的预览拒绝：正文形状与 `file_error` 一致（页面仍读 `ok/error`），
+/// HTTP 状态换成 403——「存在但不给看」要和「路径不存在」分开。
+fn file_forbidden(stream: &mut TcpStream, message: &str) -> std::io::Result<()> {
+    let out = Json::obj(vec![
+        ("ok", Json::Bool(false)),
+        ("error", Json::from(message)),
+    ]);
+    json_response_status(stream, "403 Forbidden", &out.to_compact())
 }
 
 fn json_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
@@ -5645,6 +5666,80 @@ mod tests {
             );
         }
         assert!(root.contains("\"src\""), "正常目录仍要能列出: {root}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 敏感单文件（`.env*`、私钥、证书）在网页端也没有旁路：`/api/file` 403，
+    /// `/api/tree` 不列出名字。判据与工具读入口共用 `protected` 那一份清单，
+    /// 所以 `notes/looks-safe.txt -> .env` 这种别名也按真实名字挡住。
+    #[test]
+    fn sensitive_files_are_forbidden_in_the_browser() {
+        let ws = temp_workspace("sensitive");
+        std::fs::write(ws.join(".env"), "TOKEN=sk-CANARY-SENSITIVE\n").unwrap();
+        std::fs::write(ws.join(".env.local"), "TOKEN=sk-CANARY-SENSITIVE\n").unwrap();
+        std::fs::write(ws.join("id_rsa"), "PRIVATE-KEY\n").unwrap();
+        std::fs::write(ws.join("server.key"), "PRIVATE-KEY\n").unwrap();
+        std::fs::create_dir_all(ws.join("certs")).unwrap();
+        std::fs::write(ws.join("certs").join("deploy.pem"), "PRIVATE-KEY\n").unwrap();
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::write(ws.join("notes").join("a.md"), "hi\n").unwrap();
+        let hub = hub_for(&ws);
+
+        for target in [
+            "/api/file?path=.env",
+            "/api/file?path=.env.local",
+            "/api/file?path=id_rsa",
+            "/api/file?path=server.key",
+            "/api/file?path=certs%2Fdeploy.pem",
+        ] {
+            let (head, body) = http_get(hub.clone(), target);
+            assert!(head.contains("403"), "{} 应 403: {}", target, head);
+            assert!(body.contains("\"ok\":false"), "{}: {}", target, body);
+            assert!(!body.contains("CANARY"), "{} 泄露了内容: {}", target, body);
+            assert!(
+                !body.contains("PRIVATE-KEY"),
+                "{} 泄露了内容: {}",
+                target,
+                body
+            );
+        }
+
+        // 正常文件照旧能预览：别把功能一起修坏
+        let (head, body) = http_get(hub.clone(), "/api/file?path=notes%2Fa.md");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(body.contains("hi"), "{}", body);
+
+        // 根列表与子目录都不出现这些名字（名字本身也是信息）
+        for target in ["/api/tree", "/api/tree?path=certs"] {
+            let (_head, body) = http_get(hub.clone(), target);
+            for leak in [".env", "id_rsa", "server.key", "deploy.pem"] {
+                assert!(
+                    !body.contains(&format!("\"name\":\"{}\"", leak)),
+                    "{} 列出了 {}: {}",
+                    target,
+                    leak,
+                    body
+                );
+            }
+        }
+        let (_head, root) = http_get(hub.clone(), "/api/tree");
+        assert!(root.contains("\"notes\""), "别把所有东西都藏起来: {}", root);
+
+        // 软链别名：列表里看不见，直达 403
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.join(".env"), ws.join("notes").join("looks-safe.txt"))
+                .unwrap();
+            let (_h, tree) = http_get(hub.clone(), "/api/tree?path=notes");
+            assert!(
+                !tree.contains("looks-safe.txt"),
+                "指向 `.env` 的别名不该出现在列表里: {}",
+                tree
+            );
+            let (head, body) = http_get(hub.clone(), "/api/file?path=notes%2Flooks-safe.txt");
+            assert!(head.contains("403"), "软链别名应 403: {}", head);
+            assert!(!body.contains("CANARY"), "{}", body);
+        }
         let _ = std::fs::remove_dir_all(&ws);
     }
 

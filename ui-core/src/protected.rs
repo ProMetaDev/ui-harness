@@ -64,6 +64,14 @@ pub fn is_sensitive_file_name(name: &str) -> bool {
 /// 一次 `fs_read` 就能把正文完整捞回来，落账前的第二层隐私塌成一层。
 /// 全文读回来（见 `agent::retain_tool_output`）。日志、会话、配置不在例外
 /// 里，仍被 `PROTECTED_DIRS` 挡住。
+///
+/// 前缀只是**一半**判据：`is_allowed_read` 还要解析真实路径，要求它严格落在
+/// `<ws>/.ui/tool-output/` 里、且是普通文件。所以：
+///
+/// - `.ui/tool-output/link -> secrets/astra.json` 借不到这条例外（真实路径
+///   落在受保护目录里）；
+/// - 指向工作区外、或者 target 不存在的符号链接也借不到（后者 fail closed）；
+/// - `.env*`、私钥/证书这类敏感文件名不在例外里，名字命中就拒绝。
 pub const PROTECTED_READ_EXCEPTIONS: &[&str] = &[".ui/tool-output/"];
 
 // ───────────────────── 按项目追加的隐私路径 ─────────────────────
@@ -518,17 +526,139 @@ pub fn is_protected_real_path(workspace: &Path, path: &Path) -> bool {
     is_protected_path(&ws, &real)
 }
 
-/// 受保护目录里唯一能读的东西。
+/// 解析一次**读**操作的真实目标；解析不出真实位置就返回 `None`（拒绝）。
 ///
-/// 只放宽读，不放宽写：模型往 `.ui/tool-output/` 写文件就是往内核的
-/// 截断缓存里塞伪造内容，下一轮它自己会被骗。写一律按受保护处理。
+/// 与 `canonicalize_with_missing` 的差别只有一条：**悬空符号链接**（链接在、
+/// target 不在）返回 `None`，而不是按「最近存在的祖先」猜一个位置。猜出来的
+/// 位置永远留在原地，等于把一个指向别处的链接当成普通文件放行——那正是评审
+/// N-P0-1 指出的洞。写路径仍用后者：新文件本来就还不存在，不能因为"不存在"
+/// 就拒绝建文件。
+///
+/// 目标本身不存在、但祖先都能解析（例如被保留策略清掉的截断缓存）时，返回
+/// 「真实祖先 + 剩余字面段」：这种路径要能走到 `fs_read` 的"已按保留策略
+/// 清理"提示，而不是被当成越界。
+fn canonicalize_read_target(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = path.canonicalize() {
+        return Some(real);
+    }
+    // 目标自己存在（或本身就是一条链接）却解析不出来：真实位置未知，fail closed。
+    if std::fs::symlink_metadata(path).is_ok() {
+        return None;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path;
+    loop {
+        tail.push(cur.file_name()?.to_os_string());
+        let parent = cur.parent()?;
+        if let Ok(real) = parent.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return Some(out);
+        }
+        // 祖先存在却也解析不出来：中间有一段是悬空链接，同样不猜。
+        if std::fs::symlink_metadata(parent).is_ok() {
+            return None;
+        }
+        cur = parent;
+    }
+}
+
+/// 受保护目录里唯一能读的东西：`<ws>/.ui/tool-output/` 里的普通文件。
+///
+/// 两道判据缺一不可：
+///
+/// 1. **字面**：调用方给的路径相对 workspace 必须写在 `.ui/tool-output/` 下；
+/// 2. **真实**：解析之后的路径必须严格落在 `<ws_real>/.ui/tool-output/` 里，
+///    且剩余段上没有 `secrets` / `.git` / 其它受保护段与声明，末段不是敏感
+///    文件名。
+///
+/// 只判字面就是评审 N-P0-1 那条洞：`.ui/tool-output/link` 的**名字**在例外
+/// 目录里，符号链接的 target 却可以是 `secrets/astra.json`，甚至工作区外。
+/// 只判真实也不行：例外只该覆盖这一个目录，不能让"解析后落在某处"成为新的
+/// 放行理由。
+///
+/// 只放宽读，不放宽写：模型往 `.ui/tool-output/` 写文件就是往内核的截断缓存
+/// 里塞伪造内容，下一轮它自己会被骗。写一律按受保护处理（`blocked_write`）。
+///
+/// 目标不存在时仍要能回答：被保留策略清掉的截断缓存要给出"已清理"而不是
+/// "不存在"的提示（`tools::missing_file_note`）。所以"不存在"本身不拒绝——
+/// 只有**解析不出真实位置**（悬空链接、解析不了的祖先）才拒绝，fail closed。
 pub fn is_allowed_read(workspace: &Path, path: &Path) -> bool {
+    // ① 字面：相对 workspace 的文本必须就在例外前缀下面。
     let rel = path.strip_prefix(workspace).unwrap_or(path);
     let text = rel.to_string_lossy().replace('\\', "/");
     let text = text.trim_start_matches("./");
-    PROTECTED_READ_EXCEPTIONS
+    if !PROTECTED_READ_EXCEPTIONS
         .iter()
         .any(|prefix| text.starts_with(prefix))
+    {
+        return false;
+    }
+    let ws_real = match workspace.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // 相对路径按 workspace 解释：字面判据已经把前者当成 workspace 内的位置。
+    let target = if path.is_relative() {
+        ws_real.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    // ② 真实：解析不出来就不放行（悬空链接在这里被拒）。
+    let real = match canonicalize_read_target(&target) {
+        Some(p) => p,
+        None => return false,
+    };
+    let base = ws_real.join(".ui").join("tool-output");
+    let Ok(rest) = real.strip_prefix(&base) else {
+        return false;
+    };
+    // 目录本身（剩余段为空）不算；剩余段必须都是普通名字（`..` 已被解析掉）。
+    if rest.as_os_str().is_empty()
+        || !rest
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+    {
+        return false;
+    }
+    // 默认清单、单段/多段声明、绝对声明：按剩余段再判一次。
+    // （`secrets/x`、`--private vendor/keys`、`--private /etc/ssh` 都在这里。）
+    if is_private_path(&base, &real) {
+        return false;
+    }
+    if real
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(is_sensitive_file_name)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // 例外只对**普通文件**生效：目录、设备、FIFO 都不是"截断缓存的全文"。
+    !real.exists() || real.is_file()
+}
+
+/// 读入口的敏感文件名判定（`.env*`、私钥、证书……）。
+///
+/// 判两处：调用方给的名字，和解析后的真实名字。后者挡 `notes.txt -> .env`
+/// 这种别名——只看字面名字，一次软链就绕过去了。清单与 checkpoint / index
+/// 共用 `is_sensitive_file_name` 那一份，不会各拿一张表。
+///
+/// 解析不出真实路径时**不额外拒绝**：名字这一关已经过了，剩下的边界归
+/// `is_allowed_read` 与隐私清单；而敏感名本身永远没有读取例外。
+pub fn is_sensitive_read_path(path: &Path) -> bool {
+    let named = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(is_sensitive_file_name)
+            .unwrap_or(false)
+    };
+    named(path)
+        || canonicalize_with_missing(path)
+            .map(|real| named(&real))
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -569,16 +699,144 @@ mod tests {
         assert!(!is_protected_path(ws, &ws.join("src/main.rs")));
     }
 
+    /// 临时工作区。`is_allowed_read` 现在要解析真实路径，`/ws` 这种假路径在
+    /// Windows 上连盘符都对不上，边界用例必须落在真目录上。
+    fn temp_ws(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "ui-prot-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
     #[test]
     fn only_truncated_tool_output_may_be_read_back() {
-        let ws = Path::new("/ws");
-        assert!(is_allowed_read(ws, &ws.join(".ui/tool-output/0001-shell.txt")));
-        assert!(is_allowed_read(ws, Path::new("./.ui/tool-output/0001-shell.txt")));
+        let ws = temp_ws("output");
+        std::fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        std::fs::write(ws.join(".ui/tool-output/0001-shell.txt"), "ok\n").unwrap();
+        std::fs::write(ws.join(".ui/journal.jsonl"), "{}\n").unwrap();
+        assert!(is_allowed_read(&ws, &ws.join(".ui/tool-output/0001-shell.txt")));
+        assert!(is_allowed_read(
+            &ws,
+            Path::new("./.ui/tool-output/0001-shell.txt")
+        ));
         // 例外只到这一个目录：兄弟目录、目录本身都不放行
-        assert!(!is_allowed_read(ws, &ws.join(".ui/tool-output")));
-        assert!(!is_allowed_read(ws, &ws.join(".ui/tool-output-x/a.txt")));
-        assert!(!is_allowed_read(ws, &ws.join(".ui/journal.jsonl")));
-        assert!(!is_allowed_read(ws, &ws.join(".git/config")));
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/tool-output")));
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/tool-output-x/a.txt")));
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/journal.jsonl")));
+        assert!(!is_allowed_read(&ws, &ws.join(".git/config")));
+        // 嵌套的 tool-output 不算：例外按 workspace 相对前缀写死一层
+        assert!(!is_allowed_read(&ws, &ws.join("pkg/.ui/tool-output/a.txt")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 评审 N-P0-1：`.ui/tool-output/` 下一个软链**名字**在例外目录里，
+    /// target 却可以是 `secrets/…`——只判字面就是一条绕过真实路径保护的路。
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_tool_output_cannot_borrow_the_exception() {
+        let ws = temp_ws("link-secret");
+        std::fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        std::fs::create_dir_all(ws.join("secrets")).unwrap();
+        std::fs::write(ws.join("secrets/astra.json"), "{\"api_key\":\"x\"}\n").unwrap();
+        std::os::unix::fs::symlink(ws.join("secrets/astra.json"), ws.join(".ui/tool-output/link"))
+            .unwrap();
+        assert!(
+            !is_allowed_read(&ws, &ws.join(".ui/tool-output/link")),
+            "软链把 secrets 借成了截断缓存"
+        );
+        // 同一目录里的普通文件照旧能读：别为了堵洞把截断缓存废掉
+        std::fs::write(ws.join(".ui/tool-output/ok.txt"), "ok\n").unwrap();
+        assert!(is_allowed_read(&ws, &ws.join(".ui/tool-output/ok.txt")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 指向工作区外的软链同样不能借：真实路径不在 `<ws>/.ui/tool-output/` 里。
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_tool_output_cannot_escape_the_workspace() {
+        let ws = temp_ws("link-outside");
+        let outside = std::env::temp_dir().join(format!("ui-prot-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("passwd-demo"), "root:x:0:0\n").unwrap();
+        std::fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("passwd-demo"),
+            ws.join(".ui/tool-output/link"),
+        )
+        .unwrap();
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/tool-output/link")));
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// target 不存在的链接按拒绝处理：猜位置等于把指向别处的链接当成普通文件。
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_refused_not_guessed() {
+        let ws = temp_ws("link-dangling");
+        std::fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        std::os::unix::fs::symlink(
+            ws.join(".ui/tool-output/gone.txt"),
+            ws.join(".ui/tool-output/link"),
+        )
+        .unwrap();
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/tool-output/link")));
+        // 悬空链接当目录用：中间那一段解析不出来，也不能放行
+        std::os::unix::fs::symlink(
+            ws.join(".ui/tool-output/nope-dir"),
+            ws.join(".ui/tool-output/gone"),
+        )
+        .unwrap();
+        assert!(!is_allowed_read(&ws, &ws.join(".ui/tool-output/gone/x.txt")));
+        // 只是"还没写出来"的普通文件不算悬空链接：截断缓存的已清理提示要能走到
+        assert!(is_allowed_read(&ws, &ws.join(".ui/tool-output/new-file.txt")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 敏感文件名没有例外档：即使它躺在 tool-output 里也不读。
+    #[test]
+    fn sensitive_names_do_not_get_the_read_exception() {
+        let ws = temp_ws("sensitive-exception");
+        std::fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        for name in [".env", ".env.local", "id_rsa", "server.key", "deploy.pem"] {
+            std::fs::write(ws.join(".ui/tool-output").join(name), "SECRET\n").unwrap();
+            assert!(
+                !is_allowed_read(&ws, &ws.join(".ui/tool-output").join(name)),
+                "{} 不该拿到读取例外",
+                name
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 读入口的敏感名判定看**真实名字**：`notes.txt -> .env` 的名字看不出来。
+    #[test]
+    fn a_sensitive_name_is_seen_through_an_alias() {
+        let ws = temp_ws("sensitive-alias");
+        std::fs::write(ws.join(".env"), "TOKEN=secret\n").unwrap();
+        assert!(is_sensitive_read_path(&ws.join(".env")));
+        assert!(is_sensitive_read_path(&ws.join("id_rsa")));
+        assert!(is_sensitive_read_path(&ws.join("server.key")));
+        assert!(is_sensitive_read_path(&ws.join("certs/deploy.pem")));
+        assert!(!is_sensitive_read_path(&ws.join("notes.txt")));
+        assert!(!is_sensitive_read_path(&ws.join("src/main.rs")));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.join(".env"), ws.join("notes.txt")).unwrap();
+            assert!(
+                is_sensitive_read_path(&ws.join("notes.txt")),
+                "别名要按真实名字判"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

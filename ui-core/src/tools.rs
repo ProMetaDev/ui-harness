@@ -8,7 +8,7 @@ use crate::json::Json;
 use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC};
 use crate::protected::{
     has_declarations, is_allowed_read, is_private_dir_name, is_private_path, is_private_real_path,
-    private_dir_names, private_entries,
+    is_sensitive_read_path, private_dir_names, private_entries,
 };
 use crate::skill::Catalog;
 use std::fs;
@@ -180,16 +180,16 @@ fn arg_str(args: &Json, key: &str) -> Result<String, String> {
 /// 读入口的统一判定：隐私清单挡住，`.ui/tool-output/` 是唯一例外。
 ///
 /// 例外存在的理由很具体：长工具输出会落盘到那里，上下文里只留一小片，
-/// 模型必须能把全文读回来（`agent::retain_tool_output`）。日志、会话、
-/// 配置不在例外里，按隐私清单扣留的原文（`.ui/tool-private/`）也不在——
-/// 那份是"日志里连片段都不留"的一档，开读例外等于让它从旁门回到上下文。
-///
-/// 策略层也按同一份清单生成 Deny 规则，这里不是重复劳动而是补第二个入口：
-/// `Agent::run` 之外的调用方（工作流的直接调用、测试、将来的 SDK 面）
-/// 不经过策略层，边界不能只在策略层。
+/// 模型必须能把全文读回来（`agent::retain_tool_output`）。日志、会话与按
+/// 清单扣留的原文（`.ui/tool-private/`）不在例外里——后者的例外等于旁门。
+/// 例外只认真实路径在 tool-output 里的普通文件（`is_allowed_read`）；敏感
+/// 单文件（`.env*`、私钥、证书）没有例外档，名字命中就拒绝。
+/// 策略层也按同一份清单生成 Deny 规则；这里补的是第二个入口——测试、工作流
+/// 直调与将来的 SDK 面不经过策略层，边界不能只在策略层。
 fn blocked_read(ctx: &Ctx, path: &Path) -> bool {
-    (is_private_path(&ctx.workspace, path) || is_private_real_path(&ctx.workspace, path))
-        && !is_allowed_read(&ctx.workspace, path)
+    is_sensitive_read_path(path)
+        || ((is_private_path(&ctx.workspace, path) || is_private_real_path(&ctx.workspace, path))
+            && !is_allowed_read(&ctx.workspace, path))
 }
 
 /// 写入口：没有例外。
@@ -1377,6 +1377,131 @@ mod tests {
             r.error.unwrap_or_default().contains("vendor/keys"),
             "拒绝信息里要印出生效清单"
         );
+        crate::protected::clear_private();
+    }
+
+    // ── 读取边界：真实路径 + 敏感文件名（评审 N-P0-1） ──
+
+    /// 带真实目录的工作区：边界判定要 canonicalize，共享的 `ctx()` 不够干净。
+    fn boundary_ctx(tag: &str) -> Ctx {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "ui-boundary-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Ctx {
+            workspace: dir.canonicalize().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    fn run_read(c: &Ctx, path: &str) -> ToolResult {
+        (find(&registry(), "fs_read").unwrap().run)(
+            &Json::obj(vec![("path", Json::from(path))]),
+            c,
+        )
+    }
+
+    /// 评审 N-P0-1：`.ui/tool-output/` 是唯一读例外，但例外只对**真实路径**
+    /// 落在这个目录里的普通文件成立。`.ui/tool-output/link` 这个名字在例外
+    /// 目录里，软链的 target 却可以是 secrets 里的密钥或工作区外的文件。
+    #[test]
+    fn fs_read_does_not_lend_the_tool_output_exception_to_symlinks() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("link");
+        let ws = &c.workspace;
+        fs::create_dir_all(ws.join(".ui/tool-output")).unwrap();
+        fs::create_dir_all(ws.join("secrets")).unwrap();
+        fs::write(
+            ws.join("secrets/astra.json"),
+            "{\"api_key\":\"sk-LINK-CANARY\"}\n",
+        )
+        .unwrap();
+        let outside = std::env::temp_dir().join(format!("ui-boundary-out-{}", std::process::id()));
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("thing.txt"), "OUTSIDE-CANARY\n").unwrap();
+
+        // 正常的截断缓存照旧能按需读回全文（原有回归，别一起修坏）
+        fs::write(ws.join(".ui/tool-output/ok.txt"), "line-1\nline-2\n").unwrap();
+        let ok = run_read(&c, ".ui/tool-output/ok.txt");
+        assert!(ok.ok, "{:?}", ok.error);
+        assert!(ok.content.contains("line-2"), "{}", ok.content);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                ws.join("secrets/astra.json"),
+                ws.join(".ui/tool-output/link"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                outside.join("thing.txt"),
+                ws.join(".ui/tool-output/link-out"),
+            )
+            .unwrap();
+            for (path, canary) in [
+                (".ui/tool-output/link", "sk-LINK-CANARY"),
+                (".ui/tool-output/link-out", "OUTSIDE-CANARY"),
+            ] {
+                let r = run_read(&c, path);
+                assert!(!r.ok, "{} 不该读得到: {}", path, r.content);
+                assert!(
+                    !r.content.contains(canary),
+                    "{} 泄露了内容: {}",
+                    path,
+                    r.content
+                );
+                assert!(r.error.unwrap_or_default().contains("受保护"), "{}", path);
+            }
+        }
+        let _ = fs::remove_dir_all(&c.workspace);
+        let _ = fs::remove_dir_all(&outside);
+        crate::protected::clear_private();
+    }
+
+    /// `.env*` / id_rsa / *.key 这类单文件没有读取例外：工具读入口与
+    /// checkpoint/index 共用同一份敏感名清单。
+    #[test]
+    fn fs_read_refuses_sensitive_file_names() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        let c = boundary_ctx("sensitive");
+        let ws = &c.workspace;
+        for (path, canary) in [
+            (".env", "ENV-CANARY"),
+            (".env.local", "ENV-CANARY"),
+            ("id_rsa", "KEY-CANARY"),
+            ("server.key", "KEY-CANARY"),
+            ("certs/deploy.pem", "KEY-CANARY"),
+        ] {
+            let p = ws.join(path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, format!("{}\n", canary)).unwrap();
+            let r = run_read(&c, path);
+            assert!(!r.ok, "{} 不该读得到: {}", path, r.content);
+            assert!(!r.content.contains(canary), "{} 泄露了内容: {}", path, r.content);
+        }
+        // 普通文件不受牵连
+        fs::write(ws.join("notes.txt"), "hello\n").unwrap();
+        let r = run_read(&c, "notes.txt");
+        assert!(r.ok, "{:?}", r.error);
+        assert!(r.content.contains("hello"));
+        // 别名按真实名字判：`looks-safe.txt -> .env`
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.join(".env"), ws.join("looks-safe.txt")).unwrap();
+            let r = run_read(&c, "looks-safe.txt");
+            assert!(!r.ok, "别名绕过了敏感名判定: {}", r.content);
+            assert!(!r.content.contains("ENV-CANARY"), "{}", r.content);
+        }
+        let _ = fs::remove_dir_all(&c.workspace);
         crate::protected::clear_private();
     }
 }
