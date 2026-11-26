@@ -35,7 +35,13 @@
 `fs.read` / `fs.write` / `grep` / `tree` 与默认策略都按同一张表拦），模型读不到也写不进。
 **唯一的读取例外是 `.ui/tool-output/`**（被截断的长输出缓存，见下表）；写不豁免——
 往截断缓存里写文件等于给下一轮的模型喂伪造的「完整内容」。
-`ui serve` 的静态与日志路由同样挡住 `.ui`、`.git`、`secrets` 这些**路径**；
+例外只对**真实路径位于 `<ws>/.ui/tool-output/` 里的普通文件**生效：字面前缀之外
+还要 `canonicalize` 真实路径（`protected::is_allowed_read`），所以
+`.ui/tool-output/link -> secrets/x`、指向工作区外的软链与 target 不存在的悬空链接
+都借不到它（悬空链接 fail closed）；`.env*`、私钥/证书（`is_sensitive_file_name`）
+也没有例外档。`ui serve` 的 `/api/file` 对敏感名返回 403，`/api/tree` 不列出它们，
+网页端不继承这条例外。
+同一层静态与日志路由也挡住 `.ui`、`.git`、`secrets` 这些**路径**；
 但网页端拿到的是内核推给它的事件流，那一层的原文见下面「网页端能看到什么」。
 
 ```

@@ -176,6 +176,9 @@ manifest：
 
 - checkpoint 只读 workspace 文件，不跟随 symlink；
 - 跳过 `.env*`、私钥/证书、`secrets/` 与 `--private` 声明路径；敏感文件不会进入 blob；
+- 同一份敏感名清单（`is_sensitive_file_name`）也用于工具读入口与 `ui serve`：
+  `/api/file` 对敏感名返回 403、`/api/tree` 不列出；`.ui/tool-output/` 的读例外只对
+  真实路径位于该目录里的普通文件生效（软链、悬空链接、敏感文件名都不算）；
 - restore 校验父目录 realpath；
 - restore 不写 symlink 目标；
 - manifest 路径拒绝绝对路径和 `..`；
