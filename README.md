@@ -13,11 +13,15 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
 > 用 1.0 是给用户错误信号。版本号规则与 1.0 的准入条件见 [docs/34](docs/34-versioning.md)。
 
-## 当前状态（2026-11-23）
+## 当前状态（2026-11-26）
 
 - **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
+- **0.3.0（本地开发版，尚未打 tag）**：checkpoint GC（保留窗口 + 未引用 blob 清理）、
+  review 事务化（先写 intent 再改文件；`ui review --pending/--reconcile` 对账崩溃遗留）、
+  审计签名/锚定与本地 WORM 风格存储、OIDC/RBAC/可写管理台，以及 metrics/Postgres/容器 runner 等可选 L2 已落地。
 - **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入，`/admin` 提供可写的角色矩阵与用户表单，本地用户表 `.ui/users.json` 是唯一事实；OIDC userinfo 适配层在 `adapters/oidc/`；Postgres/runner/metrics/audit/admin 是可选 L2。
-- **未完成**：24h soak、OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、checkpoint blob GC、review 事务化。
+- **未完成**：24h soak、OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、真实付费 provider 长跑、S3 Object Lock；
+  文档编号重号待整理（见 [docs/34](docs/34-versioning.md) §6），4 个 soak 脚本的公共层待抽（见 [tools/README](tools/README.md)）。
 - 门禁：`tools/debug.sh` 当前 **57 passed / 0 failed**（以实际输出为准）。
 
 企业单租户的长期路线、Phase 0 架构和运维 runbook 在
@@ -69,7 +73,7 @@ bash tools/debug.sh       # 门禁：构建 + 端到端 + 攻击场景 + 跨平�
 
 ```
 $ ui --version
-ui 0.3.0 (commit 0000000, built 2026-11-24)
+ui 0.3.0 (commit 0000000, built 2026-11-26)
 ```
 
 网页端（四个工作台：对话 / 工作区 / 能力 / 实验室）：
@@ -306,7 +310,7 @@ bash tools/soak_status.sh /tmp/ui-soak-long-state.json
 
 ## 状态与许可
 
-- **0.3.0** · 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
+- **0.3.0**（本地开发版，尚未打 tag；打 tag 后 CHANGELOG 才会出现该版本段）· 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
   Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
   但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。

@@ -95,6 +95,16 @@ impl Args {
         // 以前一律「`--x` 后面跟一个非 `--` 词就当它的值」，于是
         // `ui --yes run --task hi` 把 `run` 吃成 `yes=run`，子命令整个丢失。
         // 只列真正的布尔开关；键值选项（--task/--workspace/--mock ...）语义不变。
+        //
+        // 0.3.0 新增的开关必须补在这里，否则 `ui --yes run --task hi` 这类写法会把
+        // 子命令/位置参数吃成上一个选项的值（历史上真的丢过整个子命令）。
+        //
+        // 两个**故意不列**的例外（`tests/bool_flags.rs` 里有显式例外表，且有用例守着）：
+        //   - `--checkpoint`：双语义。`ui run --checkpoint` 是开关，而
+        //     `ui diff/review/revert/restore --checkpoint <id>` 是键值选项。
+        //     列进来会让 `<id>` 变成位置参数被静默忽略，diff 到错的基线。
+        //   - `--trusted-proxy`：键值选项。`args.flag()` 只用它识别"给了名字却没给值"，
+        //     必须把后面的值留给解析器。
         const BOOL_FLAGS: &[&str] = &[
             "all",
             "ansi",
@@ -102,17 +112,23 @@ impl Args {
             "dry-run",
             "force",
             "full",
+            "gc",
             "help",
+            "incremental",
             "isolate",
             "json",
             "no-approval",
+            "no-auto-checkpoint",
             "no-env-scrub",
             "no-isolate",
             "no-memory",
             "no-redact",
             "no-splash",
             "no-tools",
+            "pending",
+            "prune",
             "raw",
+            "reconcile",
             "rollback",
             "strict",
             "version",

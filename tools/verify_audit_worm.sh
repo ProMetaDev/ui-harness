@@ -330,7 +330,7 @@ expect_code 0 "没有已知 head 时，截断后的前缀链本身仍自洽（�
 echo "=== 4. 保留期内 delete 被拒绝 ==="
 LINES_BEFORE="$(wc -l <"$STORE/index.jsonl" | tr -d '[:space:]')"
 expect_code 2 "retention 未到期时 delete 拒绝（退出 2）" \
-  "$PY" "$STORE_PY" delete --store "$STORE" "$SHA1" --now "$(date +%s)"
+  env UI_WORM_TEST_CLOCK=1 "$PY" "$STORE_PY" delete --store "$STORE" "$SHA1" --now "$(date +%s)"
 if [ -f "$STORE/objects/$SHA1" ] && [ ! -e "$STORE/tombstones/$SHA1.json" ]; then
   ok "拒绝删除后对象仍在、没有 tombstone"
 else

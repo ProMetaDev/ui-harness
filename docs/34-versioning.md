@@ -91,6 +91,23 @@
 
 0.3.0   ← 企业 L2：RBAC/用户存储/OIDC、审计签名/锚定/WORM、
            review intent 对账、checkpoint GC、管理台写表单
+           （本地开发版，尚未打 tag；打 tag 后由 tools/changelog.sh 补出 CHANGELOG 段）
         374 个测试 / 57 项门禁 / OIDC e2e / 2h soak 通过
         仍未：24h soak、真实付费 provider、真实 IdP、S3 Object Lock
 ```
+
+---
+
+## 6. 文档编号重号待整理（2026-11-26）
+
+`docs/` 目前有两组同号文件：
+
+| 编号 | 两份文件 | 各自主题 |
+|---|---|---|
+| 32 | `32-auditable-memory-theory.md` / `32-doc-safe-edit-skill.md` | 可审计记忆理论 / 文档安全编辑 |
+| 33 | `33-review-response.md` / `33-docx-safe-edit.md` | 外部评审逐条回应 / Word 安全编辑 |
+
+**这轮不做重命名**：`docs/33-review-response.md` 已被 README 与 `docs/31` 引用，历史讨论里
+也大量用 `docs/33` 指代那份评审回应；此时改名会打断既有链接和锚点。整理顺序应是：
+先补一张编号映射（旧号 → 新号），再整体改名，并在旧路径留转发说明；在那之前，
+引用这两组文档请用**文件名**而不是只写编号，避免歧义。

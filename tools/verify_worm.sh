@@ -8,7 +8,8 @@
 #   4. 到期（--now）delete 成功，对象与 sidecar 消失，tombstone 落盘；
 #   5. 同一 id 不能“复活”（删除后重新 put 被拒绝）；
 #   6. 篡改对象内容 / sidecar / index（改字段、截断、撕裂）后 verify 失败；
-#   7. 没有 python3 时整个门禁 SKIP（退出 0）。
+#   7. 没有 python3 时整个门禁 SKIP（退出 0）；
+#   8. --now 是测试专用时钟：没有 UI_WORM_TEST_CLOCK=1 时 exit 2。
 set -uo pipefail
 command -v python3 >/dev/null 2>&1 || {
   echo "SKIP: python3 不可用（WORM store 是 L2 可选依赖）"
@@ -89,6 +90,23 @@ EOF
 cat >"$TMP/export-b.json" <<'EOF'
 {"version":1,"session":"default","exportedAt":1790000001000,"total":1,"count":1,"since":0,"limit":0,"events":[{"seq":1,"ts":1790000001000,"kind":"note","text":"bravo"}],"sha256":"2222222222222222222222222222222222222222222222222222222222222222","hmacAlg":"HMAC-SHA256","keyId":"test-key","hmac":null}
 EOF
+
+echo "=== 0. 测试时钟必须显式开启 ==="
+# `--now` 是测试专用时钟：没有 UI_WORM_TEST_CLOCK=1 就必须 exit 2。
+# 这一条守着"生产 CLI 不能随手改保留期判定"的边界。
+env -u UI_WORM_TEST_CLOCK "$PY" "$STORE_PY" put --store "$TMP/no-clock" \
+  --file "$TMP/export-a.json" --retention-days 1 --now "$NOW" \
+  >"$TMP/no-clock.log" 2>&1
+CLOCK_CODE=$?
+if [ "$CLOCK_CODE" -eq 2 ] && grep -q 'UI_WORM_TEST_CLOCK' "$TMP/no-clock.log"; then
+  ok "未设 UI_WORM_TEST_CLOCK 时 --now 被拒（exit 2，提示测试专属）"
+else
+  bad "未设 UI_WORM_TEST_CLOCK 时 --now 没有被拒" \
+    "exit=$CLOCK_CODE log=$(tail -n 2 "$TMP/no-clock.log" | tr '\n' ' ')"
+fi
+
+# 后面的用例要操纵保留期时钟，显式打开测试时钟。
+export UI_WORM_TEST_CLOCK=1
 
 echo "=== 1. put / get / verify ==="
 STORE="$TMP/store-a"

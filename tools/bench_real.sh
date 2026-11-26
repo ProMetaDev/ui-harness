@@ -9,7 +9,7 @@ WS=${WS:-/tmp/mlbench-real/lr-s1}
 rm -rf "$WS"; mkdir -p "$WS"
 cp fixtures/ml/lr/train.py "$WS/"
 
-# sh -c ??? nvm ? PATH,?????
+# ui run 内部的 sh -c 可能拿不到 nvm 的 PATH，兜底用绝对路径的 node
 NODE_BIN=$(command -v node || echo /home/fairy/.nvm/versions/node/v22.23.3/bin/node)
 export UI_MODEL_CMD="$NODE_BIN "$UI_ROOT"/tools/deepseek.mjs"
 
