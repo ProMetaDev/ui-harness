@@ -113,6 +113,14 @@ struct Hub {
     /// `.ui/users.json` 的内存态（不存在时 = 回退 rbac.json 的用户映射）。
     /// 与 rbac 同构：损坏 fail closed；停用用户整条请求 403。
     users: Mutex<UsersConfig>,
+    /// 管理面写操作专用串行锁。
+    ///
+    /// 角色/用户更新都是「读当前配置 → 校验 → 落盘 → 换内存 → 写审计」的
+    /// 读-改-写事务。只靠 `rbac` / `users` 各自的锁保护单次读写不够：两个请求
+    /// 可以同时读到旧快照，后落盘者把先落盘者的更新整份覆盖掉。这里用一把
+    /// **独立**的写锁把整段事务串起来，且绝不在持有 `rbac` 锁时再取它——
+    /// 读请求只短暂碰 `rbac/users`，不会被落盘或审计的 IO 挡住。
+    admin_write: Mutex<()>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -692,6 +700,38 @@ fn secret_eq(got: &str, expected: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Cookie 头里的 `ui_token` 是否与配置值定长相等。
+///
+/// 旧实现是 `cookie.contains("ui_token=<token>")`：`ui_token=<token>-suffix`
+/// 或别的 cookie 值里恰好包含这段文本都会通过。这里按 `;` 拆 cookie、只比较
+/// `ui_token` 这一项的完整值，并且比较本身复用 `secret_eq`。
+fn cookie_token_ok(
+    headers: &std::collections::HashMap<String, String>,
+    expected: &str,
+) -> bool {
+    headers
+        .get("cookie")
+        .map(|cookie| {
+            cookie.split(';').any(|part| {
+                let Some((name, value)) = part.trim().split_once('=') else {
+                    return false;
+                };
+                name.trim() == "ui_token" && secret_eq(value.trim(), expected)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 查询串里的 `t=<token>` 是否与配置值定长相等。
+///
+/// 只认完整的 `t` 键，且先做 URL 解码（`?t=abc%2Ddef`）。同样不按子串匹配。
+fn query_token_ok(query: &str, expected: &str) -> bool {
+    query.split('&').any(|kv| match kv.split_once('=') {
+        Some((name, value)) if name == "t" => secret_eq(&pct_decode(value), expected),
+        _ => false,
+    })
 }
 
 /// 请求是否带对了受信代理密钥。没有配置密钥时**始终** false。
@@ -1691,6 +1731,34 @@ fn resolve_in_workspace(
     Ok((rel, path))
 }
 
+/// 实验室包名必须是工作区下的单段目录名（解码后）。
+///
+/// `resolve_in_workspace` 已经挡住越界与反斜杠；这里再限制为单段，保持
+/// 「name 是包名，不是包内路径」的接口语义。
+fn valid_bundle_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+}
+
+/// `/api/lab/run` 的 shell 选择：Windows 用 `cmd /C`，其他平台 `sh -c`。
+fn lab_shell_command(command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+}
+
 /// 不展示、也不允许直达的目录名。大小写不敏感：Windows 文件系统本身不区分大小写，
 /// 只挡小写 `secrets` 等于没挡（`Secrets/` 照样能读）。
 fn is_blocked_component(name: &str) -> bool {
@@ -1815,13 +1883,8 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
     // 绑的是 127.0.0.1，局域网进不来；真正的威胁是「本机其它程序」和
     // 「你浏览器里访问的恶意网页能 POST 到 localhost」。所以默认要求 token。
     if !hub.token.is_empty() {
-        let bearer = headers
-            .get("cookie")
-            .map(|c| c.contains(&format!("ui_token={}", hub.token)))
-            .unwrap_or(false);
-        let from_query = query
-            .split('&')
-            .any(|kv| kv == format!("t={}", hub.token));
+        let bearer = cookie_token_ok(&headers, &hub.token);
+        let from_query = query_token_ok(query, &hub.token);
         if !bearer && !from_query {
             return unauthorized(&mut stream, path.starts_with("/api"));
         }
@@ -2108,19 +2171,23 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         }
         // 实验室：读某个包的 report.md（只允许包名，不允许路径）
         ("GET", path_) if path_.starts_with("/api/lab/report") => {
-            let name = query
+            let raw = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("name="))
                 .unwrap_or("");
-            if name.contains('/') || name.contains("..") || name.is_empty() {
-                return json_response(&mut stream, "{\"error\":\"非法包名\"}");
-            }
-            let dir = hub.bundles.join(name);
+            // 与 /api/file、/api/tree 共用同一套路径校验：URL 解码、绝对路径、
+            // Windows 反斜杠、`..`、符号链接越界都要挡住。这里再只接受单段
+            // 包名，避免 `exp/sub` 这类“包内路径”绕过包边界的语义。
+            let (name, dir) = match resolve_in_workspace(&hub.bundles, raw) {
+                Ok((rel, dir)) if valid_bundle_name(&rel) && dir.is_dir() => (rel, dir),
+                Ok(_) => return json_response(&mut stream, &error_body("非法包名")),
+                Err(e) => return json_response(&mut stream, &error_body(&e)),
+            };
             let read = |f: &str| {
                 std::fs::read_to_string(dir.join(f)).unwrap_or_else(|_| String::new())
             };
             let out = Json::obj(vec![
-                ("name", Json::from(name)),
+                ("name", Json::from(name.as_str())),
                 ("report", Json::from(read("report.md"))),
                 ("meta", Json::from(read("meta.json"))),
                 ("claims", Json::from(read("claims.json"))),
@@ -2147,10 +2214,8 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             ]));
             std::thread::spawn(move || {
                 let started = std::time::Instant::now();
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .output();
+                // Windows 没有 `sh`，要显式走 `cmd /C`；其他平台保持 `sh -c`。
+                let status = lab_shell_command(&cmd).output();
                 let (code, tail) = match status {
                     Ok(out) => {
                         let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2276,6 +2341,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             Err(e) => admin_unavailable(&mut stream, &e),
         },
         ("PUT", "/api/admin/roles") => {
+            // 读当前矩阵 → 校验 → intent 审计 → 原子落盘 + 换内存 → 最终审计，
+            // 整段持管理写锁。两个 owner 同时提交整表也只会串行执行，不会互相覆盖。
+            let _admin_guard = hub_lock(&hub.admin_write);
             let (mut next, users_now, users_source) = match effective_state(&hub) {
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
@@ -2293,28 +2361,73 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             if let Err(e) = apply_role_update(&mut next, &users_now, &value) {
                 return json_response_status(&mut stream, "400 Bad Request", &error_body(&e));
             }
-            if let Err(e) = persist_rbac(&hub, &next) {
-                return json_response_status(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    &error_body(&format!("角色矩阵未更新：{}", e)),
-                );
-            }
             let actor_id = actor
                 .as_ref()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "unknown".to_string());
             let roles_json = next.to_json().get("roles").cloned().unwrap_or(Json::Null);
+            let intent_payload = Json::obj(vec![("roles", roles_json.clone())]);
+            let intent_seq = match audit_rbac(
+                &hub,
+                "rbac/role-update-intent",
+                &actor_id,
+                intent_payload,
+            ) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    return json_response_status(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("applied", Json::Bool(false)),
+                            (
+                                "error",
+                                Json::from(format!("角色矩阵未更新：审计 intent 写入失败: {}", e)),
+                            ),
+                        ])
+                        .to_compact(),
+                    )
+                }
+            };
+            if let Err(e) = persist_rbac(&hub, &next) {
+                let error_audit =
+                    audit_admin_update_error(&hub, &actor_id, "roles", intent_seq, &e);
+                let mut out = Json::obj(vec![
+                    ("ok", Json::Bool(false)),
+                    ("applied", Json::Bool(false)),
+                    ("intentSeq", Json::from(intent_seq)),
+                    ("error", Json::from(format!("角色矩阵未更新：{}", e))),
+                ]);
+                if let Err(audit_error) = error_audit {
+                    out.set(
+                        "error",
+                        Json::from(format!(
+                            "角色矩阵未更新：{}；补写 rbac/update-error 也失败：{}",
+                            e, audit_error
+                        )),
+                    );
+                }
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &out.to_compact(),
+                );
+            }
             match audit_rbac(
                 &hub,
                 "rbac/role-update",
                 &actor_id,
-                Json::obj(vec![("roles", roles_json)]),
+                Json::obj(vec![
+                    ("roles", roles_json),
+                    ("intentSeq", Json::from(intent_seq)),
+                ]),
             ) {
                 Ok(seq) => {
                     let mut out = rbac_payload(&next, &users_now, users_source);
                     out.set("ok", Json::Bool(true));
                     out.set("journalSeq", Json::from(seq));
+                    out.set("intentSeq", Json::from(intent_seq));
                     json_response(&mut stream, &out.to_compact())
                 }
                 Err(e) => json_response_status(
@@ -2323,6 +2436,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     &Json::obj(vec![
                         ("ok", Json::Bool(false)),
                         ("applied", Json::Bool(true)),
+                        ("intentSeq", Json::from(intent_seq)),
                         ("error", Json::from(format!("角色矩阵已更新，但审计失败: {}", e))),
                     ])
                     .to_compact(),
@@ -2330,6 +2444,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             }
         }
         ("PUT", "/api/admin/users") => {
+            // 同角色矩阵：读用户表 → 校验 → intent 审计 → 落盘 + 换内存 → 最终审计，
+            // 整段持管理写锁。两个管理员并发改不同用户时，后一个看到的必须是前一个
+            // 已提交的表，不能各自基于旧快照整表覆盖。
+            let _admin_guard = hub_lock(&hub.admin_write);
             let (rbac, users_now, _source) = match effective_state(&hub) {
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
@@ -2493,13 +2611,6 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     "update"
                 };
             }
-            if let Err(e) = persist_users(&hub, &next) {
-                return json_response_status(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    &error_body(&format!("用户表未更新：{}", e)),
-                );
-            }
             let actor_id = actor
                 .as_ref()
                 .map(|a| a.id.clone())
@@ -2515,6 +2626,53 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     payload.set("display", Json::from(display.as_str()));
                 }
             }
+            let intent_seq = match audit_rbac(
+                &hub,
+                "rbac/user-update-intent",
+                &actor_id,
+                payload.clone(),
+            ) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    return json_response_status(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &Json::obj(vec![
+                            ("ok", Json::Bool(false)),
+                            ("applied", Json::Bool(false)),
+                            (
+                                "error",
+                                Json::from(format!("用户表未更新：审计 intent 写入失败: {}", e)),
+                            ),
+                        ])
+                        .to_compact(),
+                    )
+                }
+            };
+            if let Err(e) = persist_users(&hub, &next) {
+                let error_audit =
+                    audit_admin_update_error(&hub, &actor_id, "users", intent_seq, &e);
+                let mut out = Json::obj(vec![
+                    ("ok", Json::Bool(false)),
+                    ("applied", Json::Bool(false)),
+                    ("intentSeq", Json::from(intent_seq)),
+                    ("error", Json::from(format!("用户表未更新：{}", e))),
+                ]);
+                if let Err(audit_error) = error_audit {
+                    out.set(
+                        "error",
+                        Json::from(format!(
+                            "用户表未更新：{}；补写 rbac/update-error 也失败：{}",
+                            e, audit_error
+                        )),
+                    );
+                }
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &out.to_compact(),
+                );
+            }
             user_change_reply(
                 &mut stream,
                 &hub,
@@ -2523,9 +2681,12 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 &next.users,
                 UsersSource::File,
                 &rbac,
+                intent_seq,
             )
         }
         ("DELETE", "/api/admin/users") => {
+            // 与 PUT 共用同一把管理写锁：删除也必须是完整事务。
+            let _admin_guard = hub_lock(&hub.admin_write);
             let (rbac, users_now, _source) = match effective_state(&hub) {
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
@@ -2563,29 +2724,70 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 users: users_now.clone(),
             };
             next.users.remove(&id);
-            if let Err(e) = persist_users(&hub, &next) {
-                return json_response_status(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    &error_body(&format!("用户表未更新：{}", e)),
-                );
-            }
             let actor_id = actor
                 .as_ref()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "unknown".to_string());
+            let payload = Json::obj(vec![
+                ("id", Json::from(id.as_str())),
+                ("role", Json::from(existing.role.as_str())),
+                ("action", Json::from("revoke")),
+            ]);
+            let intent_seq =
+                match audit_rbac(&hub, "rbac/user-update-intent", &actor_id, payload.clone()) {
+                    Ok(seq) => seq,
+                    Err(e) => {
+                        return json_response_status(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            &Json::obj(vec![
+                                ("ok", Json::Bool(false)),
+                                ("applied", Json::Bool(false)),
+                                (
+                                    "error",
+                                    Json::from(format!(
+                                        "用户表未更新：审计 intent 写入失败: {}",
+                                        e
+                                    )),
+                                ),
+                            ])
+                            .to_compact(),
+                        )
+                    }
+                };
+            if let Err(e) = persist_users(&hub, &next) {
+                let error_audit =
+                    audit_admin_update_error(&hub, &actor_id, "users", intent_seq, &e);
+                let mut out = Json::obj(vec![
+                    ("ok", Json::Bool(false)),
+                    ("applied", Json::Bool(false)),
+                    ("intentSeq", Json::from(intent_seq)),
+                    ("error", Json::from(format!("用户表未更新：{}", e))),
+                ]);
+                if let Err(audit_error) = error_audit {
+                    out.set(
+                        "error",
+                        Json::from(format!(
+                            "用户表未更新：{}；补写 rbac/update-error 也失败：{}",
+                            e, audit_error
+                        )),
+                    );
+                }
+                return json_response_status(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &out.to_compact(),
+                );
+            }
             user_change_reply(
                 &mut stream,
                 &hub,
                 &actor_id,
-                Json::obj(vec![
-                    ("id", Json::from(id.as_str())),
-                    ("role", Json::from(existing.role.as_str())),
-                    ("action", Json::from("revoke")),
-                ]),
+                payload,
                 &next.users,
                 UsersSource::File,
                 &rbac,
+                intent_seq,
             )
         }
         ("POST", "/api/revert") => {
@@ -3508,21 +3710,46 @@ fn audit_rbac(hub: &Hub, kind: &str, actor: &str, payload: Json) -> Result<u64, 
     Ok(event.u64_at("seq").unwrap_or(0))
 }
 
+/// 落盘失败的补账：把 intent 序号和错误原文写进当前 session journal。
+///
+/// 这条事件是「已经宣布要改、但最终没改成」的证据；没有它就只能靠猜。
+fn audit_admin_update_error(
+    hub: &Hub,
+    actor: &str,
+    target: &str,
+    intent_seq: u64,
+    error: &str,
+) -> Result<u64, String> {
+    audit_rbac(
+        hub,
+        "rbac/update-error",
+        actor,
+        Json::obj(vec![
+            ("target", Json::from(target)),
+            ("intentSeq", Json::from(intent_seq)),
+            ("error", Json::from(error)),
+        ]),
+    )
+}
+
 /// 用户表变更的统一收尾：写审计 → 返回完整用户表 + `journalSeq`。
 /// 审计失败时明确说"已生效但没记账"，不假装整体失败（文件已经改了）。
 fn user_change_reply(
     stream: &mut TcpStream,
     hub: &Hub,
     actor_id: &str,
-    payload: Json,
+    mut payload: Json,
     users: &std::collections::BTreeMap<String, UserRecord>,
     source: UsersSource,
     rbac: &Rbac,
+    intent_seq: u64,
 ) -> std::io::Result<()> {
+    payload.set("intentSeq", Json::from(intent_seq));
     match audit_rbac(hub, "rbac/user-update", actor_id, payload) {
         Ok(seq) => {
             let mut out = users_payload(users, source, rbac);
             out.set("journalSeq", Json::from(seq));
+            out.set("intentSeq", Json::from(intent_seq));
             json_response(stream, &out.to_compact())
         }
         Err(e) => json_response_status(
@@ -3531,10 +3758,26 @@ fn user_change_reply(
             &Json::obj(vec![
                 ("ok", Json::Bool(false)),
                 ("applied", Json::Bool(true)),
+                ("intentSeq", Json::from(intent_seq)),
                 ("error", Json::from(format!("用户表已更新，但审计失败: {}", e))),
             ])
             .to_compact(),
         ),
+    }
+}
+
+/// owner 是管理面的根：矩阵里必须始终有 `owner`，且它必须保留管理能力
+/// （`manage=true`）。否则一次整表替换或一次单角色更新就能把管理面锁死，
+/// 之后没有任何身份能恢复。
+fn ensure_owner_invariant(
+    roles: &std::collections::BTreeMap<String, RolePerms>,
+) -> Result<(), String> {
+    match roles.get("owner") {
+        None => Err("角色矩阵必须保留 owner 角色（不能整表删除）".to_string()),
+        Some(perms) if !perms.manage => Err(
+            "owner 角色的 manage 必须为 true（不能清空 owner 的管理权限）".to_string(),
+        ),
+        Some(_) => Ok(()),
     }
 }
 
@@ -3557,6 +3800,7 @@ fn apply_role_update(
         if parsed.is_empty() {
             return Err("roles 不能为空：至少保留 owner".to_string());
         }
+        ensure_owner_invariant(&parsed)?;
         if let Some((id, user)) = users.iter().find(|(_, u)| !parsed.contains_key(&u.role)) {
             return Err(format!(
                 "用户 {} 映射的角色 {} 会被删除，先改用户",
@@ -3577,7 +3821,10 @@ fn apply_role_update(
         return Err(format!("非法角色名: {}（只允许字母数字 _ - .）", name));
     }
     let perms = role_perms(value, true)?;
-    rbac.roles.insert(name, perms);
+    let mut candidate = rbac.roles.clone();
+    candidate.insert(name, perms);
+    ensure_owner_invariant(&candidate)?;
+    rbac.roles = candidate;
     Ok(())
 }
 
@@ -5158,6 +5405,460 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
+
+    #[test]
+    fn concurrent_role_updates_do_not_lose_writes() {
+        let ws = temp_workspace("admin-concurrent-roles");
+        let secret = "admin-concurrent-roles-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        const N: usize = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let mut workers = Vec::new();
+        for i in 0..N {
+            let hub = hub.clone();
+            let barrier = barrier.clone();
+            let secret = secret.to_string();
+            workers.push(std::thread::spawn(move || {
+                // 同时起跑：旧实现会各自读到同一份旧矩阵，最后一个整表保存者
+                // 把其余更新覆盖掉。管理写锁必须让它们串行提交。
+                barrier.wait();
+                let body = format!(
+                    r#"{{"name":"role{}","write":true,"audit":false,"manage":false}}"#,
+                    i
+                );
+                proxy_call(
+                    hub,
+                    "PUT",
+                    "/api/admin/roles",
+                    &body,
+                    &secret,
+                    "root@example.com",
+                    "owner",
+                )
+            }));
+        }
+        for worker in workers {
+            let (head, out) = worker.join().unwrap();
+            assert!(head.contains("200"), "并发角色更新失败: {} {}", head, out);
+        }
+
+        let saved = std::fs::read_to_string(ws.join(".ui").join("rbac.json")).unwrap();
+        let parsed = json::parse(saved.trim()).unwrap();
+        let roles = parsed.get("roles").expect("roles");
+        for i in 0..N {
+            assert!(
+                roles.get(&format!("role{}", i)).is_some(),
+                "并发更新丢了 role{}: {}",
+                i,
+                saved
+            );
+        }
+        assert_eq!(
+            roles.get("owner").and_then(|owner| owner.bool_at("manage")),
+            Some(true),
+            "串行提交也不能破坏 owner: {}",
+            saved
+        );
+
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "审计日志不该损坏");
+        let intents = events
+            .iter()
+            .filter(|e| e.str_at("kind") == Some("rbac/role-update-intent"))
+            .count();
+        let finals = events
+            .iter()
+            .filter(|e| e.str_at("kind") == Some("rbac/role-update"))
+            .count();
+        assert_eq!(intents, N, "每次角色更新都要先写 intent");
+        assert_eq!(finals, N, "每次角色更新都要写最终审计");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn concurrent_user_updates_do_not_lose_writes() {
+        let ws = temp_workspace("admin-concurrent-users");
+        let secret = "admin-concurrent-users-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        const N: usize = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let mut workers = Vec::new();
+        for i in 0..N {
+            let hub = hub.clone();
+            let barrier = barrier.clone();
+            let secret = secret.to_string();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let body = format!(r#"{{"id":"u{}@example.com","role":"operator"}}"#, i);
+                proxy_call(
+                    hub,
+                    "PUT",
+                    "/api/admin/users",
+                    &body,
+                    &secret,
+                    "admin@example.com",
+                    "admin",
+                )
+            }));
+        }
+        for worker in workers {
+            let (head, out) = worker.join().unwrap();
+            assert!(head.contains("200"), "并发用户更新失败: {} {}", head, out);
+        }
+
+        let saved = std::fs::read_to_string(ws.join(".ui").join("users.json")).unwrap();
+        let parsed = json::parse(saved.trim()).unwrap();
+        let rows = parsed.arr_at("users").expect("users 数组");
+        assert_eq!(rows.len(), N, "并发更新丢了用户: {}", saved);
+        for i in 0..N {
+            let id = format!("u{}@example.com", i);
+            assert!(
+                rows.iter().any(|row| row.str_at("id") == Some(id.as_str())),
+                "并发更新丢了 {}: {}",
+                id,
+                saved
+            );
+        }
+
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "审计日志不该损坏");
+        let intents = events
+            .iter()
+            .filter(|e| e.str_at("kind") == Some("rbac/user-update-intent"))
+            .count();
+        let finals = events
+            .iter()
+            .filter(|e| e.str_at("kind") == Some("rbac/user-update"))
+            .count();
+        assert_eq!(intents, N, "每次用户更新都要先写 intent");
+        assert_eq!(finals, N, "每次用户更新都要写最终审计");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 直接证明管理面写路由会取专用写锁：锁被占住时请求不能完成，
+    /// 释放后按正常流程落账。并发用例证明“不丢更新”，这条证明“确实串行”。
+    #[test]
+    fn admin_write_route_waits_for_the_serialization_lock() {
+        let ws = temp_workspace("admin-lock-wait");
+        let secret = "admin-lock-wait-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        let guard = hub_lock(&hub.admin_write);
+        let (tx, rx) = channel();
+        let hub2 = hub.clone();
+        let secret2 = secret.to_string();
+        let worker = std::thread::spawn(move || {
+            let result = proxy_call(
+                hub2,
+                "PUT",
+                "/api/admin/roles",
+                r#"{"name":"locked","write":true,"audit":false,"manage":false}"#,
+                &secret2,
+                "root@example.com",
+                "owner",
+            );
+            let _ = tx.send(result);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "管理写锁被占用时，写请求不能提前完成"
+        );
+        drop(guard);
+        let (head, out) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("释放管理写锁后请求应完成");
+        assert!(head.contains("200"), "{} {}", head, out);
+        worker.join().unwrap();
+        let saved = std::fs::read_to_string(ws.join(".ui").join("rbac.json")).unwrap();
+        assert!(
+            saved.contains("\"locked\""),
+            "释放锁后更新应落盘: {}",
+            saved
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn role_matrix_must_keep_a_manageable_owner() {
+        let ws = temp_workspace("admin-owner-invariant");
+        let secret = "admin-owner-invariant-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+
+        for (label, body) in [
+            (
+                "整表删除 owner",
+                r#"{"roles":{"viewer":{"write":false,"audit":false,"manage":false}}}"#,
+            ),
+            (
+                "整表清空 owner 管理权限",
+                r#"{"roles":{"viewer":{"write":false,"audit":false,"manage":false},
+                             "owner":{"write":true,"audit":true,"manage":false}}}"#,
+            ),
+            (
+                "单角色清空 owner 管理权限",
+                r#"{"name":"owner","write":true,"audit":true,"manage":false}"#,
+            ),
+        ] {
+            let (head, out) = proxy_call(
+                hub.clone(),
+                "PUT",
+                "/api/admin/roles",
+                body,
+                secret,
+                "root@example.com",
+                "owner",
+            );
+            assert!(head.contains("400"), "{} 应被拒绝: {} {}", label, head, out);
+        }
+        assert!(
+            !ws.join(".ui").join("rbac.json").exists(),
+            "被拒绝的 owner 更新不能留下落盘副作用"
+        );
+        let (rbac, _, _) = effective_state(&hub).unwrap();
+        let owner = rbac.roles.get("owner").expect("owner 必须仍在内存矩阵里");
+        assert!(owner.manage, "owner 的 manage 不能被清空");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn persist_failure_writes_update_error_audit() {
+        let ws = temp_workspace("admin-persist-fail");
+        let secret = "admin-persist-fail-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        // 用目录占住目标文件：rename 一定失败，但 journal 仍可写。
+        std::fs::create_dir_all(ws.join(".ui").join("rbac.json")).unwrap();
+
+        let (head, out) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/roles",
+            r#"{"name":"operator","write":false,"audit":false,"manage":false}"#,
+            secret,
+            "root@example.com",
+            "owner",
+        );
+        assert!(head.contains("500"), "落盘失败必须 500: {} {}", head, out);
+        assert!(out.contains("\"applied\":false"), "不能声称已生效: {}", out);
+
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "审计日志不该损坏");
+        let intent = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("rbac/role-update-intent"))
+            .expect("先写 intent");
+        let error = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("rbac/update-error"))
+            .expect("落盘失败必须补 error 审计");
+        assert!(intent < error, "intent 必须先于 error");
+        let error_event = &events[error];
+        assert_eq!(error_event.str_at("target"), Some("roles"));
+        assert!(
+            error_event.u64_at("intentSeq").unwrap_or(0) > 0,
+            "error 审计要能对回 intent: {:?}",
+            error_event
+        );
+        assert!(
+            error_event
+                .str_at("error")
+                .map(|e| e.contains("rbac.json"))
+                .unwrap_or(false),
+            "error 审计要带落盘错误原文: {:?}",
+            error_event
+        );
+        // 落盘失败时内存保持旧矩阵：operator 仍有 write。
+        let (current, _, _) = effective_state(&hub).unwrap();
+        assert!(
+            current
+                .roles
+                .get("operator")
+                .map(|p| p.write)
+                .unwrap_or(false),
+            "落盘失败不能把内存改成新矩阵"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn user_persist_failure_writes_update_error_audit() {
+        let ws = temp_workspace("admin-user-persist-fail");
+        let secret = "admin-user-persist-fail-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        std::fs::create_dir_all(ws.join(".ui").join("users.json")).unwrap();
+
+        let (head, out) = proxy_call(
+            hub.clone(),
+            "PUT",
+            "/api/admin/users",
+            r#"{"id":"alice@example.com","role":"operator"}"#,
+            secret,
+            "admin@example.com",
+            "admin",
+        );
+        assert!(head.contains("500"), "落盘失败必须 500: {} {}", head, out);
+        assert!(out.contains("\"applied\":false"), "不能声称已生效: {}", out);
+
+        let (events, corrupt) =
+            ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+        assert!(corrupt.is_none(), "审计日志不该损坏");
+        let intent = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("rbac/user-update-intent"))
+            .expect("先写 intent");
+        let error = events
+            .iter()
+            .position(|e| e.str_at("kind") == Some("rbac/update-error"))
+            .expect("落盘失败必须补 error 审计");
+        assert!(intent < error, "intent 必须先于 error");
+        let error_event = &events[error];
+        assert_eq!(error_event.str_at("target"), Some("users"));
+        assert!(error_event.u64_at("intentSeq").unwrap_or(0) > 0);
+        let (_, users, _) = effective_state(&hub).unwrap();
+        assert!(
+            users.is_empty(),
+            "落盘失败不能把用户写进内存表: {:?}",
+            users
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn lab_report_rejects_traversal_and_windows_separators() {
+        let ws = temp_workspace("lab-report");
+        let bundles = ws.join("experiments");
+        std::fs::create_dir_all(bundles.join("exp1")).unwrap();
+        std::fs::write(bundles.join("exp1").join("report.md"), "REPORT-OK\n").unwrap();
+        std::fs::write(ws.join("secret.txt"), "CANARY-LAB\n").unwrap();
+
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        hub.bundles = bundles.clone();
+        let hub = Arc::new(hub);
+
+        let (head, body) = http_get(hub.clone(), "/api/lab/report?name=exp1");
+        assert!(head.contains("200 OK"), "{}", head);
+        assert!(body.contains("REPORT-OK"), "正常包应能读: {}", body);
+
+        for target in [
+            "/api/lab/report?name=..%2Fsecret.txt",
+            "/api/lab/report?name=..%5Csecret.txt",
+            "/api/lab/report?name=%2Fetc%2Fpasswd",
+            "/api/lab/report?name=exp1%2Freport.md",
+            "/api/lab/report?name=..",
+            "/api/lab/report?name=.",
+            "/api/lab/report?name=..%2F..%2Fsecret.txt",
+        ] {
+            let (_head, body) = http_get(hub.clone(), target);
+            assert!(body.contains("\"error\""), "{} 应被拒绝: {}", target, body);
+            assert!(
+                !body.contains("CANARY-LAB") && !body.contains("REPORT-OK"),
+                "{} 泄露了工作区内容: {}",
+                target,
+                body
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn local_ui_token_comparison_is_exact() {
+        let ws = temp_workspace("token-exact");
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        hub.token = "s3cret-token".into();
+        let hub = Arc::new(hub);
+        let cookie = |value: &str| {
+            http_request(
+                hub.clone(),
+                &format!(
+                    "GET /api/state HTTP/1.1\r\nHost: test\r\nCookie: {}\r\nConnection: close\r\n\r\n",
+                    value
+                ),
+            )
+        };
+
+        let (head, _) = cookie("theme=dark; ui_token=s3cret-token");
+        assert!(head.contains("200 OK"), "正确 Cookie 应通过: {}", head);
+        for wrong in [
+            "ui_token=s3cret-token-extra",
+            "xui_token=s3cret-token",
+            "theme=ui_token=s3cret-token",
+            "ui_token=",
+        ] {
+            let (head, _) = cookie(wrong);
+            assert!(
+                head.contains("401"),
+                "错误 Cookie 必须 401: {} {}",
+                wrong,
+                head
+            );
+        }
+
+        let (head, _) = http_get(hub.clone(), "/api/state?t=s3cret-token");
+        assert!(
+            head.contains("303"),
+            "正确 query token 应种 Cookie: {}",
+            head
+        );
+        let (head, _) = http_get(hub.clone(), "/api/state?t=s3cret-token-extra");
+        assert!(head.contains("401"), "query token 不能按前缀匹配: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn viewer_can_read_metrics_and_safe_files_but_not_sensitive_files() {
+        let ws = temp_workspace("viewer-read");
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::write(ws.join("notes").join("a.md"), "hi\n").unwrap();
+        std::fs::write(ws.join(".env"), "CANARY-VIEWER\n").unwrap();
+        let secret = "viewer-read-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        *hub.ready.lock().unwrap() = Some(Json::obj(vec![(
+            "workspace",
+            Json::from(ws.to_string_lossy().to_string()),
+        )]));
+
+        let call = |path: &str| {
+            proxy_call(
+                hub.clone(),
+                "GET",
+                path,
+                "",
+                secret,
+                "v@example.com",
+                "viewer",
+            )
+        };
+
+        // viewer 可以读运维指标与普通工作区文件（只读）。
+        let (head, body) = call("/api/metrics");
+        assert!(head.contains("200 OK"), "viewer 应能读 metrics: {}", head);
+        assert!(body.contains("ui_up 1"), "{}", body);
+        let (head, body) = call("/api/file?path=notes%2Fa.md");
+        assert!(
+            head.contains("200 OK"),
+            "viewer 应能读普通文件: {} {}",
+            head,
+            body
+        );
+        assert!(body.contains("hi"), "{}", body);
+
+        // 敏感文件仍按路径策略 403，不会因为“viewer 只读”而放宽。
+        let (head, body) = call("/api/file?path=.env");
+        assert!(head.contains("403"), "viewer 读敏感文件必须 403: {}", head);
+        assert!(!body.contains("CANARY-VIEWER"), "{}", body);
+
+        // 审计类读接口仍是 auditor/admin 的边界，viewer 不能借读权限绕过。
+        let (head, _) = call("/api/reviews");
+        assert!(head.contains("403"), "viewer 不能读 reviews: {}", head);
+        let (head, _) = call("/api/audit/export");
+        assert!(head.contains("403"), "viewer 不能导出审计: {}", head);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
 
     #[test]
     fn trusted_proxy_requires_actor_and_write_role() {

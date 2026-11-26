@@ -41,11 +41,14 @@ http://127.0.0.1:7788/admin
 | 删除用户 | `DELETE /api/admin/users?id=...` | `manage`；删除 owner 需 `owner` | `.ui/users.json` | `rbac/user-update` |
 
 - 保存后页面重新拉取 `/api/admin/rbac` 与 `/api/admin/users`，并显示
-  `journalSeq`（审计事件序号）；失败时错误卡片显示服务端 `error` 原文；
+  `journalSeq`（最终审计事件序号；响应也带 `intentSeq`）；失败时错误卡片
+  显示服务端 `error` 原文；
 - 矩阵保存是**整份替换**：页面把当前所有行（含未改动的）一起提交，矩阵不能
-  为空，至少保留 `owner`；
+  为空，必须保留 `owner`，且 `owner.manage` 必须为 `true`；否则 400；
 - 若某角色仍被用户表引用，删它的写请求会被 400 拒绝（先改用户，避免留下指向
   未知角色的映射）；
+- 三个写接口共用一把管理面写锁：从读取当前配置、校验、写 intent、原子落盘、
+  更新内存到写最终审计全程串行。两个并发保存不会各自基于旧快照覆盖对方；
 - `PUT /api/admin/users` 的 `role` 省略时只更新 `disabled/display`（角色沿用
   现有记录）；`role:""` 是 M6 旧行为的删除，等价于 `DELETE`；
 - 未知字段、非布尔 `disabled`、超过 128 字符或含控制字符的 `display` 一律 400。
@@ -86,23 +89,34 @@ http://127.0.0.1:7788/admin
 - `PUT /api/admin/roles`：只有角色名 `owner`；
 - `PUT/DELETE /api/admin/users`：需要 `manage`；授予/修改/删除 `owner` 记录
   只有 `owner` 能做（`manage` 不够）；
+- 非管理面只读接口的边界：`GET /api/metrics` 与 `GET /api/file` 允许任何通过
+  身份校验的角色（含 viewer）读取；`/api/file` 仍走工作区路径守卫，`.env*`、
+  私钥、证书等敏感文件 403，绝不放宽；`/api/reviews`、`/api/audit/export`
+  仍需 `audit`；
 - 所有 `/api/admin/*` 都要求受信代理 actor：无 actor 一律 401（本地模式也不
   放行）；
 - 矩阵来自 `.ui/rbac.json`；文件缺失用内置矩阵，损坏拒绝启动；运行期
   `Invalid` 时管理面 503；
-- 写操作顺序：校验 → 原子落盘 → 更新内存 → 写审计；响应带 `journalSeq`；
-  盘上失败时内存保持旧状态，不会"响应说成功、重启就回退"；
+- 写操作顺序：取管理写锁 → 读当前配置/校验 → 写 `*-intent` 审计 → 原子落盘
+  + 更新内存 → 写最终审计（带 `intentSeq`）。盘上失败时内存保持旧状态，并补写
+  `rbac/update-error`，不会"响应说成功、重启就回退"；
+- `owner` 不变量：矩阵必须始终有 `owner` 且 `manage=true`；整表删除 owner 或
+  清空其管理权限会被 400 拒绝；
 - 代理密钥不会出现在事件、journal、`rbac.json`、`users.json` 或响应正文里。
 
 ## 审计
 
 | 事件 | 触发 | 关键字段 |
 |---|---|---|
-| `rbac/role-update` | `PUT /api/admin/roles` 成功 | `actor`、`roles`（完整新矩阵） |
-| `rbac/user-update` | `PUT/DELETE /api/admin/users` 成功 | `actor`、`id`、`role`、`action`（`add/update/disable/enable/revoke`）、`disabled`、可选 `display` |
+| `rbac/role-update-intent` | `PUT /api/admin/roles` 落盘前 | `actor`、`roles`（拟生效的完整矩阵） |
+| `rbac/role-update` | `PUT /api/admin/roles` 成功 | `actor`、`roles`（完整新矩阵）、`intentSeq` |
+| `rbac/user-update-intent` | `PUT/DELETE /api/admin/users` 落盘前 | `actor`、`id`、`role`、`action`、可选 `disabled/display` |
+| `rbac/user-update` | `PUT/DELETE /api/admin/users` 成功 | 同 intent，另带 `intentSeq` |
+| `rbac/update-error` | 落盘失败 | `actor`、`target`（`roles`/`users`）、`intentSeq`、`error` |
 
 审计写**当前** session journal（`default` 或 `.ui/sessions/<name>.jsonl`），不是
-固定写 default。
+固定写 default。intent 写不进去就不执行变更；最终审计写不进去时响应明确说
+"已生效但审计失败"并带 `intentSeq`，不假装整体成功，也不留下无 intent 的账。
 
 ## 测试
 
@@ -119,7 +133,14 @@ http://127.0.0.1:7788/admin
 - `admin_users_api_requires_audit_to_read_and_manage_to_write`；
 - `only_owner_can_grant_or_revoke_owner`；
 - `users_json_migrates_legacy_mapping_and_audits_changes`；
-- `role_matrix_cannot_drop_role_referenced_by_users_json`。
+- `role_matrix_cannot_drop_role_referenced_by_users_json`；
+- `concurrent_role_updates_do_not_lose_writes` / `concurrent_user_updates_do_not_lose_writes`；
+- `admin_write_route_waits_for_the_serialization_lock`；
+- `role_matrix_must_keep_a_manageable_owner`；
+- `persist_failure_writes_update_error_audit` / `user_persist_failure_writes_update_error_audit`；
+- `lab_report_rejects_traversal_and_windows_separators`；
+- `local_ui_token_comparison_is_exact`；
+- `viewer_can_read_metrics_and_safe_files_but_not_sensitive_files`。
 
 OIDC 适配层见 [docs/51](51-oidc.md)；身份边界与部署拓扑见
 [docs/41](41-enterprise-m1.md)。
