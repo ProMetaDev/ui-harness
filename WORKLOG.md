@@ -1,5 +1,36 @@
 # Worklog
 
+## 2026-11-26 · 二轮评审 P0 并行修复
+
+按老师评审表 2 的三条 P0 并行，各自 worktree，互不抢文件：
+
+- N-P0-1 `feat/protected-read` / `fb351ba`：
+  - `is_allowed_read` 增加真实路径 canonicalize，软链不能借 `.ui/tool-output/` 例外；
+  - `.env*`/私钥/证书名接入 fs_read、`/api/file`、`/api/tree`；
+  - 回归：软链到 secrets/工作区外、敏感名别名均拒绝。
+- N-P0-2 `feat/runner-hardening` / `4b75373`：
+  - 容器匿名卷遮蔽 `secrets/.ui/.git`，根 `.env` bind `/dev/null`；
+  - 拒绝负数/缺失 Content-Length、chunked；执行期 8MiB 输出上限；
+  - live 测试新增 mask/body-validation/output-cap。
+- N-P0-3 `feat/oidc-hardening` / `d7728db`：
+  - aud 默认 strict；`OIDC_IDENTITY=sub|email`，email 需 `email_verified`；
+  - SSE 独立超时；非回环强制 HTTPS；Host 统一小写；
+  - 27 项单测 + 20 项 OIDC e2e 通过。
+
+集成后：
+
+- `tools/debug.sh` **57 passed / 0 failed**；
+- Rust 全量通过（一次 `lab_claims` 偶发失败，单跑与连续 3 次全量通过）；
+- `verify_runner_live.sh`：mask/body-validation/output-cap 通过；
+- `verify_secrets_isolation.sh`：6/6 BLOCKED；
+- OIDC 单测 27、e2e 20；
+- 24h soak 未受合并影响，仍在跑。
+
+残余：
+
+- `grep`/`fs_search` 输出与 `fs_edit` 尚未按敏感名过滤；
+- N-P1-1 管理面审计顺序/写锁、N-P1-2 Worker session/lease、N-P1-3 Web 细节、P2 未做。
+
 ## 2026-11-24 · 版本 0.3.0 + soak 断点续跑
 
 - 版本号 `0.2.2 → 0.3.0`，未打 tag；tag 等 24h 与真实外部验证后。
