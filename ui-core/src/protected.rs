@@ -32,6 +32,21 @@ use std::sync::{Mutex, OnceLock};
 /// 拉黑会让模型读不到构建配置，收益不抵代价。
 pub const PROTECTED_DIRS: &[&str] = &[".ui", ".git", "secrets"];
 
+/// 敏感名里的固定文件名（小写比较）。
+const SENSITIVE_NAMES: &[&str] = &[
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+];
+
+/// 敏感扩展名（小写比较）。
+const SENSITIVE_EXTENSIONS: &[&str] = &["key", "pem", "p12", "pfx"];
+
 /// 文件级敏感名：目录清单管不到 `.env` / 私钥这类单文件。
 ///
 /// checkpoint 会把文件内容复制进 blob，index 会把路径/符号写进 manifest；
@@ -42,16 +57,25 @@ pub fn is_sensitive_file_name(name: &str) -> bool {
     if n == ".env" || n.starts_with(".env.") {
         return true;
     }
-    if matches!(
-        n.as_str(),
-        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | "credentials" | ".netrc" | ".npmrc" | ".pypirc"
-    ) {
+    if SENSITIVE_NAMES.contains(&n.as_str()) {
         return true;
     }
-    matches!(
-        n.rsplit_once('.').map(|(_, e)| e),
-        Some("key" | "pem" | "p12" | "pfx")
-    )
+    match n.rsplit_once('.') {
+        Some((_, ext)) => SENSITIVE_EXTENSIONS.contains(&ext),
+        None => false,
+    }
+}
+
+/// 敏感名的 glob 形态，给**只能按名字过滤**的调用点用（系统 `grep --exclude`）。
+///
+/// 权威判据仍是 `is_sensitive_file_name` / `is_sensitive_read_path`：glob 只做
+/// 读取前的粗筛，大小写变体与 `notes.txt -> .env` 这种软链别名它判不了，
+/// 结果行还会按真实路径过滤一次。两边不一致时结果过滤是权威。
+pub fn sensitive_file_globs() -> Vec<String> {
+    let mut out = vec![".env".to_string(), ".env.*".to_string()];
+    out.extend(SENSITIVE_NAMES.iter().map(|n| n.to_string()));
+    out.extend(SENSITIVE_EXTENSIONS.iter().map(|e| format!("*.{}", e)));
+    out
 }
 
 /// 受保护目录里唯一允许 `fs.read` 的路径前缀（相对 workspace，`/` 分隔）。
@@ -649,16 +673,44 @@ pub fn is_allowed_read(workspace: &Path, path: &Path) -> bool {
 /// 解析不出真实路径时**不额外拒绝**：名字这一关已经过了，剩下的边界归
 /// `is_allowed_read` 与隐私清单；而敏感名本身永远没有读取例外。
 pub fn is_sensitive_read_path(path: &Path) -> bool {
-    let named = |p: &Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map(is_sensitive_file_name)
-            .unwrap_or(false)
-    };
-    named(path)
+    has_sensitive_name(path)
         || canonicalize_with_missing(path)
-            .map(|real| named(&real))
+            .map(|real| has_sensitive_name(&real))
             .unwrap_or(false)
+}
+
+/// 只看**调用方给的名字**的那一半判定（软链别名要靠真实路径那一半）。
+fn has_sensitive_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(is_sensitive_file_name)
+        .unwrap_or(false)
+}
+
+/// 读入口与写入口共用的「这个条目不可见」判定：敏感单文件（含软链别名）
+/// 或隐私清单（含真实路径）都算。
+///
+/// 写入口没有读例外，所以这里**不**引入 `is_allowed_read`：`.ui/tool-output/`
+/// 能读回来，但不能借同一条路径被写。`grep`/`fs_search`/`tree` 的条目过滤
+/// 与 `fs_write`/`fs_edit`/`patch`/`fs_mv` 的拒绝走的是这一条，敏感名不再只
+/// 挂在 `fs_read` 上。
+///
+/// 名字/路径的字面判定先短路，普通条目只多付一次 `canonicalize`（软链别名
+/// 必须解析真实路径才判得出来）；扫描大目录时不能每个条目解析两遍。
+pub fn is_sensitive_or_private(workspace: &Path, path: &Path) -> bool {
+    if has_sensitive_name(path) || is_private_path(workspace, path) {
+        return true;
+    }
+    // 相对路径按 workspace 解释：`canonicalize` 自己会用进程 CWD，不能直接喂。
+    let target = if path.is_relative() {
+        workspace.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    match canonicalize_with_missing(&target) {
+        Some(real) => has_sensitive_name(&real) || is_private_path(workspace, &real),
+        None => false,
+    }
 }
 
 #[cfg(test)]

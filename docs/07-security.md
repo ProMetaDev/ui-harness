@@ -12,7 +12,7 @@
 | 路径折叠 | `Ctx::resolve` 做词法折叠，`..` 不能离开工作区 | `fs_read ../secret.txt` 读到外面 |
 | 真实路径 | `Agent::escapes_workspace`：`canonicalize` 后必须仍在工作区内 | 符号链接把工作区外的内容读进来 |
 | 读取例外 | `protected::is_allowed_read`：字面前缀 **＋** 真实路径都要落在 `<ws>/.ui/tool-output/`，且只对普通文件生效 | `.ui/tool-output/link -> secrets/x` 这种软链借到"截断缓存"的读例外 |
-| 敏感单文件 | `protected::is_sensitive_file_name`：`.env*`、`id_rsa`、`*.pem`、`*.key` 等；工具读入口与 `/api/file` 共用 | `.env` / 私钥被 `fs_read` 或网页预览读出来 |
+| 敏感单文件 | `protected::is_sensitive_file_name`：`.env*`、`id_rsa`、`*.pem`、`*.key` 等；`fs_read` / `grep` / `fs_search` / `tree` 与写入口 `fs_write` / `fs_edit` / `patch` / `fs_mv` 共用，并按真实路径识别软链别名 | `.env` / 私钥被读出来、搜出来、列出来或改掉 |
 | 密钥 | 四层：`secrets/**` 无条件 deny ＋ 隔离副本不带该目录（`isolate::SKIP`）＋ 落账前脱敏门 ＋ `--private` 来源扣留（详见下面「隐私：两档处理 + 生命周期」） | 上下文里仍可能是明文（沙箱不限读）；日志与落盘那两份有档可查、可按保留期清掉 |
 
 ## 已完成的安全修复（来自对抗测试）
@@ -189,6 +189,14 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 `*.pem`、`*.key` 这些敏感文件名也没有例外档。`ui serve` 的 `/api/file` 不
 继承这条例外（`.ui` 一律挡住），对敏感名另外返回 403；`/api/tree` 不列出
 这些名字。
+
+敏感名不是只挂在 `fs_read` 上：`grep`（含没有系统 grep 时的 `literal_search`）、
+`fs_search`、`tree` 在遍历和返回结果时按同一份清单过滤，`grep` 还会用
+`--exclude` 在读取前粗筛；写入口 `fs_write` / `fs_edit` / `patch` / `fs_mv`
+对这些名字一律拒绝。判据看两处——调用方给的名字，和 `canonicalize` 之后的
+真实名字——所以 `notes.txt -> .env` 这种软链别名在读写两侧都躲不掉。
+这里故意不给"编辑配置文件"开例外：能改 `.env` 就等于能把泄漏的密钥写回或
+换掉，代价比少编辑一个文件大；配置要换文件名请直接改名。
 
 这个不对称就是第二档的全部意义。如果扣留的原文也放进可读目录，那日志里
 "全文在 .ui/tool-output/xxx.txt"那句指针本身就是给模型看的提示词：

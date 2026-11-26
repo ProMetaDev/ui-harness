@@ -41,6 +41,10 @@
 都借不到它（悬空链接 fail closed）；`.env*`、私钥/证书（`is_sensitive_file_name`）
 也没有例外档。`ui serve` 的 `/api/file` 对敏感名返回 403，`/api/tree` 不列出它们，
 网页端不继承这条例外。
+敏感名不是只挡 `fs_read`：`grep` / `fs_search` / `tree` 的遍历与结果、以及
+`fs_write` / `fs_edit` / `patch` / `fs_mv` 的写入口都按同一份清单拒绝（软链别名
+按 `canonicalize` 后的真实名字判）。写侧没有读取例外，也不为"编辑配置文件"
+开口子——能改 `.env` 就等于能把泄漏的密钥写回或换掉。
 同一层静态与日志路由也挡住 `.ui`、`.git`、`secrets` 这些**路径**；
 但网页端拿到的是内核推给它的事件流，那一层的原文见下面「网页端能看到什么」。
 
