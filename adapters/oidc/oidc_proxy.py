@@ -16,10 +16,15 @@
 强制约束：
 
 - 客户端自带的 `X-UI-*` 一律先剥离再注入；`Authorization` 不向上游转发；
-- userinfo 必须返回非空 `sub`；`email`/`preferred_username` 作为 `X-UI-User`，
-  两者都没有时退到 `sub`（`sub` 仍会先被校验）；
+- userinfo 必须返回非空 `sub`；`X-UI-User` 默认取 `sub`（`OIDC_IDENTITY=sub`），
+  `OIDC_IDENTITY=email` 只在 `email_verified is True` 时可用；
+- `OIDC_AUD_MODE` 控制 `aud` 校验：`strict`（默认，缺 `aud` 即拒绝）、
+  `if-present`（有 `aud` 才校验）、`off`（不校验）；
 - `OIDC_ROLES_CLAIM` 可以是普通声明名，也可以是 `realm_access.roles` 这种点路径；
 - userinfo 401/403 → 401；网络错误/5xx/坏 JSON → 502（fail closed，不猜测身份）；
+- `/api/events`（及 `/api/stream`）用独立的 `OIDC_SSE_TIMEOUT`，普通请求用
+  `OIDC_TIMEOUT`，SSE 不会被 5 秒读超时提前断开；
+- 非回环 upstream 只允许 `https://`；回环地址允许 `http://`；
 - 上游 `ui serve` 的状态码、响应头、正文（含 SSE）原样透传。
 """
 
@@ -30,15 +35,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY = 1024 * 1024
 MAX_USERINFO_BYTES = 256 * 1024
 DEFAULT_TIMEOUT = 5.0
+DEFAULT_SSE_TIMEOUT = 300.0
 DEFAULT_ROLES_CLAIM = "roles"
+DEFAULT_AUD_MODE = "strict"
+DEFAULT_IDENTITY = "sub"
+AUD_MODES = ("strict", "if-present", "off")
+IDENTITY_MODES = ("sub", "email")
+# SSE 长连接：普通请求的 5s 读超时会把它们提前掐断，必须单独放宽。
+SSE_PATHS = frozenset(["/api/events", "/api/stream"])
 
 USER_HEADER = "X-UI-User"
+EMAIL_HEADER = "X-UI-Email"
 ROLES_HEADER = "X-UI-Roles"
 SECRET_HEADER = "X-UI-Proxy-Secret"
 
@@ -88,6 +101,13 @@ class Config:
     proxy_secret: str
     listen: str
     timeout: float = DEFAULT_TIMEOUT
+    sse_timeout: float = DEFAULT_SSE_TIMEOUT
+    aud_mode: str = DEFAULT_AUD_MODE
+    identity: str = DEFAULT_IDENTITY
+
+    @property
+    def upstream_scheme(self):
+        return urllib.parse.urlsplit(self.upstream_url).scheme
 
     @property
     def upstream_host(self):
@@ -95,11 +115,28 @@ class Config:
 
     @property
     def upstream_port(self):
-        return urllib.parse.urlsplit(self.upstream_url).port or 80
+        parsed = urllib.parse.urlsplit(self.upstream_url)
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    @property
+    def upstream_authority(self):
+        """Host 头用的 authority：IPv6 加方括号，默认端口不重复写。"""
+        host = self.upstream_host or ""
+        if ":" in host and not host.startswith("["):
+            host = "[{}]".format(host)
+        default_port = 443 if self.upstream_scheme == "https" else 80
+        if self.upstream_port == default_port:
+            return host
+        return "{}:{}".format(host, self.upstream_port)
 
 
 def _loopback(host):
     return (host or "") in LOOPBACK_HOSTS
+
+
+def is_sse_path(path):
+    """SSE 端点的路径判断；`/api/stream` 为旧/兼容端点，存在即生效。"""
+    return (path or "").rstrip("/") in SSE_PATHS
 
 
 def load_config(env):
@@ -110,7 +147,13 @@ def load_config(env):
     upstream_url = (env.get("UI_UPSTREAM_URL") or "http://127.0.0.1:7788").strip()
     proxy_secret = env.get("UI_PROXY_SECRET") or ""
     listen = (env.get("OIDC_LISTEN") or "127.0.0.1:7789").strip()
-    timeout_raw = (env.get("OIDC_USERINFO_TIMEOUT") or "").strip()
+    # OIDC_TIMEOUT 是普通请求 canonical 名称；OIDC_USERINFO_TIMEOUT 保留为旧名。
+    timeout_raw = (
+        env.get("OIDC_TIMEOUT") or env.get("OIDC_USERINFO_TIMEOUT") or ""
+    ).strip()
+    sse_timeout_raw = (env.get("OIDC_SSE_TIMEOUT") or "").strip()
+    aud_mode = (env.get("OIDC_AUD_MODE") or DEFAULT_AUD_MODE).strip().lower()
+    identity = (env.get("OIDC_IDENTITY") or DEFAULT_IDENTITY).strip().lower()
 
     if not userinfo_url:
         raise ConfigError("缺少 OIDC_USERINFO_URL")
@@ -118,15 +161,17 @@ def load_config(env):
         raise ConfigError("缺少 UI_PROXY_SECRET（必须与 ui serve --trusted-proxy-secret 相同）")
     if not userinfo_url.lower().startswith(("https://", "http://")):
         raise ConfigError("OIDC_USERINFO_URL 必须是 http(s) URL")
+    if aud_mode not in AUD_MODES:
+        raise ConfigError("OIDC_AUD_MODE 只能是 strict / if-present / off")
+    if identity not in IDENTITY_MODES:
+        raise ConfigError("OIDC_IDENTITY 只能是 sub / email")
     parse_listen(listen)
     parse_upstream(upstream_url)
 
-    try:
-        timeout = float(timeout_raw) if timeout_raw else DEFAULT_TIMEOUT
-    except ValueError:
-        raise ConfigError("OIDC_USERINFO_TIMEOUT 必须是数字")
-    if not (0.1 <= timeout <= 60):
-        raise ConfigError("OIDC_USERINFO_TIMEOUT 必须在 0.1..60 秒之间")
+    timeout = _parse_seconds("OIDC_TIMEOUT", timeout_raw, DEFAULT_TIMEOUT, 0.1, 60)
+    sse_timeout = _parse_seconds(
+        "OIDC_SSE_TIMEOUT", sse_timeout_raw, DEFAULT_SSE_TIMEOUT, 0.1, 3600
+    )
 
     return Config(
         userinfo_url=userinfo_url,
@@ -136,7 +181,22 @@ def load_config(env):
         proxy_secret=proxy_secret.strip(),
         listen=listen,
         timeout=timeout,
+        sse_timeout=sse_timeout,
+        aud_mode=aud_mode,
+        identity=identity,
     )
+
+
+def _parse_seconds(name, raw, default, low, high):
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError("{} 必须是数字".format(name))
+    if not (low <= value <= high):
+        raise ConfigError("{} 必须在 {}..{} 秒之间".format(name, low, high))
+    return value
 
 
 def parse_listen(value):
@@ -154,10 +214,21 @@ def parse_listen(value):
 
 def parse_upstream(value):
     parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "http":
-        raise ConfigError("UI_UPSTREAM_URL 必须是 http://127.0.0.1:<port>（本机 ui serve）")
-    if not _loopback(parsed.hostname):
-        raise ConfigError("UI_UPSTREAM_URL 只允许回环地址，避免把代理密钥发到别处")
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigError("UI_UPSTREAM_URL 必须是 http(s)://")
+    if not parsed.hostname:
+        raise ConfigError("UI_UPSTREAM_URL 缺少主机名")
+    try:
+        parsed.port  # 端口非法（非数字/越界）时 urlsplit 会抛 ValueError
+    except ValueError:
+        raise ConfigError("UI_UPSTREAM_URL 的端口非法")
+    # 明文只会出现在回环地址（本机 ui serve）。非回环必须 HTTPS，
+    # 否则 Bearer token / 代理密钥会以明文穿过网络。
+    if parsed.scheme == "http" and not _loopback(parsed.hostname):
+        raise ConfigError(
+            "非回环 UI_UPSTREAM_URL 必须使用 https://；"
+            "http:// 只允许 127.0.0.1 / localhost / ::1"
+        )
     return parsed
 
 
@@ -194,13 +265,43 @@ def fetch_userinfo(config, token):
     if not isinstance(sub, str) or not sub.strip():
         raise UserinfoError("userinfo 缺少 sub", status=401)
 
-    if config.client_id:
-        aud = info.get("aud")
-        if aud is not None:
-            allowed = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
-            if config.client_id not in allowed:
-                raise UserinfoError("token 的 aud 不包含 OIDC_CLIENT_ID", status=401)
+    check_audience(config, info)
     return info
+
+
+def _audience_values(info):
+    """把 aud 归一成字符串列表；形状不认识时返回 None（调用方 fail closed）。"""
+    raw = info.get("aud")
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if isinstance(raw, list):
+        return [v.strip() for v in raw if isinstance(v, str) and v.strip()]
+    return None
+
+
+def check_audience(config, info):
+    """按 OIDC_AUD_MODE 校验 aud。缺省 strict：缺 aud 也拒绝。"""
+    if not config.client_id or config.aud_mode == "off":
+        return
+
+    raw = info.get("aud")
+    missing = raw is None or raw == "" or raw == []
+    if missing:
+        if config.aud_mode == "strict":
+            raise UserinfoError("userinfo 缺少 aud（OIDC_AUD_MODE=strict）", status=401)
+        return  # if-present：IdP 的 /userinfo 不返回 aud 时放行
+
+    allowed = _audience_values(info)
+    if allowed is None:
+        raise UserinfoError("userinfo 的 aud 形状不受支持", status=401)
+    if not allowed:
+        # 例如 [1, 2]：有 aud 字段但没有可用的字符串 audience。
+        if config.aud_mode == "strict":
+            raise UserinfoError("userinfo 缺少可用的 aud", status=401)
+        return
+    if config.client_id not in allowed:
+        raise UserinfoError("token 的 aud 不包含 OIDC_CLIENT_ID", status=401)
 
 
 def claim_value(info, path):
@@ -246,13 +347,29 @@ def _clean_header_value(value, limit=256):
     return cleaned
 
 
-def identity_from_userinfo(info):
-    """`X-UI-User`：email → preferred_username → sub（sub 已在 fetch 里校验过）。"""
-    for key in ("email", "preferred_username"):
-        cleaned = _clean_header_value(info.get(key))
-        if cleaned:
-            return cleaned
-    return _clean_header_value(info.get("sub"))
+def identity_from_userinfo(config, info):
+    """解析 `X-UI-User`，返回 (user, email_for_display)。
+
+    - 默认 `OIDC_IDENTITY=sub`：主键是 `sub`；`email` 只在
+      `email_verified is True` 时作为展示头，未验证的邮箱不进任何身份头；
+    - `OIDC_IDENTITY=email`：只有 `email_verified is True` 的邮箱才可作为主键，
+      否则 401（避免把可变的未验证邮箱当成身份）。
+    """
+    sub = _clean_header_value(info.get("sub"))
+    if not sub:
+        raise UserinfoError("userinfo 缺少 sub", status=401)
+    email = _clean_header_value(info.get("email"))
+    verified = info.get("email_verified") is True
+
+    if config.identity == "email":
+        if not email:
+            raise UserinfoError("OIDC_IDENTITY=email 但 userinfo 没有 email", status=401)
+        if not verified:
+            raise UserinfoError(
+                "OIDC_IDENTITY=email 但 email_verified 不是 true", status=401
+            )
+        return email, email
+    return sub, (email if verified else "")
 
 
 class Userinfo:
@@ -314,20 +431,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         try:
             info = Userinfo.fetch(self.server.config, token)
+            user, email = identity_from_userinfo(self.server.config, info)
         except UserinfoError as exc:
             if exc.status in (401, 403):
                 return self._deny(401, "token 无效或已过期")
             return self._deny(502, "userinfo 不可用（fail closed）")
 
-        user = identity_from_userinfo(info)
-        if not user:
-            return self._deny(401, "userinfo 没有可用身份字段")
-
         roles = roles_from_claim(claim_value(info, self.server.config.roles_claim))
         body = self._read_body()
         if body is None:
             return  # 已回 411/413/400
-        headers = self._forward_headers(user, roles)
+        headers = self._forward_headers(user, roles, email)
         self._proxy(self.server.config, headers, body)
 
     def _bearer(self):
@@ -367,7 +481,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body += chunk
         return body
 
-    def _forward_headers(self, user, roles):
+    def _forward_headers(self, user, roles, email):
         config = self.server.config
         out = {}
         for name, value in self.headers.items():
@@ -378,44 +492,64 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # token 不向上游转发：ui serve 只认共享密钥 + 身份头。
             if low == "authorization":
                 continue
+            # 客户端 Host 一律不转发：Host 由 _proxy 固定成 upstream authority，
+            # 既避免 Host 注入，也避免大小写不同的 Host 造成重复头。
+            if low == "host":
+                continue
             if low in HOP_BY_HOP or low == "content-length":
                 continue
-            if name in out:
-                out[name] = out[name] + ", " + value
+            # 统一小写键：HTTP 头大小写不敏感，去重/覆盖只按小写判断。
+            if low in out:
+                # 多个 Cookie 头按 RFC 6265 用 "; " 连接，其余按 ", "。
+                separator = "; " if low == "cookie" else ", "
+                out[low] = out[low] + separator + value
             else:
-                out[name] = value
-        out[USER_HEADER] = user
+                out[low] = value
+        out[USER_HEADER.lower()] = user
+        if email:
+            out[EMAIL_HEADER.lower()] = email
         if roles:
-            out[ROLES_HEADER] = ",".join(roles)
-        out[SECRET_HEADER] = config.proxy_secret
+            out[ROLES_HEADER.lower()] = ",".join(roles)
+        out[SECRET_HEADER.lower()] = config.proxy_secret
         # 不注入 X-UI-UserId：ui serve 优先读它，注入 sub 会让用户 id 变成 sub，
         # 与 `.ui/users.json` 里的 email 键对不上。映射键统一用 X-UI-User。
         return out
 
     def _proxy(self, config, headers, body):
-        conn = HTTPConnection(config.upstream_host, config.upstream_port, timeout=config.timeout)
+        connection_cls = (
+            HTTPSConnection if config.upstream_scheme == "https" else HTTPConnection
+        )
+        conn = connection_cls(
+            config.upstream_host, config.upstream_port, timeout=config.timeout
+        )
+        read_timeout = (
+            config.sse_timeout if is_sse_path(self.safe_path) else config.timeout
+        )
         try:
-            # Host 原样转发（客户端视角的 Host）：ui serve 的 CSRF 检查按
-            # Origin == http://<Host> 比对，改成上游端口会把浏览器的写请求判成跨源。
-            host = headers.get("Host") or "{}:{}".format(config.upstream_host, config.upstream_port)
+            # Host 固定为 upstream 的 authority（不采信客户端 Host）。
+            # 浏览器同源写请求靠 Sec-Fetch-Site 通过 CSRF 检查；没有该头的
+            # 旧客户端会因 Origin 与 upstream Host 不一致而被 ui serve 拒绝（fail closed）。
             conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
-            conn.putheader("Host", host)
+            conn.putheader("host", config.upstream_authority)
             for name, value in headers.items():
-                if name.lower() == "host":
-                    continue
                 conn.putheader(name, value)
-            conn.putheader("Content-Length", str(len(body)))
-            conn.putheader("Connection", "close")
+            conn.putheader("content-length", str(len(body)))
+            conn.putheader("connection", "close")
             conn.endheaders()
             if body:
                 conn.send(body)
+            # 连接/发送用普通超时；读响应用路径对应的超时（SSE 单独放宽）。
+            if conn.sock is not None:
+                conn.sock.settimeout(read_timeout)
         except (OSError, HTTPException):
+            conn.close()
             self._deny(502, "上游 ui serve 不可用")
             return
 
         try:
             resp = conn.getresponse()
         except (OSError, HTTPException):
+            conn.close()
             self._deny(502, "上游 ui serve 无响应")
             return
 
@@ -431,7 +565,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 while True:
-                    chunk = resp.read(8192)
+                    # read1：有多少先读多少，SSE 心跳/事件不必等满 8 KiB。
+                    chunk = resp.read1(8192)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
@@ -472,6 +607,12 @@ def main():
         return 2
     if not config.client_id:
         sys.stderr.write("警告: 未设置 OIDC_CLIENT_ID，跳过 aud 校验\n")
+    elif config.aud_mode == "off":
+        sys.stderr.write("警告: OIDC_AUD_MODE=off，userinfo 的 aud 不校验\n")
+    if config.identity == "email":
+        sys.stderr.write(
+            "警告: OIDC_IDENTITY=email，仅接受 email_verified=true；生产建议用 sub\n"
+        )
     host, port = parse_listen(config.listen)
     server = ProxyServer((host, port), config)
     bound_host, bound_port = server.server_address[:2]

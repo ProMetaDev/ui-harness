@@ -19,6 +19,8 @@
 - viewer token + 伪造 `X-UI-User`/`X-UI-Roles`/`X-UI-Proxy-Secret` 仍按 viewer → 403；
 - owner `PUT /api/admin/roles`、`PUT /api/admin/users` → 200，并落 `rbac/*` journal；
 - mock IdP / 代理 / `ui serve` 的日志不含 token 或代理密钥；
+- 代理以 `OIDC_IDENTITY=email` 跑（mock `email_verified=true`），验证既有
+  `.ui/users.json` 的 email 键映射；生产默认仍是 `sub`；
 - 可选：Chrome CDP 注入 `Authorization`，打开 `/admin` 断言 `userForm`/`matrixBody`。
 
 边界：
@@ -69,12 +71,14 @@ IDP_USERS = {
     OWNER_TOKEN: {
         "sub": "owner-sub",
         "email": "owner@example.com",
+        "email_verified": True,
         "aud": OIDC_CLIENT_ID,
         "groups": ["owner"],
     },
     VIEWER_TOKEN: {
         "sub": "viewer-sub",
         "email": "viewer@example.com",
+        "email_verified": True,
         "aud": OIDC_CLIENT_ID,
         "groups": ["viewer"],
     },
@@ -568,12 +572,15 @@ def spawn_proxy(upstream_port, proxy_port, idp_port, logdir):
         {
             "OIDC_USERINFO_URL": "http://127.0.0.1:{}/userinfo".format(idp_port),
             "OIDC_CLIENT_ID": OIDC_CLIENT_ID,
+            # 这条 e2e 沿用 users.json 的 email 映射，所以要显式声明 email 身份；
+            # 适配层要求 email_verified=true（mock IdP 已返回 true）。生产建议用 sub。
+            "OIDC_IDENTITY": "email",
             # mock IdP 用的是 groups 声明：顺便验证 claim 名可配。
             "OIDC_ROLES_CLAIM": "groups",
             "UI_UPSTREAM_URL": "http://127.0.0.1:{}".format(upstream_port),
             "UI_PROXY_SECRET": PROXY_SECRET,
             "OIDC_LISTEN": "127.0.0.1:{}".format(proxy_port),
-            "OIDC_USERINFO_TIMEOUT": "3",
+            "OIDC_TIMEOUT": "3",
             # 不让子进程的 Python 输出受终端编码影响。
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
