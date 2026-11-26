@@ -18,7 +18,7 @@ cat > "$WS/scenario.json" <<'EOF'
 ]}
 EOF
 
-# ?????????????????(?????)
+# 清掉端口上残留的旧进程（没有就忽略）
 fuser -k "$PORT/tcp" >/dev/null 2>&1 && sleep 0.3
 "$BIN" serve --port "$PORT" --workspace "$WS" --mock "$WS/scenario.json" --yes --token off >/tmp/serve.log 2>&1 &
 SRV=$!

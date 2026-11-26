@@ -28,6 +28,14 @@ python3 adapters/worm/store.py list --store /srv/ui/worm --all --json
 
 退出码：0 成功 / 1 输入或 I/O 错误 / 2 完整性失败或保留策略拒绝 / 64 用法错误。
 
+**测试时钟**：`--now <epoch>` 只用于测试保留期，不出现在 `--help` 里；必须显式设置
+`UI_WORM_TEST_CLOCK=1` 才被接受，否则退出 2（提示 test-only）。生产调用不要设置它。
+
+```bash
+# 只允许测试这样改时钟：
+UI_WORM_TEST_CLOCK=1 python3 adapters/worm/store.py delete --store /srv/ui/worm <id> --now 1800000000
+```
+
 ## 边界
 
 - **这是本地 WORM 风格，不是 S3 Object Lock，也不是合规 WORM。** 没有服务端
@@ -45,4 +53,4 @@ bash tools/verify_worm.sh
 ```
 
 覆盖 put/get 一致、重复 put 不覆盖、保留期内 delete 失败、到期删除 + tombstone、
-篡改对象/sidecar/index 后 verify 失败、无 `python3` 时 SKIP。
+篡改对象/sidecar/index 后 verify 失败、`--now` 未开测试时钟时被拒、无 `python3` 时 SKIP。

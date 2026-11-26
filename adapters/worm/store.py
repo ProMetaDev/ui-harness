@@ -64,6 +64,10 @@ EXIT_FAIL = 1
 EXIT_REFUSED = 2
 EXIT_USAGE = 64
 
+# 测试时钟开关：`--now` 只在显式设置该环境变量时接受。
+# 生产/门禁默认用本机时钟；保留期判断是 WORM 的核心承诺，不该由调用方随意指定"现在"。
+TEST_CLOCK_ENV = "UI_WORM_TEST_CLOCK"
+
 ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 FIELDS = {
@@ -172,6 +176,20 @@ def normalize_now(value: int | None) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise WormError("--now must be a non-negative integer (epoch seconds)", EXIT_USAGE)
     return value
+
+
+def require_test_clock(now: int | None) -> None:
+    """`--now` 是测试专用时钟：只有显式设置 UI_WORM_TEST_CLOCK=1 才接受。
+
+    保留期到期判断是 WORM 的核心承诺；如果任何调用方都能随手指定"现在"，
+    保留期就形同虚设。所以误用 `--now` 按拒绝处理（退出码 2），
+    提示它属于测试隔离范围，而不是悄悄生效或降级成普通用法错误（64）。
+    """
+    if now is not None and os.environ.get(TEST_CLOCK_ENV) != "1":
+        raise WormError(
+            f"--now is test-only: set {TEST_CLOCK_ENV}=1 to use the test clock",
+            EXIT_REFUSED,
+        )
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -928,6 +946,7 @@ def read_input(path: str) -> bytes:
 
 
 def cmd_put(args: argparse.Namespace) -> int:
+    require_test_clock(args.now)
     now = normalize_now(args.now)
     if args.retention_until is not None:
         retention = args.retention_until
@@ -964,6 +983,7 @@ def cmd_get(args: argparse.Namespace) -> int:
 
 
 def cmd_delete(args: argparse.Namespace) -> int:
+    require_test_clock(args.now)
     store = WormStore(args.store)
     store.delete(args.id, now=args.now)
     oid = normalize_id(args.id)
@@ -1028,9 +1048,7 @@ def build_parser() -> Parser:
     group.add_argument(
         "--retention-days", type=int, help="retention end = now + N days"
     )
-    put.add_argument(
-        "--now", type=int, help="override the local clock (epoch seconds; tests only)"
-    )
+    put.add_argument("--now", type=int, help=argparse.SUPPRESS)
     put.set_defaults(func=cmd_put)
 
     get = sub.add_parser("get", help="write object bytes to stdout or a file")
@@ -1042,9 +1060,7 @@ def build_parser() -> Parser:
     delete = sub.add_parser("delete", help="delete after retention and write a tombstone")
     delete.add_argument("--store", required=True)
     delete.add_argument("id")
-    delete.add_argument(
-        "--now", type=int, help="override the local clock (epoch seconds; tests only)"
-    )
+    delete.add_argument("--now", type=int, help=argparse.SUPPRESS)
     delete.set_defaults(func=cmd_delete)
 
     verify = sub.add_parser("verify", help="verify hashes, sidecars, index chain, tombstones")

@@ -11,9 +11,9 @@ TASKS=${TASKS:-"lr mlp ablation"}
 SEEDS=${SEEDS:-"1 2 3"}
 REAL=${REAL:-0}
 
-# ?? sklearn ???(????? python ???????)
+# 缺少 sklearn 就跳过（由 python 环境提供，本基准不负责安装）
 if ! python3 -c "import sklearn" 2>/dev/null; then
-  echo "??:?? sklearn"
+  echo "SKIP: 缺少 sklearn"
   exit 0
 fi
 

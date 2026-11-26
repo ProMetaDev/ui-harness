@@ -3,6 +3,9 @@
 由 `bash tools/changelog.sh` 从 git 历史生成，不要手改。
 每条按类型分组：新功能 / 修复 / 工程 / 文档。
 
+> **0.3.0 尚未打 tag**（2026-11-26）：本文件只覆盖已经打过 tag 的版本，所以还没有
+> 0.3.0 段。发布时打 tag 后重跑 `bash tools/changelog.sh` 会自动补出；不要手写历史。
+
 ## v0.1.0（首个版本） · 2026-11-16
 
 **工程**
@@ -260,4 +263,29 @@
 
 - chat stream offline checks, snapshot approval cleanup, stricter SSE ordering test; 0.2.1
 - index ci_mingw.sh
+
+## v0.2.2 · 2026-11-20
+
+**工程**
+
+- drop scratch drivers; docs say 0.2.2
+- drop scratch driver
+- 0.2.1 clean
+
+**文档**
+
+- generate the status numbers from scripts (they had drifted 2x)
+- Word 安全编辑 skill（副本 + OOXML 文本节点 + 结构校验）
+- 文档安全编辑 skill（副本 + 最小编辑 + 结构校验）及调研
+- match the kernel again — two redaction tiers, spill lifecycle, honest gaps
+
+**其他**
+
+- the web surface now redacts before it leaves the process (SSE, /snapshot, tool store); 0.2.2
+- queue case needs the server taskId; CI must not silently skip the chat check
+- allowlist the leak-canary fixture so the secret gate stays honest
+- docs gate was red on its own comment and three stale refs; add web-leak baseline
+- core+tools: annotate the last five key-shaped fixtures, keep the secret gate honest
+- promote the privacy + docs-consistency gates, fix kit row 6
+- redact-before-journal door, declarable privacy list, spill retention
 

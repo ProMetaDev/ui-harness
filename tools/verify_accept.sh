@@ -9,7 +9,7 @@ run() {
   local name="$1" accept="$2" expect="$3"
   local ws=/tmp/ui-accept-$name
   rm -rf "$ws"; mkdir -p "$ws"
-  # ???????????????????,??????????
+  # 预置 out.txt：验收命令（test -f out.txt）检查的是工作区里已存在的文件
   printf "hello\n" > "$ws/out.txt"
   cat > "$ws/sc.json" <<'EOF'
 {"model":"scripted","steps":[

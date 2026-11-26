@@ -91,8 +91,10 @@ python3 adapters/worm/store.py list --store /srv/ui/worm --all --json
 | 2 | 完整性失败或保留策略拒绝（verify 失败、未到期 delete、retention 冲突） |
 | 64 | 用法错误 |
 
-`--now <epoch>` 是**测试钩子**，用来在不等待真实时间的情况下验证保留期；生产和
-门禁默认都用本机时钟。它只改本工具的判断与记录，不是可信时间源。
+`--now <epoch>` 是**测试钩子**，用来在不等待真实时间的情况下验证保留期。它**不在
+`--help` 里展示**，而且只有显式设置 `UI_WORM_TEST_CLOCK=1` 时才被接受：否则直接
+`FAIL` 并以退出码 2 拒绝（提示"test-only"）。生产和门禁默认都用本机时钟。
+它只改本工具的判断与记录，不是可信时间源。
 
 ## 4. index 链与 verify
 
