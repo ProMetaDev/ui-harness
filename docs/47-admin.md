@@ -49,6 +49,10 @@ http://127.0.0.1:7788/admin
   未知角色的映射）；
 - 三个写接口共用一把管理面写锁：从读取当前配置、校验、写 intent、原子落盘、
   更新内存到写最终审计全程串行。两个并发保存不会各自基于旧快照覆盖对方；
+- 拿到写锁后、写 intent 之前会用**锁内读到的** `rbac.json` / `users.json`
+  重新计算 actor 权限（用户映射优先于头里的角色，停用账号同样拒绝）。入口
+  预检通过后、等锁期间被撤销 `manage`/`owner` 或被停用的请求在这里 403，
+  不写 intent、不落盘、不换内存（防 TOCTOU）；
 - `PUT /api/admin/users` 的 `role` 省略时只更新 `disabled/display`（角色沿用
   现有记录）；`role:""` 是 M6 旧行为的删除，等价于 `DELETE`；
 - 未知字段、非布尔 `disabled`、超过 128 字符或含控制字符的 `display` 一律 400。
@@ -136,11 +140,22 @@ http://127.0.0.1:7788/admin
 - `role_matrix_cannot_drop_role_referenced_by_users_json`；
 - `concurrent_role_updates_do_not_lose_writes` / `concurrent_user_updates_do_not_lose_writes`；
 - `admin_write_route_waits_for_the_serialization_lock`；
+- `admin_user_write_rechecks_manage_after_waiting_for_the_lock`：admin 预检
+  通过后、等锁期间被角色矩阵撤销 `manage`，锁内二次鉴权 403，不落盘；
+- `admin_role_write_rechecks_owner_after_waiting_for_the_lock`：owner 预检
+  通过后、等锁期间被用户映射降成 admin，锁内二次鉴权 403，不落盘；
 - `role_matrix_must_keep_a_manageable_owner`；
 - `persist_failure_writes_update_error_audit` / `user_persist_failure_writes_update_error_audit`；
 - `lab_report_rejects_traversal_and_windows_separators`；
+- `lab_shell_invocation_uses_cmd_on_windows_and_sh_elsewhere`；
 - `local_ui_token_comparison_is_exact`；
 - `viewer_can_read_metrics_and_safe_files_but_not_sensitive_files`。
+
+实验室「跑一次」（`POST /api/lab/run`）的 shell 构造已抽成纯函数
+`lab_shell_invocation(platform, command)`：Windows 分支是 `cmd /C <原命令>`，
+其它平台是 `sh -c <原命令>`。单测在 Linux CI 上直接断言两个平台分支的参数，
+**真实 Windows 未跑**——只有编译期 `cfg(windows)` 分支与构造器单测，不声称
+已验证 Windows 上的实际执行/引号语义。
 
 OIDC 适配层见 [docs/51](51-oidc.md)；身份边界与部署拓扑见
 [docs/41](41-enterprise-m1.md)。
