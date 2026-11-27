@@ -57,3 +57,21 @@ external │ tok 4269/200000 │ calls 3/60 │ 8s
 - **报告里的数字没有自动对账**：模型说 0.72，产物里也是 0.72，但这是人工核对的。
   下一步可以做 `lab verify --claims`：把报告里的数字与产物逐个比对，对不上就判无效。
 - `ablation` 的 `best_lr` 三个 seed 都是 0.5——任务太简单，区分度不够，后续换数据集再调。
+
+## 真实多仓库评测：仍未完成，只有框架
+
+上面的 3 个 CPU 任务和单仓库 `lr` 对照都**不是多仓库评测**。10 个真实仓库 × 12 个任务的
+正式评测目前**一次都没跑**，没有任何可对外引用的真实结果。
+
+已经落地的只有框架与合成 fixture 自测：
+
+- `tools/bench_repos.py`：仓库校验、`ui index` 指标、`ui run` 记录、`ui verify` 校验、
+  expect 判定、失败隔离，输出 `report.json` / `report.md`；
+- `bench/repos.example.json`：10 个真实仓库候选，路径全是 `REPLACE_ME/...`；
+- `bench/tasks.example.json`：12 个通用任务；
+- `tools/make_bench_fixtures.sh` + `tools/verify_bench_repos.sh`：12 个合成 fixture 的
+  dry-run/index 自测；fixture **不是真实仓库**，不产生真实数字。
+
+没有 provider 时只做 index，报告 `mode=dry-run`、任务状态 `dry-run`、`success=0`；
+这表示“没有执行模型”，不能当成失败率，也不能写进对外评测结论。完整口径、选仓标准、
+带外试用记录字段见 [docs/56](56-real-repos.md)。

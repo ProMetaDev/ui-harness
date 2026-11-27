@@ -1,0 +1,62 @@
+[
+  {
+    "name": "ripgrep",
+    "path": "REPLACE_ME/ripgrep",
+    "commit": "",
+    "language": "rust"
+  },
+  {
+    "name": "flask",
+    "path": "REPLACE_ME/flask",
+    "commit": "",
+    "language": "python"
+  },
+  {
+    "name": "requests",
+    "path": "REPLACE_ME/requests",
+    "commit": "",
+    "language": "python"
+  },
+  {
+    "name": "gin",
+    "path": "REPLACE_ME/gin",
+    "commit": "",
+    "language": "go"
+  },
+  {
+    "name": "tokio",
+    "path": "REPLACE_ME/tokio",
+    "commit": "",
+    "language": "rust"
+  },
+  {
+    "name": "fastapi",
+    "path": "REPLACE_ME/fastapi",
+    "commit": "",
+    "language": "python"
+  },
+  {
+    "name": "express",
+    "path": "REPLACE_ME/express",
+    "commit": "",
+    "language": "javascript"
+  },
+  {
+    "name": "jq",
+    "path": "REPLACE_ME/jq",
+    "commit": "",
+    "language": "c"
+  },
+  {
+    "name": "prometheus",
+    "path": "REPLACE_ME/prometheus",
+    "commit": "",
+    "language": "go"
+  },
+  {
+    "name": "vite",
+    "path": "REPLACE_ME/vite",
+    "commit": "",
+    "language": "typescript"
+  }
+]
