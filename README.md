@@ -13,16 +13,18 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
 > 用 1.0 是给用户错误信号。版本号规则与 1.0 的准入条件见 [docs/34](docs/34-versioning.md)。
 
-## 当前状态（2026-11-26）
+## 当前状态（2026-11-27）
 
 - **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
 - **0.3.0（本地开发版，尚未打 tag）**：checkpoint GC（保留窗口 + 未引用 blob 清理）、
   review 事务化（先写 intent 再改文件；`ui review --pending/--reconcile` 对账崩溃遗留）、
   审计签名/锚定与本地 WORM 风格存储、OIDC/RBAC/可写管理台，以及 metrics/Postgres/容器 runner 等可选 L2 已落地。
+  0.3.0 基线二进制已跑通 **24h soak**（8580 轮，0 失败，见 [docs/48](docs/48-soak.md)）；最终发布二进制仍需重跑。
 - **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入，`/admin` 提供可写的角色矩阵与用户表单，本地用户表 `.ui/users.json` 是唯一事实；OIDC userinfo 适配层在 `adapters/oidc/`；Postgres/runner/metrics/audit/admin 是可选 L2。
-- **未完成**：24h soak、OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、真实付费 provider 长跑、S3 Object Lock；
-  文档编号重号待整理（见 [docs/34](docs/34-versioning.md) §6），4 个 soak 脚本的公共层待抽（见 [tools/README](tools/README.md)）。
-- 门禁：`tools/debug.sh` 当前 **57 passed / 0 failed**（以实际输出为准）。
+- **未完成**：OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、真实付费 provider 长跑、S3 Object Lock；
+  24h soak 的 **0.3.0 基线**已通过（8580 轮，见 [docs/48](docs/48-soak.md)），但跑的是修复前二进制，最终发布版仍需重跑；
+  4 个 soak 脚本的公共层待抽（见 [tools/README](tools/README.md)）。
+- 门禁：`tools/debug.sh` 共 **57 项**（构建 + 端到端 + 攻击场景 + 跨平台）；通过数以实际输出为准，当前数字快照见 [docs/23](docs/23-status.md)。
 
 企业单租户的长期路线、Phase 0 架构和运维 runbook 在
 [docs/35](docs/35-enterprise-roadmap.md) / [docs/36](docs/36-enterprise-phase0.md) /
@@ -239,7 +241,7 @@ $ ui replay
 设计约束（配色、树结构、动效、背景板）在 [docs/03-frontend.md](docs/03-frontend.md)；
 文档安全编辑 skill 在 [demo/skills/doc-safe-edit/SKILL.md](demo/skills/doc-safe-edit/SKILL.md)，
 Word 专用方案与脚本在 [demo/skills/docx-safe-edit/SKILL.md](demo/skills/docx-safe-edit/SKILL.md)，
-技术调研在 [docs/32-doc-safe-edit-skill.md](docs/32-doc-safe-edit-skill.md) / [docs/33-docx-safe-edit.md](docs/33-docx-safe-edit.md)；
+技术调研在 [docs/56-doc-safe-edit-skill.md](docs/56-doc-safe-edit-skill.md) / [docs/57-docx-safe-edit.md](docs/57-docx-safe-edit.md)；
 实验室血缘 DAG 的独立原型在 [design/lab-lineage.html](design/lab-lineage.html)，目前是静态样例，未接生产数据：
 
 ![实验室血缘原型](docs/images/lineage.png)
