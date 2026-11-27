@@ -40,7 +40,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 [docs/41](docs/41-enterprise-m1.md)；Postgres L2 adapter 见 [docs/42](docs/42-postgres-adapter.md)；
 真实浏览器 e2e 见 [docs/43](docs/43-browser-e2e.md)；M3 容器 runner 见
 [docs/44](docs/44-container-runner.md)；可观测性见 [docs/45](docs/45-metrics.md)；
-审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；OIDC userinfo 适配层见 [docs/51](docs/51-oidc.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)；端到端导出→签名→锚定→WORM 管线见 [docs/54](docs/54-audit-worm-pipeline.md)；真实付费 provider 的固定 1 轮 smoke（默认 SKIP、预算 0.01 美元）见 [docs/55](docs/55-paid-smoke.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。
+审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；OIDC userinfo 适配层见 [docs/51](docs/51-oidc.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)；端到端导出→签名→锚定→WORM 管线见 [docs/54](docs/54-audit-worm-pipeline.md)；真实付费 provider 的固定 1 轮 smoke（默认 SKIP、预算 0.01 美元）见 [docs/55](docs/55-paid-smoke.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。真实多仓库评测框架（只有框架与合成 fixture 自测，尚未跑出真实结果）见 [docs/56](docs/56-real-repos.md)。
 
 ## 它解决什么问题
 
