@@ -878,6 +878,43 @@ def run_task(repo_rec, repo, task, ctx, task_index):
     return row
 
 
+def run_task_with_retries(repo_rec, repo, task, ctx, task_index):
+    """只对 model_error 且未改文件的任务重试；其余失败不烧钱重试。"""
+    limit = max(1, min(5, int(ctx.get("attempts", 1))))
+    rows = []
+    for attempt in range(1, limit + 1):
+        row = run_task(repo_rec, repo, task, ctx, task_index)
+        run = row.get("run") or {}
+        rows.append({
+            "attempt": attempt,
+            "status": row.get("status"),
+            "rc": run.get("rc"),
+            "reason": run.get("reason"),
+            "tokens": run.get("tokens"),
+            "toolCalls": run.get("toolCalls"),
+            "durationMs": run.get("durationMs"),
+            "changedCount": row.get("changedCount"),
+        })
+        if row.get("status") == "success":
+            break
+        if attempt >= limit:
+            break
+        # 有文件变化时盲目重试会让第二次在已污染的工作区上跑，结果不可比。
+        if row.get("changedCount", 0) != 0:
+            break
+        if run.get("reason") != "model_error":
+            break
+    final = row
+    final["attempts"] = len(rows)
+    final["retry"] = {
+        "used": len(rows) - 1,
+        "limit": limit,
+        "attempts": rows,
+        "totalTokens": sum((r.get("tokens") or 0) for r in rows),
+    }
+    return final
+
+
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
@@ -900,6 +937,8 @@ def summarize(report):
             "dryRun": sum(1 for t in tasks if t["status"] == "dry-run"),
             "skipped": sum(1 for t in tasks if t["status"] == "skipped"),
             "error": sum(1 for t in tasks if t["status"] == "error"),
+            "retried": sum(1 for t in tasks if (t.get("attempts") or 1) > 1),
+            "attempts": sum((t.get("attempts") or 1) for t in tasks),
         },
         "index": {
             "ok": sum(1 for r in repos if (r.get("index") or {}).get("error") is None
@@ -1193,10 +1232,11 @@ def run_bench(args):
             "provider": args.provider,
             "out": out,
             "repo_slug": repo_slug(rec["name"]),
+            "attempts": args.attempts,
         }
         for i, task in enumerate(tasks, start=1):
             try:
-                row = run_task(rec, resolved, task, ctx, i)
+                row = run_task_with_retries(rec, resolved, task, ctx, i)
             except Exception as exc:  # noqa: BLE001 - 单任务失败不能终止全部
                 row = base_task_row(task, i)
                 row["status"] = "error"
@@ -1264,6 +1304,8 @@ def build_parser():
     p.add_argument("--provider-cmd", help="设置 UI_MODEL_CMD 的模型命令；原文不写入报告")
     p.add_argument("--mock", help="传给 ui run 的 --mock 剧本文件（scripted，仅验证管线）")
     p.add_argument("--out", help="输出目录（默认 bench/out/run-<时间戳>）")
+    p.add_argument("--attempts", type=int, default=1,
+                   help="单任务最多尝试次数（默认 1；仅 model_error 且未改文件时重试）")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                    help="单次子进程超时秒数（默认 %d）" % DEFAULT_TIMEOUT)
     p.add_argument("--dry-run", action="store_true",

@@ -309,6 +309,11 @@ if "$PY" tools/test_bench_expect.py >"$TMP/expect.log" 2>&1; then
 else
   bad "expect.no_extra_changes 自测失败" "$(tail -5 "$TMP/expect.log" 2>/dev/null)"
 fi
+if "$PY" tools/test_bench_retry.py >"$TMP/retry.log" 2>&1; then
+  ok "retry 只对 model_error 生效并累计 tokens"
+else
+  bad "retry 自测失败" "$(tail -5 "$TMP/retry.log" 2>/dev/null)"
+fi
 
 echo
 echo "通过 $PASS / 失败 $FAIL"

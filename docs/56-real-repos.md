@@ -157,6 +157,10 @@ bench/repos.json            # 本机路径清单，不入库
 成本控制：完整 10 仓库 × 12 任务 = 120 次 `ui run`。先用 `--only` / `--task` 跑
 1 仓库 × 1 任务，看报告里的 tokens 与耗时，再决定是否放大。框架不预估、不代填成本。
 
+`--attempts N` 只对 **model_error 且未改文件**的任务重试，默认 1。报告会记录
+`attempts`、每次 attempt 的 tokens/calls/status 和 `retry.totalTokens`；
+有文件变化、verify 失败、expect 失败不会自动重试，避免在污染的工作区上重复花钱。
+
 ## 4. 每个仓库/任务实际执行什么
 
 对每个 `status=ok` 的仓库：
