@@ -1,4 +1,4 @@
-# 32 · 文档安全编辑 Skill：技术调研
+# 56 · 文档安全编辑 Skill：技术调研
 
 > 目标：AI 修改文档时**不破坏原结构**，先复制工作副本，再最小编辑，最后做结构校验。
 > Skill 本体：`demo/skills/doc-safe-edit/SKILL.md`。

@@ -92,22 +92,24 @@
 0.3.0   ← 企业 L2：RBAC/用户存储/OIDC、审计签名/锚定/WORM、
            review intent 对账、checkpoint GC、管理台写表单
            （本地开发版，尚未打 tag；打 tag 后由 tools/changelog.sh 补出 CHANGELOG 段）
-        374 个测试 / 57 项门禁 / OIDC e2e / 2h soak 通过
-        仍未：24h soak、真实付费 provider、真实 IdP、S3 Object Lock
+        399 个测试 / 57 项门禁 / OIDC e2e / 2h 与 0.3.0 基线 24h soak 通过
+        仍未：最终发布二进制重跑 24h、真实付费 provider、真实 IdP、S3 Object Lock
 ```
 
 ---
 
-## 6. 文档编号重号待整理（2026-11-26）
+## 6. 文档编号重号整理（2026-11-27 完成）
 
-`docs/` 目前有两组同号文件：
+`docs/` 原有两组同号文件，本轮把**非核心**的两份改到新编号，主文档编号保持不变：
 
-| 编号 | 两份文件 | 各自主题 |
+| 旧编号 / 主题 | 新文件名 | 为什么动它 |
 |---|---|---|
-| 32 | `32-auditable-memory-theory.md` / `32-doc-safe-edit-skill.md` | 可审计记忆理论 / 文档安全编辑 |
-| 33 | `33-review-response.md` / `33-docx-safe-edit.md` | 外部评审逐条回应 / Word 安全编辑 |
+| 32 · 文档安全编辑 | `56-doc-safe-edit-skill.md` | 与核心文档 `32-auditable-memory-theory.md` 重号 |
+| 33 · Word 安全编辑 | `57-docx-safe-edit.md` | 与核心文档 `33-review-response.md` 重号 |
 
-**这轮不做重命名**：`docs/33-review-response.md` 已被 README 与 `docs/31` 引用，历史讨论里
-也大量用 `docs/33` 指代那份评审回应；此时改名会打断既有链接和锚点。整理顺序应是：
-先补一张编号映射（旧号 → 新号），再整体改名，并在旧路径留转发说明；在那之前，
-引用这两组文档请用**文件名**而不是只写编号，避免歧义。
+**不动的两份**：`32-auditable-memory-theory.md`（记忆理论，`docs/31` 与评审回应都按 32 引用）
+与 `33-review-response.md`（外部评审逐条回应，README 与历史讨论大量用 `docs/33` 指代）。
+
+所有引用已同步（`README.md`、本文件、两份文档自己的标题）；旧路径已不存在，
+`bash tools/verify_docs.sh` 为 **79 / 79**。以后引用这四份文档时，写全文件名而不只写编号。
+编号 56 / 57 是当时未被占用的最小可用号，继续新增文档从 58 起排。
