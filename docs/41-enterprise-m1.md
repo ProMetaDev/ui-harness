@@ -153,9 +153,16 @@ X-UI-Request-Id: ...
   删掉 owner、或把 owner 的 `manage` 清成 false 都会被 400 拒绝。授予/修改/撤销
   映射到 owner 的用户仍只有 owner 本人能做；
 - 管理写操作由 `Hub` 内独立的 `admin_write` 锁串行（不复用 `rbac` / `users`
-  读写锁，避免死锁）：读当前配置 → 校验 → 写 intent 审计 → 原子落盘 + 换内存
-  → 写最终审计。读请求只在换内存的短临界区碰 `rbac/users`，不会被落盘或审计 IO
-  挡住；两个并发更新不会各自基于旧快照把对方覆盖掉；
+  读写锁，避免死锁）：读当前配置 → **锁内二次鉴权** → 校验 → 写 intent 审计
+  → 原子落盘 + 换内存 → 写最终审计。读请求只在换内存的短临界区碰
+  `rbac/users`，不会被落盘或审计 IO 挡住；两个并发更新不会各自基于旧快照把
+  对方覆盖掉；
+- 锁内二次鉴权防 TOCTOU：请求入口的矩阵/用户映射预检发生在锁外，从预检通过
+  到拿到 `admin_write` 锁之间，另一个管理写可能已经撤销 actor 的
+  `manage`/`owner` 或停用账号。拿到锁后必须用同一份刚读到的 `rbac`/`users`
+  重算 actor 权限；不满足就 403，且**不写 intent、不落盘、不换内存**。这条对
+  `PUT /api/admin/roles`（owner）与 `PUT/DELETE /api/admin/users`（manage）
+  都成立；
 - 审计顺序：先 `rbac/role-update-intent` / `rbac/user-update-intent`（actor +
   变更摘要），成功落盘后写 `rbac/role-update` / `rbac/user-update` 并带
   `intentSeq`；落盘失败写 `rbac/update-error`（带 `intentSeq` 和错误原文）。
@@ -215,6 +222,10 @@ X-UI-Request-Id: ...
 - 事件流、journal、`rbac.json`、`users.json` 与响应正文中不出现代理密钥原文；
 - 角色变更：下一请求生效，不需要重启 core；
 - 并发两个角色/用户更新：最终文件同时包含两笔（管理写锁串行，不丢更新）；
+- 降权竞态（TOCTOU）：admin/owner 的入口预检通过后、等管理写锁期间，另一个
+  管理写通过角色矩阵或用户映射撤销其权限（或停用账号），该写请求必须在锁内
+  二次鉴权处 403；`rbac.json` / `users.json` 不落盘，journal 不出现对应的
+  `*-intent`；
 - owner 不变量：整表删掉 owner / 把 owner `manage` 改成 false 一律 400，内存与
   磁盘保持旧矩阵；
 - 落盘失败（目标路径被目录占住）：响应 `applied:false`，journal 依次出现

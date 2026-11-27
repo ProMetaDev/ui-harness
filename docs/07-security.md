@@ -43,6 +43,7 @@
 5. **网页端已脱敏（2026-11-20 修）**：`Hub::push` 与 `store_tool` 两处都过 `secrets::redact_json`，事件带 `redacted: N` 标出抹过几处。判据与 `Journal` 落账门共用一份，所以两边不会漂。回归由 `tools/verify_web_leak.sh`（门禁）与 `server::tests::web_surface_redacts_before_it_leaves_the_process` 守着。~~此前是原文~~：`/snapshot` 会把整份 `hub.log` 嵌进**可分享**的 HTML，那一版等于转发文件就公开工具输出。
 6. **脱敏门只管日志、只管模式匹配**：无密钥形状的机密会照原样进日志，上下文里更是明文。它是"日志别变成密钥库"，不是 DLP。
 7. **策略的 deny 挡不住 shell 的读**：`secrets/**` 对 `fs_read` 有效，对 `cat` 无效（沙箱只限写）；`tools/kit.sh` 场景 5 至今仍是 GAP。
+8. **硬链接同 inode 别名不在路径防护范围**：路径防护（`..` 词法折叠、`escapes_workspace` / `is_allowed_read` 的 `canonicalize` 真实路径、`is_private_path` 与 `is_sensitive_file_name` 的清单）都按**路径**判，不按 inode。`ln` / `CreateHardLink` 造出的别名与目标共享 inode，但路径上没有 symlink 跳转，`canonicalize` 也不会把别名变成目标路径；因此工作区内的硬链接、以及从工作区外链进工作区的硬链接（同 inode）都能绕过按路径写的隐私/敏感判断。要识别它必须比较 inode/文件 ID 并扫描目录；本轮不做全盘 inode 扫描，也不声称能按路径识别硬链接。这是已接受的残余风险，不是"已覆盖"。
 
 ## 怎么复查
 

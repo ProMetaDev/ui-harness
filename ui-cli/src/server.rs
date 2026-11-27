@@ -657,6 +657,17 @@ impl Actor {
     }
 }
 
+/// 管理面写事务在锁内要重新确认的权限级别。
+///
+/// 与请求入口的路由判定同一套语义：改用户表要 `manage`，改角色矩阵只有
+/// 角色名 `owner`。入口已经判过一次；锁内还必须再判一次（见
+/// [`reauthorize_admin_write`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdminCapability {
+    Manage,
+    Owner,
+}
+
 /// 身份头解析之后按管理面的用户表覆盖角色。
 ///
 /// 锁顺序固定为 `rbac → users`（所有需要两把锁的地方都照这个顺序取），
@@ -1743,20 +1754,49 @@ fn valid_bundle_name(name: &str) -> bool {
         && !name.contains('\\')
 }
 
+/// `/api/lab/run` 的 shell 平台。
+///
+/// 抽成显式参数后，Windows 分支不必真的在 Windows 上跑也能被单测断言。
+/// `current()` 只决定**当前进程**用哪一支，不参与命令构造逻辑。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabShellPlatform {
+    Windows,
+    Unix,
+}
+
+impl LabShellPlatform {
+    const fn current() -> LabShellPlatform {
+        if cfg!(windows) {
+            LabShellPlatform::Windows
+        } else {
+            LabShellPlatform::Unix
+        }
+    }
+}
+
+/// 纯构造器：只返回「程序 + 参数」，不碰进程状态，便于单测直接断言。
+///
+/// Windows 走 `cmd /C <command>`（没有 `sh`），其他平台走 `sh -c <command>`。
+/// 命令原文原样作为**一个**参数传入，不在这里做二次引号/转义。
+fn lab_shell_invocation(
+    platform: LabShellPlatform,
+    command: &str,
+) -> (&'static str, Vec<String>) {
+    match platform {
+        LabShellPlatform::Windows => (
+            "cmd",
+            vec!["/C".to_string(), command.to_string()],
+        ),
+        LabShellPlatform::Unix => ("sh", vec!["-c".to_string(), command.to_string()]),
+    }
+}
+
 /// `/api/lab/run` 的 shell 选择：Windows 用 `cmd /C`，其他平台 `sh -c`。
 fn lab_shell_command(command: &str) -> std::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
+    let (program, args) = lab_shell_invocation(LabShellPlatform::current(), command);
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    cmd
 }
 
 /// 不展示、也不允许直达的目录名。大小写不敏感：Windows 文件系统本身不区分大小写，
@@ -2348,6 +2388,16 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
             };
+            // 锁内二次鉴权：入口预检通过后、等锁期间可能已被降权。
+            if let Err(e) = reauthorize_admin_write(
+                &hub,
+                actor.as_ref(),
+                &next,
+                &users_now,
+                AdminCapability::Owner,
+            ) {
+                return json_response_status(&mut stream, "403 Forbidden", &error_body(&e));
+            }
             let value = match json::parse(body.trim()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -2452,7 +2502,17 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
             };
-            let actor_perms = actor.as_ref().map(|a| a.perms(&rbac)).unwrap_or_default();
+            // 锁内二次鉴权：用锁内读到的用户表重算 manage / owner。
+            let actor_perms = match reauthorize_admin_write(
+                &hub,
+                actor.as_ref(),
+                &rbac,
+                &users_now,
+                AdminCapability::Manage,
+            ) {
+                Ok(perms) => perms,
+                Err(e) => return json_response_status(&mut stream, "403 Forbidden", &error_body(&e)),
+            };
             let value = match json::parse(body.trim()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -2691,7 +2751,17 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(state) => state,
                 Err(e) => return admin_unavailable(&mut stream, &e),
             };
-            let actor_perms = actor.as_ref().map(|a| a.perms(&rbac)).unwrap_or_default();
+            // 锁内二次鉴权：删除同样必须用锁内快照重算权限。
+            let actor_perms = match reauthorize_admin_write(
+                &hub,
+                actor.as_ref(),
+                &rbac,
+                &users_now,
+                AdminCapability::Manage,
+            ) {
+                Ok(perms) => perms,
+                Err(e) => return json_response_status(&mut stream, "403 Forbidden", &error_body(&e)),
+            };
             let id = query
                 .split('&')
                 .find_map(|kv| kv.split_once('='))
@@ -3605,6 +3675,59 @@ fn effective_state(
     };
     let users = effective_users(&store, &rbac);
     Ok((rbac, users, store.source))
+}
+
+/// 拿到 `admin_write` 锁之后的二次鉴权。
+///
+/// 入口预检发生在锁外：从预检通过到真正落盘之间有一个窗口，另一个管理员
+/// 可能已经通过角色矩阵或用户映射把 actor 降权。只信入口快照的话，降权后的
+/// 第一个写请求仍会带着旧权限生效（TOCTOU）。这里用**即将被改写的那份状态**
+/// 重新算一遍：
+///
+/// - 用户映射（`users.json`，或回退的 `rbac.json#users`）优先于头里的角色，
+///   与请求入口的 `apply_user_mapping` 一致；
+/// - 映射里 `disabled: true` 的账号同样拒绝；
+/// - 角色矩阵里找不到角色 = 该角色没有权限（fail closed）。
+///
+/// 非受信代理模式没有 actor / RBAC 判定（本地单用户），保持原行为。
+/// 返回的 `Perms` 是**重算后**的快照，调用方后续的 owner 判定也必须用它，
+/// 不能再用入口时的那一份。
+fn reauthorize_admin_write(
+    hub: &Hub,
+    actor: Option<&Actor>,
+    rbac: &Rbac,
+    users: &std::collections::BTreeMap<String, UserRecord>,
+    need: AdminCapability,
+) -> Result<Perms, String> {
+    if hub.trusted_proxy.is_none() {
+        return Ok(actor.map(|a| a.perms(rbac)).unwrap_or_default());
+    }
+    let Some(actor) = actor else {
+        return Err("管理面写操作需要受信代理身份（actor 缺失）".to_string());
+    };
+    let mut current = actor.clone();
+    if let Some(record) = users.get(&actor.id) {
+        if record.disabled {
+            return Err("账号已禁用（.ui/users.json disabled=true），拒绝写操作".to_string());
+        }
+        current.roles = vec![record.role.clone()];
+    }
+    let perms = current.perms(rbac);
+    let allowed = match need {
+        AdminCapability::Manage => perms.manage,
+        AdminCapability::Owner => perms.owner,
+    };
+    if !allowed {
+        let required = match need {
+            AdminCapability::Manage => "manage",
+            AdminCapability::Owner => "owner",
+        };
+        return Err(format!(
+            "当前账号已不具备 {}（可能在等待管理写锁期间被撤销/降权），拒绝写操作",
+            required
+        ));
+    }
+    Ok(perms)
 }
 
 /// GET /api/admin/rbac 的输出。`source` 明确告诉人这份矩阵是从哪来的；
@@ -5580,6 +5703,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// TOCTOU：入口预检通过 → 等管理写锁 → 持锁期间被降权 → 锁内必须重判。
+    ///
+    /// 这里模拟“另一个管理员已经提交”的降权：把 `admin` 角色的 `manage`
+    /// 改掉（真实路径也会同时落盘）。若实现只信入口快照，请求会 200 并把
+    /// 用户写进 `users.json`；锁内二次鉴权必须让它在落盘前 403。
+    #[test]
+    fn admin_user_write_rechecks_manage_after_waiting_for_the_lock() {
+        let ws = temp_workspace("admin-recheck-manage");
+        let secret = "admin-recheck-manage-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        let guard = hub_lock(&hub.admin_write);
+        let (tx, rx) = channel();
+        let hub2 = hub.clone();
+        let secret2 = secret.to_string();
+        let worker = std::thread::spawn(move || {
+            let result = proxy_call(
+                hub2,
+                "PUT",
+                "/api/admin/users",
+                r#"{"id":"alice@example.com","role":"operator"}"#,
+                &secret2,
+                "admin@example.com",
+                "admin",
+            );
+            let _ = tx.send(result);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "持锁期间写请求不能完成"
+        );
+        // 模拟等锁期间另一个管理写已提交：admin 不再有 manage。
+        {
+            let mut cfg = hub_lock(&hub.rbac);
+            match &mut *cfg {
+                RbacConfig::Valid(rbac) => {
+                    rbac.roles.get_mut("admin").expect("admin 角色").manage = false;
+                }
+                RbacConfig::Invalid(e) => panic!("测试 hub 不该是 Invalid: {}", e),
+            }
+        }
+        drop(guard);
+        let (head, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("释放管理写锁后请求应完成");
+        worker.join().unwrap();
+        assert!(head.contains("403"), "降权后写请求必须 403: {} {}", head, body);
+        assert!(
+            body.contains("等待管理写锁"),
+            "必须是锁内二次鉴权拦下（而不是入口预检）: {}",
+            body
+        );
+        assert!(
+            !ws.join(".ui").join("users.json").exists(),
+            "鉴权失败不能落盘用户表"
+        );
+        let journal = ws.join(".ui").join("journal.jsonl");
+        if journal.exists() {
+            let (events, _) = ui_core::Journal::read(&journal).unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| e.str_at("kind") == Some("rbac/user-update-intent")),
+                "鉴权失败不能先写 intent"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 同上，但降权来自**用户映射**：入口时头里的 owner 还有效，等锁期间
+    /// 另一个管理员把该 actor 映射成 admin（`manage` 有、`owner` 没有）。
+    #[test]
+    fn admin_role_write_rechecks_owner_after_waiting_for_the_lock() {
+        let ws = temp_workspace("admin-recheck-owner");
+        let secret = "admin-recheck-owner-secret"; // allowlist secret: 测试用假值
+        let hub = trusted_hub(&ws, secret);
+        let guard = hub_lock(&hub.admin_write);
+        let (tx, rx) = channel();
+        let hub2 = hub.clone();
+        let secret2 = secret.to_string();
+        let worker = std::thread::spawn(move || {
+            let result = proxy_call(
+                hub2,
+                "PUT",
+                "/api/admin/roles",
+                r#"{"name":"locked","write":true,"audit":false,"manage":false}"#,
+                &secret2,
+                "root@example.com",
+                "owner",
+            );
+            let _ = tx.send(result);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "持锁期间写请求不能完成"
+        );
+        // 模拟等锁期间另一个管理写已提交：root 被用户映射降成 admin。
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            "root@example.com".to_string(),
+            UserRecord {
+                id: "root@example.com".to_string(),
+                role: "admin".to_string(),
+                disabled: false,
+                display: None,
+            },
+        );
+        *hub_lock(&hub.users) = UsersConfig::Valid(UsersStore {
+            source: UsersSource::File,
+            users,
+        });
+        drop(guard);
+        let (head, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("释放管理写锁后请求应完成");
+        worker.join().unwrap();
+        assert!(head.contains("403"), "降权后写请求必须 403: {} {}", head, body);
+        assert!(
+            body.contains("等待管理写锁"),
+            "必须是锁内二次鉴权拦下（而不是入口预检）: {}",
+            body
+        );
+        assert!(
+            !ws.join(".ui").join("rbac.json").exists(),
+            "鉴权失败不能落盘角色矩阵"
+        );
+        let journal = ws.join(".ui").join("journal.jsonl");
+        if journal.exists() {
+            let (events, _) = ui_core::Journal::read(&journal).unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| e.str_at("kind") == Some("rbac/role-update-intent")),
+                "鉴权失败不能先写 intent"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn role_matrix_must_keep_a_manageable_owner() {
         let ws = temp_workspace("admin-owner-invariant");
@@ -5761,6 +6024,39 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 命令构造是纯函数，所以 Windows 的 `cmd /C` 分支可以在 Linux 上断言。
+    ///
+    /// 这里只证明**构造正确**（程序名、`/C`、命令原文），不声称在真实
+    /// Windows 上执行过；CI 没有 Windows runner。
+    #[test]
+    fn lab_shell_invocation_uses_cmd_on_windows_and_sh_elsewhere() {
+        let command = "run --flag \"two words\" | tee out.txt";
+        let (program, args) = lab_shell_invocation(LabShellPlatform::Windows, command);
+        assert_eq!(program, "cmd", "Windows 分支必须是 cmd");
+        assert_eq!(
+            args,
+            vec!["/C".to_string(), command.to_string()],
+            "Windows 分支必须是 cmd /C <原命令>"
+        );
+        let (program, args) = lab_shell_invocation(LabShellPlatform::Unix, command);
+        assert_eq!(program, "sh", "非 Windows 分支必须是 sh");
+        assert_eq!(
+            args,
+            vec!["-c".to_string(), command.to_string()],
+            "非 Windows 分支必须是 sh -c <原命令>"
+        );
+        // 命令原文不重排、不丢引号/管道；这就是 lab run 交给 shell 的字符串。
+        assert_eq!(args[1], command);
+        // 当前进程选中的平台必须与编译目标一致，避免 cfg 与枚举漂移。
+        let expected = if cfg!(windows) {
+            LabShellPlatform::Windows
+        } else {
+            LabShellPlatform::Unix
+        };
+        assert_eq!(LabShellPlatform::current(), expected);
+        assert_eq!(lab_shell_invocation(expected, command).1[1], command);
     }
 
     #[test]
