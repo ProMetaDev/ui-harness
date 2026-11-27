@@ -535,7 +535,7 @@ def parse_verify(text):
 EXPECT_KEYS = {
     "answer_contains", "answer_contains_any", "answer_not_contains",
     "answer_min_chars", "changed", "changed_any", "unchanged",
-    "files", "contains", "not_contains",
+    "no_extra_changes", "files", "contains", "not_contains",
 }
 
 
@@ -604,6 +604,15 @@ def eval_expect(expect, repo, answer, changed_rows):
             want = bool(expect.get("unchanged"))
             add("unchanged", (len(changed) == 0) == want,
                 "实际变化 %d 个文件，unchanged=%s" % (len(changed), want))
+        if expect.get("no_extra_changes") is True:
+            allowed = set()
+            for key in ("changed", "changed_any"):
+                values = expect.get(key) or []
+                if isinstance(values, list):
+                    allowed.update(str(v) for v in values)
+            extra = sorted(set(changed) - allowed)
+            add("no_extra_changes", not extra,
+                "额外变化文件：%s" % (extra or "无"))
         if "files" in expect:
             needed = expect.get("files") or []
             if not isinstance(needed, list):

@@ -144,6 +144,7 @@ bench/repos.json            # 本机路径清单，不入库
 | `changed` | 路径数组，必须都出现在本次实际变化文件里 |
 | `changed_any` | 路径数组，至少一个出现在实际变化里 |
 | `unchanged` | `true` 表示本次不能改任何文件 |
+| `no_extra_changes` | `true` 时，实际变化必须全部在 `changed`/`changed_any` 允许列表里；用于抓 `pytest_out.txt` 之类污染 |
 | `files` | 路径数组，运行后必须存在 |
 | `contains` | `[{"path": "...", "text": "..."}]`，文件里必须包含文本 |
 | `not_contains` | `[{"path": "...", "text": "..."}]`，文件里不能出现文本 |

@@ -304,6 +304,12 @@ else
   ok "provider 命令原文没有进报告（只有它的输出）"
 fi
 
+if "$PY" tools/test_bench_expect.py >"$TMP/expect.log" 2>&1; then
+  ok "expect.no_extra_changes 会把额外文件判失败"
+else
+  bad "expect.no_extra_changes 自测失败" "$(tail -5 "$TMP/expect.log" 2>/dev/null)"
+fi
+
 echo
 echo "通过 $PASS / 失败 $FAIL"
 if [ "$FAIL" -eq 0 ]; then
