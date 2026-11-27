@@ -66,7 +66,11 @@ bash tools/soak_status.sh /tmp/ui-soak-24h-state.json
 ## 当前进度
 
 - 2h soak：`phase=passed`，1429 轮，0 失败；
-- 24h soak：**尚未完成**；在 `phase=passed` 前不能宣称第 1 条完成。
+- 24h soak（0.3.0 基线二进制）：`phase=passed`，8580 轮，0 失败/0 超时；
+  - journal 34320 事件，链完整；
+  - RSS median 4540KB，max 4812KB，fd 5–8；
+  - 期间经历关机与断点续跑，停机时间未计入；
+  - **注意**：该次跑的是 P0/P1/P2 修复前的二进制；最终发布版仍需重跑 24h。
 
 ## 边界
 

@@ -1,5 +1,12 @@
 # Worklog
 
+## 2026-11-27 · 0.3.0 基线 24h soak 通过
+
+- `phase=passed`，rounds=8580，0 失败/0 超时，journal 链完整。
+- active≈24h；期间关机一次，断点续跑，停机时间未计入。
+- journal 34320 事件；RSS median 4540KB / max 4812KB；fd 5–8。
+- **边界**：跑的是 P0/P1/P2 修复前的二进制；最终发布版仍需重跑 24h。
+
 ## 2026-11-26 · 二轮评审 P1/P2 并行收口
 
 - `feat/protected-search` / `f92d3c6`：grep / literal_search / fs_search / tree
