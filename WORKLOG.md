@@ -1,5 +1,23 @@
 # Worklog
 
+## 2026-11-27 · 评审残余 / 文档 / 真实仓库评测框架
+
+- `feat/review-residual` / `e47de8d`：
+  - 管理面写锁内二次鉴权，关闭降权后的 TOCTOU 窗口；
+  - `lab_shell_invocation` 纯构造器 + Linux 单测，Windows `cmd /C` 分支；
+  - Postgres worker README 同步；
+  - 硬链接同 inode 别名明确为残余风险（未做全盘 inode 扫描）。
+- `feat/docs-cleanup` / `17a74e8`：
+  - docs/32 与 docs/33 重号文档重命名为 56/57，更新引用；
+  - 重写 `tools/status_doc.sh`，docs/23 状态可幂等重生成。
+- `feat/real-repo-bench` / `e885659`：
+  - `tools/bench_repos.py`、`verify_bench_repos.sh`、`make_bench_fixtures.sh`；
+  - 10 个真实仓库候选 + 12 任务模板；
+  - 合成 fixture 的 dry-run/index/越界/provider 隔离 20 项通过；
+  - **没有任何真实仓库结果**；路径仍是 `REPLACE_ME`。
+- 最终门禁：`tools/debug.sh` 57/57；docs 79/79；独立性 PASS；scan PASS；
+  docs/23 更新为 402 tests / 57 gates / 60 docs。
+
 ## 2026-11-27 · 0.3.0 基线 24h soak 通过
 
 - `phase=passed`，rounds=8580，0 失败/0 超时，journal 链完整。
