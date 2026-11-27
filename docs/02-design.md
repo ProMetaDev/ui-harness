@@ -208,7 +208,9 @@ TS 前端只做两件事：**渲染**与**输入**。分界是一条消息协议
 
 两者都遵守同一个约束：**进入上下文的东西必须可计价，做过的事必须留痕。**
 
-**Skill（渐进披露）**：`skills/<名字>/SKILL.md`（或 `.ui/skills/`），frontmatter 写
+**Skill（渐进披露）**：只从 `skills/<名字>/SKILL.md` 发现；`.ui/` 是受保护目录，
+不再作为隐式 skill 根。目录与文件都过统一隐私判定，真实路径必须仍位于 canonicalize
+后的 `skills/` 内，软链不能把读取偷渡到工作区外或 `secrets/`。frontmatter 写
 `name` / `description`。提示里只放目录（一行一个），模型用 `skill(name)` 工具才把正文拉进来。
 正文作为 `skill-body` 段进入快照（owner=`skill`，可计价），并写一条 `skill/load` 事件
 （谁、多少字节）。几十个 skill 也只占几行目录。
@@ -370,11 +372,12 @@ TS 前端只做两件事：**渲染**与**输入**。分界是一条消息协议
 1. **v0.2 委派与邮箱**（契约 6）：已做并行组 + 独立日志 + 隔离副本 + `apply`；
    还差父指针恢复与跨进程邮箱。
 2. **v0.3 全屏 TUI**：已完成（对话、审批、滚动、命令、宽屏「当前步」右栏）。
-3. **v0.4 执行侧沙箱**：已完成**写侧**——Landlock 把 shell 的写限制在工作区与 `/tmp`，
-   内核不支持就**直接失败**（fail closed，不静默降级），进程组超时回收，
-   `UI_SANDBOX_NET=1` 可禁 TCP。没做的是**读侧**：`sandbox.rs` 按设计给整盘
-   `READ_FILE|READ_DIR`（不然 `exec /bin/sh` 都跑不了），所以隐私路径靠策略与清单拦，
-   不靠内核。把读也锁进工作区（并给必要的系统目录开口子）是 Phase 1-B。
+3. **v0.4 执行侧沙箱**：已完成**读侧最小根与写侧**——Linux 用 user/mount
+   namespace + chroot 只暴露系统运行时、工作区和显式白名单，隐私路径用空目录/文件
+   遮住；Landlock 把写限制在工作区与 `/tmp`，`UI_SANDBOX_NET=1` 可禁 TCP。
+   namespace、挂载或 Landlock 不可用时**直接失败**（fail closed，不静默降级）。
+   Phase 1-B 的 shell 命令串 `read.private`（默认 ask）与 `provesRead:false`
+   observed 继续负责审批与留痕；它们不冒充实际读取证明。Windows 仍无对等文件视图。
 4. **v0.5 上下文治理**：已完成确定性折叠；下一步模型摘要 + 分层记忆。
 5. **v0.6 真实模型**：已完成 DeepSeek 子进程适配器与网页端流式；
    下一步 TUI 流式与更细的 usage 对账。
@@ -383,9 +386,9 @@ TS 前端只做两件事：**渲染**与**输入**。分界是一条消息协议
 
 - 委派只有最小实现（契约 6）：没有父指针恢复与跨进程邮箱。
 - TUI 还没有逐字流式（`on_delta` 只接了网页端），也还没有每行时间戳。
-- `shell` 有 OS 级**写**沙箱（Linux Landlock，fail closed；Windows 只有 Job Object，
-  没有文件写入限制）。**读侧没有沙箱**：`cat secrets/x` 拦不住，读回来的正文随后
-  走隐私两档（日志侧兜住，上下文侧兜不住）。
+- `shell` 在 Linux 上有 OS 级**读侧最小根 + 写侧沙箱**（fail closed）；Windows 只有
+  Job Object，没有文件读写限制。Linux 隐私路径遮罩不覆盖硬链接同 inode 别名；命令串
+  命中隐私路径时仍追加 `read.private` 并触发审批，observed 明确不证明实际读取。
 - 落账前的脱敏门是**模式匹配**，不是 DLP：没有密钥形状的机密会照原样进日志。
 - 网页端不脱敏：推给页面的是未脱敏的第一行，`/api/tool/<id>` 给全量原文。
 - MCP 只接了 tools：无 `inputSchema` 透传、无 resources/prompts、无超时重连。

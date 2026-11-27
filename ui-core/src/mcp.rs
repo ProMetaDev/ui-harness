@@ -7,6 +7,7 @@
 //! * 不需要动静态的工具注册表。
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::time::Duration;
@@ -135,7 +136,18 @@ impl Hub {
                 .stderr(Stdio::null());
             // MCP server 也是本地进程：统一走 exec 层的环境清理与沙箱。
             crate::exec::scrub_env(&mut cmd);
-            crate::exec::apply_linux_sandbox(&mut cmd, workspace, sandbox)?;
+            let mut read_sandbox = sandbox.clone();
+            // `python3 /abs/server.py` 这类解释器启动方式，解释器本身在 PATH
+            // 里，但脚本不在。只追加脚本所在目录，避免 MCP 配置绝对路径时
+            // 整个 server 因读侧不可达而超时。
+            if let Some(script) = argv.get(1).map(Path::new) {
+                if script.is_absolute() && script.is_file() {
+                    if let Some(parent) = script.parent() {
+                        read_sandbox.read_roots.push(parent.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            crate::exec::apply_linux_sandbox(&mut cmd, workspace, &read_sandbox)?;
             crate::exec::isolate_group(&mut cmd);
             #[cfg(windows)]
             if sandbox.fs {

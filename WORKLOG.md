@@ -1,5 +1,63 @@
 # Worklog
 
+## 2026-11-27 · UI 与看板娘局部体验收口
+
+- 导航按钮同步 `aria-current="page"`，当前视图对辅助技术可感知；
+- UU 状态改为读取真实审批/运行状态，等待审批时不再被 `busy=false` 覆盖成 idle；
+- 右栏预算条改用 `/api/ready` 与 `/api/meta` 的真实预算，修复 `--no-splash` 下永远为 0；
+- 变更审阅弹窗补齐打开聚焦、Tab 焦点循环、Escape/关闭后焦点恢复；
+- 清理一批已删除 DOM 节点的失效引用，静态 ID 审计无重复、无缺失；
+- `tools/browser_e2e.py` 增加弹窗焦点、预算条与 UU 审批状态回归；
+- WSL Linux release 构建、离线前端 9 项、真实浏览器 CDP 回归通过；控制台无错误。
+
+## 2026-11-27 · Linux 读侧最小根与隐私路径遮罩
+
+- 新增 `readjail`：user/mount namespace + chroot，只绑定系统运行时、工作区与显式白名单；
+- 工作区隐私/敏感路径与声明的绝对隐私路径用不可读空目录/文件遮住，失败关闭；
+- 不挂 procfs，清除 capability，并用 seccomp 禁止重新挂载/卸载、chroot 与 namespace 逃逸；
+- `/tmp` 为独立 tmpfs，`/dev` 仅暴露必要设备；merged-/usr 与 WSL recursive bind 已适配；
+- shell、插件、MCP、grep 共用读侧入口；绝对外部程序与 MCP 脚本目录自动加入只读白名单；
+- 新增集成测试覆盖普通工作、隐私/工作区外读取、`/proc/self/root`、写入与重新挂载；
+- 验收脚本按层拆分：隐私/观测实验显式关闭 OS 沙箱以验证策略层，插件入口移出受保护 `.ui`；
+- SECURITY、README、docs/02/07/22/23/31/32 同步 OS 边界与残余风险。
+
+## 2026-11-27 · skill 自动发现与加载读取保护
+
+- `Catalog::discover` 只从 `skills/` 发现，不再把 `.ui/skills/` 当隐式根；
+- 目录与 `SKILL.md` 复用 `protected::is_sensitive_or_private`，覆盖隐私目录、自定义清单与敏感名；
+- canonicalize 后的真实文件必须留在 canonicalize 后的 `skills/` 内，软链不能越界；
+- 新增 `.ui`、隐私/敏感目录、自定义隐私路径与 Unix 软链越界回归；
+- SECURITY、docs/02、docs/23 同步能力边界。
+
+## 2026-11-27 · 格式去噪与干净检出 CI 收口
+
+- 将 `cargo fmt --all` 造成的 47 个纯格式化 Rust 文件恢复到 HEAD 内容，只保留 4 个功能文件的实质差异；
+- 恢复被误删但仍被验收与真实模型脚本引用的 `tools/_node.sh`；
+- 同步去噪后的文档行号锚点，`tools/verify_docs.sh` 保持 79/79；
+- 在包含当前工作树差异的临时干净克隆中运行完整 `tools/ci.sh`：测试全绿、门禁 57/57；
+- 本地 WSL 缺 node 与 mingw，CI 前置检查明确报告覆盖缺口，未伪报完整依赖。
+
+## 2026-11-27 · Phase 1-B 读隐私路径纳入效果与审批
+
+- shell 命令串命中隐私清单时新增 `read.private` 效果，默认策略为 ask；
+- 复用 `mentioned_in_under`，避免工作区父目录名含 `secrets` 时误伤普通文件；
+- 无审批通道时调用不会进入工具执行；一次/会话审批仍沿用既有作用域；
+- 执行后额外写 `effect/observed`：`source=command-string`、`approval-only`、
+  `provesRead=false`，明确只仲裁执行、不证明实际读取；
+- `ui doctor`、SECURITY、docs/02/07/22/23/31 同步边界；
+- 新增策略、命令串效果、审批放行与无通道拒绝回归；**未实现内核读隔离**。
+
+## 2026-11-27 · 评测判定与证据归档收口
+
+- 修改类任务声明 `changed` / `changed_any` 时必须提供 `verify`，入口直接拒绝不可验证的修改任务；
+- `expect.no_extra_changes` 补齐正例、`changed_any` 组合与无允许列表边界自测；
+- 报告新增 repos/tasks 输入 SHA-256、主机指纹、模型标签与 attempts 上限；
+- 新增 `run-manifest.json`，记录 report.json/report.md 与输入文件指纹；
+- token 汇总改为包含所有 retry attempt，dry-run 的 attempts/tokens 明确为 0；
+- 文档区分“正式 10×12 未跑”与“已有 5 个只读 pilot + 3 个 Flask 修改任务”；
+- 按新口径回判历史 c03：因 `pytest_out.txt` 应失败，三个修改任务严格最终成功 2/3；
+- 早期 pilot/change 只有叙述性 Markdown，原始报告未归档；后续运行必须保存报告与清单。
+
 ## 2026-11-27 · 评审残余 / 文档 / 真实仓库评测框架
 
 - `feat/review-residual` / `e47de8d`：

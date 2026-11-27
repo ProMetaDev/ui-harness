@@ -5,7 +5,7 @@
 //! There is no capability "mode": effects are computed from the arguments.
 
 use crate::json::Json;
-use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC};
+use crate::policy::{Effect, FS_READ, FS_WRITE, PROC_EXEC, READ_PRIVATE};
 use crate::protected::{
     is_allowed_read, is_private_dir_name, is_private_path, is_private_real_path,
     is_sensitive_or_private, is_sensitive_read_path, private_dir_names, private_entries,
@@ -557,8 +557,16 @@ impl Matcher {
     }
 }
 
-fn shell_effects(args: &Json, _ctx: &Ctx) -> Vec<Effect> {
-    vec![Effect::new(PROC_EXEC, args.str_at("command").unwrap_or(""))]
+fn shell_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
+    let command = args.str_at("command").unwrap_or("");
+    let mut effects = vec![Effect::new(PROC_EXEC, command)];
+    // Linux 读侧视图按路径遮住隐私项；命令串检测仍要覆盖 Windows、硬链接
+    // 别名与变量/拼接写法，把「可能读取」纳入效果与审批，但不能伪装成
+    // 「已经证明读到了什么」。
+    if let Some(hit) = crate::protected::mentioned_in_under(&ctx.workspace, command) {
+        effects.push(Effect::new(READ_PRIVATE, hit));
+    }
+    effects
 }
 
 fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
@@ -1145,7 +1153,48 @@ mod tests {
             &c,
         );
         assert!(!r.ok);
-        assert_eq!(r.meta.num_at("status"), Some(3.0));
+        assert_eq!(r.meta.num_at("status"), Some(3.0), "{}", r.error.unwrap_or_default());
+    }
+
+    #[test]
+    fn shell_effects_mark_private_path_mentions_without_treating_them_as_reads() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        crate::protected::add_private("vendor/keys").unwrap();
+        let c = ctx();
+        for (command, expected) in [
+            ("cat ./secrets/api.txt", Some("secrets")),
+            ("cat SECRETS/api.txt", Some("secrets")),
+            ("cat vendor/keys/deploy.pem", Some("vendor/keys")),
+            ("git status", None),
+        ] {
+            let effects = shell_effects(&Json::obj(vec![("command", Json::from(command))]), &c);
+            assert_eq!(effects[0].kind, PROC_EXEC);
+            let private: Vec<&Effect> = effects.iter().filter(|e| e.kind == READ_PRIVATE).collect();
+            assert_eq!(
+                private.len(),
+                usize::from(expected.is_some()),
+                "{}",
+                command
+            );
+            if let Some(target) = expected {
+                assert_eq!(private[0].target, target);
+            }
+        }
+
+        // 工作区自己的父目录叫 secrets，不代表工作区里的普通文件也隐私。
+        let nested = Ctx {
+            workspace: PathBuf::from("/home/me/secrets/project"),
+            ..Default::default()
+        };
+        let effects = shell_effects(
+            &Json::obj(vec![(
+                "command",
+                Json::from("cat /home/me/secrets/project/notes.txt"),
+            )]),
+            &nested,
+        );
+        assert!(!effects.iter().any(|e| e.kind == READ_PRIVATE));
     }
 
     /// 四个读取入口共用 `protected` 的那一份清单（默认三项 + `--private`）：
@@ -1929,7 +1978,13 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
         return ToolResult::err("grep 超时（20s），已终止");
     }
     let code = out.status.as_ref().and_then(|s| s.code());
-    if code == Some(0) || code == Some(1) {
+    // 读侧沙箱会把敏感文件遮成 000；GNU grep 递归碰到它们时可能边输出正常
+    // 命中边返回 2。只有 stderr 全部是 Permission denied 才按部分结果处理，
+    // 正则错误、I/O 错误等仍旧失败，不把真实故障静默掉。
+    let masked_permission_denied = code == Some(2)
+        && !out.stderr.is_empty()
+        && out.stderr.lines().all(|line| line.contains("Permission denied"));
+    if code == Some(0) || code == Some(1) || masked_permission_denied {
             let text = &out.stdout;
             // `--exclude-dir` 只认名字：多段（`vendor/keys`）与绝对声明它排不掉。
             // 结果行按真实路径再判一次，否则"清单里加了目录，grep 照样把它捞出来"

@@ -1228,12 +1228,15 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     let sb = ui_core::sandbox::describe(&ui_core::sandbox::Config::default());
     println!("  shell   ：{}", sb);
     println!("            执行前后还会对比工作区，把**实际改动**记入 effect/observed（UI_OBSERVE=0 可关）");
+    println!("            命令串命中隐私路径会记为 read.private（默认 ask）；effect/observed 只证明按策略执行，不证明实际读取");
     #[cfg(windows)]
-    println!("            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件写入限制");
+    println!("            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件读写限制");
     println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
     println!("  mcp_call：同上，外部 server 在进程内自主");
-    println!("            读取两侧都不限制——沙箱挡的是写，不是读");
-    println!("  结论    ：Linux 上 shell 有写入与网络沙箱；Windows 上只有资源与回收约束；两边的**读**都靠策略与清单，不靠内核");
+    #[cfg(target_os = "linux")]
+    println!("  结论    ：Linux 上 shell 有读侧最小根与写入/网络沙箱；隐私路径遮罩失败即拒绝执行");
+    #[cfg(not(target_os = "linux"))]
+    println!("  结论    ：当前平台没有 Linux 对等的读侧文件视图；读写边界仍靠策略与清单");
 
     // 隐私清单：判定只有一份（protected.rs），工具、策略、网页端、导出
     // 都问它。doctor 要把「此刻生效的是哪几条」原样打出来——不然人加了

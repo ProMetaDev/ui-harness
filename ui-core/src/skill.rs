@@ -5,6 +5,7 @@
 //!
 //! 加载过的正文会作为独立段落进入快照（可计价），并写一条 `skill/load` 事件。
 
+use crate::protected::is_sensitive_or_private;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,27 +23,47 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// 在 `<ws>/skills` 与 `<ws>/.ui/skills` 下找 `*/SKILL.md`。
+    /// 在 `<ws>/skills` 下找 `*/SKILL.md`。
+    ///
+    /// `.ui` 是受保护目录，不再作为隐式 skill 根；否则模型只要命名一个
+    /// `skill` 就能绕过 `fs_read` 的 `.ui` 边界。目录与文件都过统一隐私
+    /// 判定，且真实路径必须仍位于 canonicalize 后的 `skills/` 内，软链不能
+    /// 把读取偷渡到工作区外或 `secrets/`。
     pub fn discover(workspace: &Path) -> Catalog {
-        let mut roots = vec![workspace.join("skills"), workspace.join(".ui").join("skills")];
-        roots.dedup();
         let mut skills: Vec<Skill> = Vec::new();
-        for root in roots {
-            let entries = match fs::read_dir(&root) {
-                Ok(e) => e,
-                Err(_) => continue,
+        let ws_real = match workspace.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return Catalog { skills },
+        };
+        let root = ws_real.join("skills");
+        let root_real = match root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return Catalog { skills },
+        };
+        if !root_real.starts_with(&ws_real) || is_sensitive_or_private(&ws_real, &root_real) {
+            return Catalog { skills };
+        }
+        let entries = match fs::read_dir(&root_real) {
+            Ok(e) => e,
+            Err(_) => return Catalog { skills },
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if is_sensitive_or_private(&ws_real, &dir) {
+                continue;
+            }
+            let file = dir.join("SKILL.md");
+            let real_file = match file.canonicalize() {
+                Ok(p) if p.starts_with(&root_real) => p,
+                _ => continue,
             };
-            for entry in entries.flatten() {
-                let dir = entry.path();
-                let file = dir.join("SKILL.md");
-                if !file.is_file() {
-                    continue;
-                }
-                if let Ok(text) = fs::read_to_string(&file) {
-                    if let Some(skill) = parse(&text, &file) {
-                        if !skills.iter().any(|s| s.name == skill.name) {
-                            skills.push(skill);
-                        }
+            if is_sensitive_or_private(&ws_real, &real_file) || !real_file.is_file() {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(&real_file) {
+                if let Some(skill) = parse(&text, &real_file) {
+                    if !skills.iter().any(|s| s.name == skill.name) {
+                        skills.push(skill);
                     }
                 }
             }
@@ -159,6 +180,57 @@ mod tests {
         let rendered = cat.render_catalog();
         assert!(rendered.contains("- alpha — 第一件事"));
         assert!(rendered.contains("- beta — 第二件事"));
+    }
+
+    #[test]
+    fn discovery_ignores_ui_private_and_sensitive_entries() {
+        let ws = tmp("discover-filtered");
+        write_skill(&ws, "alpha", "---\nname: alpha\ndescription: 可见\n---\n正文 A");
+        write_skill(&ws, "secrets/hidden", "---\nname: hidden\n---\n隐私目录");
+        write_skill(&ws, ".env/hidden", "---\nname: env-hidden\n---\n敏感目录");
+
+        let ui = ws.join(".ui").join("skills").join("hidden");
+        fs::create_dir_all(&ui).unwrap();
+        fs::write(ui.join("SKILL.md"), "---\nname: ui-hidden\n---\n受保护目录").unwrap();
+
+        let cat = Catalog::discover(&ws);
+        assert_eq!(cat.skills.len(), 1);
+        assert_eq!(cat.skills[0].name, "alpha");
+    }
+
+    #[test]
+    fn discovery_honors_custom_private_paths() {
+        let _g = crate::protected::private_test_guard();
+        crate::protected::clear_private();
+        crate::protected::add_private("vendor/keys").unwrap();
+        let ws = tmp("discover-custom-private");
+        write_skill(&ws, "alpha", "---\nname: alpha\n---\n可见");
+        write_skill(&ws, "vendor/keys/hidden", "---\nname: hidden\n---\n自定义隐私");
+
+        let cat = Catalog::discover(&ws);
+        assert_eq!(cat.skills.len(), 1);
+        assert_eq!(cat.skills[0].name, "alpha");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tmp("discover-symlink");
+        write_skill(&ws, "alpha", "---\nname: alpha\n---\n可见");
+        let secrets = ws.join("secrets");
+        fs::create_dir_all(secrets.join("evil")).unwrap();
+        fs::write(secrets.join("evil").join("SKILL.md"), "---\nname: evil\n---\n越界").unwrap();
+        symlink(&secrets, ws.join("skills").join("alias")).unwrap();
+
+        let beta = ws.join("skills").join("beta");
+        fs::create_dir_all(&beta).unwrap();
+        symlink(secrets.join("evil").join("SKILL.md"), beta.join("SKILL.md")).unwrap();
+
+        let cat = Catalog::discover(&ws);
+        assert_eq!(cat.skills.len(), 1);
+        assert_eq!(cat.skills[0].name, "alpha");
     }
 
     #[test]

@@ -92,17 +92,20 @@ if [ "$dry_rc" -eq 0 ]; then
 else
   bad "dry-run 退出 $dry_rc" "$(tail -8 "$TMP/dry.stderr" 2>/dev/null)"
 fi
-if [ -f "$TMP/dry/report.json" ] && [ -f "$TMP/dry/report.md" ]; then
-  ok "生成了 report.json 与 report.md"
+if [ -f "$TMP/dry/report.json" ] && [ -f "$TMP/dry/report.md" ] && [ -f "$TMP/dry/run-manifest.json" ]; then
+  ok "生成了 report.json、report.md 与 run-manifest.json"
 else
-  bad "缺少 report.json / report.md"
+  bad "缺少 report.json / report.md / run-manifest.json"
 fi
 if $PY - "$TMP/dry/report.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8"))
-assert r["schema"] == 1, r.get("schema")
+assert r["schema"] == 2, r.get("schema")
 assert r["mode"] == "dry-run", r.get("mode")
 assert r.get("dryRunReason"), "dry-run 必须写明原因"
+assert r["inputs"]["repos"]["sha256"] and r["inputs"]["tasks"]["sha256"]
+assert r["host"]["system"] and r["host"]["machine"] and r["host"]["python"]
+assert r["limits"]["attempts"] == 1
 assert len(r["repos"]) == 12, len(r["repos"])
 for repo in r["repos"]:
     assert repo["status"] == "ok", (repo["name"], repo["status"], repo.get("statusReason"))
@@ -122,12 +125,29 @@ s = r["summary"]
 assert s["repos"]["ok"] == 12 and s["repos"]["invalid"] == 0, s
 assert s["tasks"]["total"] == 144 and s["tasks"]["dryRun"] == 144, s
 assert s["tasks"]["success"] == 0 and s["tasks"]["failed"] == 0, s
+assert s["tasks"]["attempts"] == 0 and s["tasks"]["tokens"] == 0, s
 assert s["index"]["ok"] == 12, s["index"]
 PY
 then
-  ok "dry-run 报告结构与 12×12 任务状态正确"
+  ok "dry-run 报告结构、输入指纹与 12×12 任务状态正确"
 else
   bad "dry-run 报告结构断言失败"
+fi
+if $PY - "$TMP/dry" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+manifest = json.loads((out / "run-manifest.json").read_text(encoding="utf-8"))
+for name in ("report.json", "report.md"):
+    actual = hashlib.sha256((out / name).read_bytes()).hexdigest()
+    assert manifest["files"][name]["sha256"] == actual, name
+assert manifest["inputs"]["tasks"]["name"] == "tasks.example.json"
+assert manifest["inputs"]["repos"]["name"] == "repos.json"
+PY
+then
+  ok "run-manifest.json 的报告与输入指纹可校验"
+else
+  bad "run-manifest.json 指纹校验失败"
 fi
 if grep -qF "没有执行模型" "$TMP/dry/report.md" 2>/dev/null; then
   ok "report.md 明确写了 dry-run 未执行模型"
@@ -273,6 +293,7 @@ PY
   --repos "$TMP/provider/repos.json" --tasks "$TMP/provider/tasks.json" \
   --ui "$UI_BIN" --out "$TMP/provider/out" --timeout 60 \
   --provider-cmd "printf 'PROVIDER_REACHED\n' >&2; exit 7 # CMD_LEAK_CANARY" \
+  --model-label "test-model" \
   >"$TMP/provider.stdout" 2>"$TMP/provider.stderr"
 prov_rc=$?
 if [ "$prov_rc" -eq 0 ]; then
@@ -285,6 +306,7 @@ import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8"))
 assert r["mode"] == "real", r["mode"]
 assert r["model"]["kind"] == "external", r["model"]
+assert r["model"]["label"] == "test-model", r["model"]
 t = r["repos"][0]["tasks"][0]
 assert t["status"] == "failed", t["status"]
 run = t["run"]
@@ -308,6 +330,16 @@ if "$PY" tools/test_bench_expect.py >"$TMP/expect.log" 2>&1; then
   ok "expect.no_extra_changes 会把额外文件判失败"
 else
   bad "expect.no_extra_changes 自测失败" "$(tail -5 "$TMP/expect.log" 2>/dev/null)"
+fi
+if "$PY" tools/test_bench_tasks.py >"$TMP/tasks.log" 2>&1; then
+  ok "修改类任务缺少 verify 时会在入口被拒绝"
+else
+  bad "修改类任务 verify 强制自测失败" "$(tail -5 "$TMP/tasks.log" 2>/dev/null)"
+fi
+if "$PY" tools/test_bench_evidence.py >"$TMP/evidence.log" 2>&1; then
+  ok "报告清单指纹与 retry 汇总口径正确"
+else
+  bad "评测证据清单自测失败" "$(tail -5 "$TMP/evidence.log" 2>/dev/null)"
 fi
 if "$PY" tools/test_bench_retry.py >"$TMP/retry.log" 2>&1; then
   ok "retry 只对 model_error 生效并累计 tokens"

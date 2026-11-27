@@ -13,7 +13,7 @@
 | 真实路径 | `Agent::escapes_workspace`：`canonicalize` 后必须仍在工作区内 | 符号链接把工作区外的内容读进来 |
 | 读取例外 | `protected::is_allowed_read`：字面前缀 **＋** 真实路径都要落在 `<ws>/.ui/tool-output/`，且只对普通文件生效 | `.ui/tool-output/link -> secrets/x` 这种软链借到"截断缓存"的读例外 |
 | 敏感单文件 | `protected::is_sensitive_file_name`：`.env*`、`id_rsa`、`*.pem`、`*.key` 等；`fs_read` / `grep` / `fs_search` / `tree` 与写入口 `fs_write` / `fs_edit` / `patch` / `fs_mv` 共用，并按真实路径识别软链别名 | `.env` / 私钥被读出来、搜出来、列出来或改掉 |
-| 密钥 | 四层：`secrets/**` 无条件 deny ＋ 隔离副本不带该目录（`isolate::SKIP`）＋ 落账前脱敏门 ＋ `--private` 来源扣留（详见下面「隐私：两档处理 + 生命周期」） | 上下文里仍可能是明文（沙箱不限读）；日志与落盘那两份有档可查、可按保留期清掉 |
+| 密钥 | 四层：`secrets/**` 无条件 deny ＋ 隔离副本不带该目录（`isolate::SKIP`）＋ 落账前脱敏门 ＋ `--private` 来源扣留 ＋ Linux 读侧路径遮罩（详见下面「隐私：两档处理 + 生命周期」） | Windows/关闭读沙箱时上下文仍可能是明文；日志与落盘那两份有档可查、可按保留期清掉 |
 
 ## 已完成的安全修复（来自对抗测试）
 
@@ -42,7 +42,7 @@
 4. **多 writer 的 turn 归属只到 writer 级**：同一个 writer 内部仍是串行的，跨进程的因果顺序无法从日志推出来（只有全局 seq 定序）。
 5. **网页端已脱敏（2026-11-20 修）**：`Hub::push` 与 `store_tool` 两处都过 `secrets::redact_json`，事件带 `redacted: N` 标出抹过几处。判据与 `Journal` 落账门共用一份，所以两边不会漂。回归由 `tools/verify_web_leak.sh`（门禁）与 `server::tests::web_surface_redacts_before_it_leaves_the_process` 守着。~~此前是原文~~：`/snapshot` 会把整份 `hub.log` 嵌进**可分享**的 HTML，那一版等于转发文件就公开工具输出。
 6. **脱敏门只管日志、只管模式匹配**：无密钥形状的机密会照原样进日志，上下文里更是明文。它是"日志别变成密钥库"，不是 DLP。
-7. **策略的 deny 挡不住 shell 的读**：`secrets/**` 对 `fs_read` 有效，对 `cat` 无效（沙箱只限写）；`tools/kit.sh` 场景 5 至今仍是 GAP。
+7. **Windows 没有对等读侧视图**：Linux 默认遮住 `secrets/**` 等路径；Windows 或显式关闭读沙箱时，`cat` 仍可能读到内容，只能靠 `read.private` 审批、来源扣留与落账脱敏收敛。
 8. **硬链接同 inode 别名不在路径防护范围**：路径防护（`..` 词法折叠、`escapes_workspace` / `is_allowed_read` 的 `canonicalize` 真实路径、`is_private_path` 与 `is_sensitive_file_name` 的清单）都按**路径**判，不按 inode。`ln` / `CreateHardLink` 造出的别名与目标共享 inode，但路径上没有 symlink 跳转，`canonicalize` 也不会把别名变成目标路径；因此工作区内的硬链接、以及从工作区外链进工作区的硬链接（同 inode）都能绕过按路径写的隐私/敏感判断。要识别它必须比较 inode/文件 ID 并扫描目录；本轮不做全盘 inode 扫描，也不声称能按路径识别硬链接。这是已接受的残余风险，不是"已覆盖"。
 
 ## 怎么复查
@@ -103,20 +103,29 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 观测是事后记账，沙箱是事前阻止。
 
 
-## OS 沙箱（Landlock，Linux 5.13+）
+## OS 沙箱（Linux 读侧最小根 + Landlock）
 
-观测是**事后记账**，沙箱是**事前阻止**。Linux 上用 Landlock 给 shell 上锁，
-零依赖直接调 syscall（不用 libc crate、不用 bwrap、不需要 root）：
+观测是**事后记账**，沙箱是**事前阻止**。Linux 默认先建立读侧最小根，再用
+Landlock 限制写入；零依赖直接调 syscall（不用 libc crate、不用 bwrap、不需要 root）：
 
-| 路径 | 权限 |
-|---|---|
-| 整个文件系统 | 读 + 执行（否则 exec 不了 /bin/sh） |
-| 工作区 | 全部 |
-| `/tmp` | 全部 |
-| `/dev/null` | 读写（重定向不报错） |
+| 层 | 机制 | 边界 |
+|---|---|---|
+| 读侧视图 | user/mount namespace + chroot | 只绑定系统运行时、工作区、`extra_writable` 与显式 `read_roots` |
+| 隐私遮罩 | 空目录/空文件 bind | 工作区隐私/敏感路径与已声明的绝对隐私路径不可读 |
+| 逃逸防护 | 清 capability + seccomp | 禁止重新挂载/卸载、`chroot`、`pivot_root`、`setns`/`unshare` 等 |
+| 写侧 | Landlock | 只允许工作区、`extra_writable` 与私有 `/tmp` 写入 |
+| 网络 | Landlock ABI ≥ 4 | 默认允许；`UI_SANDBOX_NET=1` 禁 TCP，UDP 不受限 |
 
-**fail closed**：要沙箱却拿不到（内核不支持），命令**直接失败**，不会静默降级成
-无沙箱执行。`UI_SANDBOX=0` 是显式关闭，日志 meta 里会记 `sandbox:"off"`。
+读侧视图不挂 procfs，避免 `/proc/self/root` 等 magic link 绕过 chroot；`/tmp` 是
+独立空 tmpfs，`/dev` 只暴露 null/zero/random/urandom/tty。系统根以只读 recursive
+bind 进入视图，merged-/usr 保留 `/bin`、`/sbin`、`/lib*` 兼容软链。绝对路径启动的
+外部程序及其 MCP 脚本所在目录会自动加入只读白名单，避免解释器打不开脚本。
+插件配置可以放在 `.ui`，但可执行入口不要放进 `.ui` 或 `secrets` 等受保护路径；
+否则读侧视图会按同一隐私规则把它遮住，插件应使用普通工作区路径或显式白名单。
+
+**fail closed**：要沙箱却拿不到 user/mount namespace、Landlock 或挂载能力，命令
+**直接失败**，不会静默降级成无沙箱执行。`UI_SANDBOX=0` 是显式关闭；Linux 还可设
+`UI_SANDBOX_READ=0` 只关读侧视图，日志 meta 会记 `sandbox:"off"`。
 
 每条 shell 调用的结果里都带沙箱标记：
 
@@ -130,8 +139,9 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 |---|---|
 | 网络 | 默认**不**限制；`UI_SANDBOX_NET=1` 时禁 TCP（ABI ≥ 4）。UDP 不受 Landlock 限制。 |
 | Windows | **没有对等机制**，shell 仍是"可执行程序"级信任。 |
-| 读 | 系统文件可读（不然跑不了程序），所以 `cat secrets` 这类**读**仍然拦不住。读回来的正文随后走隐私两档，见下一节。 |
-| 环境 | 靠 `envScrubbed`（另一条防线），不是 Landlock。 |
+| 读 | Linux 默认遮住隐私/敏感路径；命令串命中时仍追加 `read.private`（默认 ask）并留审批记录。`effect/observed` 的 `provesRead:false` 表示观测不证明实际读取，不否定 OS 路径遮罩。 |
+| 硬链接 | 同 inode 的硬链接别名不在路径遮罩范围；见 SECURITY 的明确边界。 |
+| 环境 | 靠 `envScrubbed`（另一条防线），不是沙箱。 |
 
 ## 隐私：两档处理 + 生命周期
 
@@ -149,7 +159,7 @@ secret.read/net.fetch 被仲裁"）——它说得对，所以我们现在明确
 
 | 位置 | 写什么 | 为什么允许绕 |
 |---|---|---|
-| `agent.rs:861` | `tool/output` 的正文 | 正文已经先过了下面两档；再过一遍门会把 `redacted` 计数的含义洗掉 |
+| `agent.rs:864` | `tool/output` 的正文 | 正文已经先过了下面两档；再过一遍门会把 `redacted` 计数的含义洗掉 |
 | `agent.rs:511` | 落盘原文的指针记号 | 记号是给原文作证的，里面只有路径、字数与指纹 |
 | `memory.rs:325` | `memory/write` | 记忆条目是原文的另一个藏身处——所以 `ui secrets` 单独扫 `.ui/memory.jsonl` |
 
@@ -230,15 +240,19 @@ knob **写错会打 ⚠ 并给出正确写法**（`UI_SPILL_KEEP=0` 会提示你
 
 ### 这两档没有挡住什么
 
-- **模型上下文里仍是明文**。沙箱不限读，`cat secrets/x` 的内容照旧进上下文；
-  第二档只在来源命中清单时拦，第一档只管日志。
+- **模型上下文里仍可能是明文**。Linux 读侧视图阻断清单内路径，但硬链接别名、
+  非清单机密、Windows 或显式关闭读沙箱的执行仍可能把内容带进上下文；命令串命中时
+  会触发 `read.private` 审批并留下 `provesRead:false` 的 observed 记录。第二档只在
+  来源命中清单时拦日志与上下文。
 - **第一档是模式匹配，不是 DLP**。没有密钥形状的机密照原样进日志。想知道有没有漏：
   `ui secrets`（扫 journal、两个落盘目录与 `.ui/memory.jsonl`）。
 - **网页端已过这两档**（2026-11-20）：`Hub::push` 与 `store_tool` 是仅有的两个出口，
   都过同一个 `redact_json`；`/snapshot` 因此不会再嵌进明文。
   注意这仍**不是 DLP**：没有密钥形状的机密照旧看得见（和日志同一档判据）。
 - **同机 root、整个工作区打包外发**不在防护范围内。
-- **读隐私路径不拦**（Phase 1-B）：靠工具层与策略，不靠沙箱。
+- **读侧视图不是全盘 inode 防护**。Linux 按路径遮罩，硬链接别名仍可读同一 inode；
+  Windows 没有对等读侧视图。命令串检测也不是 shell 解析器，变量展开、拼接或脚本
+  间接读取可能漏判，因此 `read.private` 不能替代 OS 边界。
 
 ## 日志写不进去时（fail closed）
 

@@ -14,7 +14,7 @@
 `--mock` 会真的执行 run（脚本化模型），但报告把 model.kind 标成 `scripted`，
 它只用于自测管线，不是模型能力评测。
 
-输出：`<out>/report.json` 与 `<out>/report.md`。
+输出：`<out>/report.json`、`<out>/report.md` 与 `<out>/run-manifest.json`。
 
 依赖：Python 3.8+ 标准库。不读写 API key；provider 命令原文不写入报告。
 """
@@ -24,6 +24,7 @@ import datetime
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -33,7 +34,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-SCHEMA = 1
+SCHEMA = 2
 DEFAULT_TIMEOUT = 600
 MAX_SCAN_FILES = 200000
 MAX_CHANGED_RECORDS = 200
@@ -82,6 +83,28 @@ def iso_now():
 
 def sha256_text(text):
     return hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def file_fingerprint(path):
+    p = Path(path)
+    return {"name": p.name, "sha256": sha256_file(p), "bytes": p.stat().st_size}
+
+
+def host_fingerprint():
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+    }
 
 
 def redact(text):
@@ -181,6 +204,13 @@ def load_tasks(path):
         verify = row.get("verify")
         if verify is not None and not isinstance(verify, str):
             raise Fatal("tasks[%d].verify 必须是字符串或省略" % i)
+        expect_obj = expect if isinstance(expect, dict) else {}
+        changes_expected = any(key in expect_obj for key in ("changed", "changed_any"))
+        if changes_expected and not (verify or "").strip():
+            raise Fatal(
+                "tasks[%d]（%s）声明了 changed/changed_any，必须提供 verify 命令；"
+                "否则无法证明修改正确" % (i, task_id)
+            )
         out.append({"id": task_id, "prompt": prompt, "expect": expect, "verify": verify})
     return out
 
@@ -922,6 +952,17 @@ def run_task_with_retries(repo_rec, repo, task, ctx, task_index):
 def summarize(report):
     repos = report["repos"]
     tasks = [t for r in repos for t in r["tasks"]]
+    executed = [t for t in tasks if not (t.get("run") or {}).get("skipped")]
+    total_tokens = 0
+    tokens_known = 0
+    for task in executed:
+        retry = task.get("retry") or {}
+        tokens = retry.get("totalTokens")
+        if tokens is None:
+            tokens = (task.get("run") or {}).get("tokens")
+        if tokens is not None:
+            total_tokens += int(tokens)
+            tokens_known += 1
     summary = {
         "repos": {
             "total": len(repos),
@@ -932,13 +973,16 @@ def summarize(report):
         },
         "tasks": {
             "total": len(tasks),
+            "executed": len(executed),
             "success": sum(1 for t in tasks if t["status"] == "success"),
             "failed": sum(1 for t in tasks if t["status"] == "failed"),
             "dryRun": sum(1 for t in tasks if t["status"] == "dry-run"),
             "skipped": sum(1 for t in tasks if t["status"] == "skipped"),
             "error": sum(1 for t in tasks if t["status"] == "error"),
             "retried": sum(1 for t in tasks if (t.get("attempts") or 1) > 1),
-            "attempts": sum((t.get("attempts") or 1) for t in tasks),
+            "attempts": sum(int(t.get("attempts") or 1) for t in executed),
+            "tokens": total_tokens,
+            "tokensKnown": tokens_known,
         },
         "index": {
             "ok": sum(1 for r in repos if (r.get("index") or {}).get("error") is None
@@ -963,6 +1007,18 @@ def write_report_md(report, path):
     lines.append("- 模式：**%s**" % mode)
     lines.append("- 模型：%s" % report["model"]["label"])
     lines.append("- ui：%s" % (report.get("ui", {}).get("version") or "unknown"))
+    inputs = report.get("inputs") or {}
+    if inputs:
+        lines.append("- 输入指纹：repos `%s` · tasks `%s`" % (
+            (inputs.get("repos") or {}).get("sha256", "unknown"),
+            (inputs.get("tasks") or {}).get("sha256", "unknown")))
+    host = report.get("host") or {}
+    if host:
+        lines.append("- 主机：%s %s / %s / Python %s" % (
+            host.get("system", "unknown"), host.get("release", "unknown"),
+            host.get("machine", "unknown"), host.get("python", "unknown")))
+    lines.append("- 尝试上限：%s（仅 model_error 且未改文件时重试）" % (
+        (report.get("limits") or {}).get("attempts", 1)))
     lines.append("- 耗时：%.1f 秒" % (report.get("durationMs", 0) / 1000.0))
     lines.append("")
     if mode == "dry-run":
@@ -986,6 +1042,11 @@ def write_report_md(report, path):
     lines.append("| tasks | %d | %d | %d | %d | %d |" % (
         s["tasks"]["total"], s["tasks"]["success"], s["tasks"]["skipped"],
         s["tasks"]["failed"] + s["tasks"]["error"], s["tasks"]["dryRun"]))
+    lines.append("")
+    lines.append("- 实际执行 attempts：%d；发生重试的任务：%d；已知 tokens 合计：%d（%d/%d 个执行任务）。" % (
+        s["tasks"].get("attempts", 0), s["tasks"].get("retried", 0),
+        s["tasks"].get("tokens", 0), s["tasks"].get("tokensKnown", 0),
+        s["tasks"].get("executed", 0)))
     lines.append("")
 
     for repo in report["repos"]:
@@ -1016,8 +1077,8 @@ def write_report_md(report, path):
         lines.append("")
         if not repo["tasks"]:
             continue
-        lines.append("| task | status | run rc | tokens | calls | changed | verify | expect | ms |")
-        lines.append("|---|---|---:|---:|---:|---:|---|---|---:|")
+        lines.append("| task | status | attempts | run rc | tokens | calls | changed | verify | expect | ms |")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---|---|---:|")
         for task in repo["tasks"]:
             run = task.get("run") or {}
             verify = task.get("verify") or {}
@@ -1029,10 +1090,15 @@ def write_report_md(report, path):
                 expect_txt = "FAIL"
             verify_txt = "skip" if verify.get("skipped") else (
                 "ok" if verify.get("ok") else "FAIL rc=%s" % verify.get("rc"))
-            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            tokens_txt = "" if run.get("tokens") is None else str(run.get("tokens"))
+            retry = task.get("retry") or {}
+            if retry.get("used"):
+                tokens_txt = "%s / %s" % (tokens_txt or "?", retry.get("totalTokens", "?"))
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 md_escape(task["id"]), md_escape(task["status"]),
+                task.get("attempts", 0 if run.get("skipped") else 1),
                 "" if run.get("rc") is None else run.get("rc"),
-                "" if run.get("tokens") is None else run.get("tokens"),
+                tokens_txt,
                 "" if run.get("toolCalls") is None else run.get("toolCalls"),
                 task.get("changedCount", 0),
                 verify_txt, expect_txt,
@@ -1052,6 +1118,30 @@ def write_report_md(report, path):
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_run_manifest(report, out, json_path, md_path):
+    manifest = {
+        "schema": 1,
+        "generatedAt": report["generatedAt"],
+        "mode": report["mode"],
+        "model": report["model"],
+        "ui": report.get("ui", {}),
+        "inputs": report.get("inputs", {}),
+        "host": report.get("host", {}),
+        "limits": report.get("limits", {}),
+        "files": {
+            "report.json": file_fingerprint(json_path),
+            "report.md": file_fingerprint(md_path),
+        },
+        "notes": [
+            "本清单只校验本次输出与输入指纹，不包含 provider 命令、环境变量或 API key。",
+            "归档时请一并保存 report.json、report.md、run-manifest.json、answers/ 与任务使用的工作区/journal。",
+        ],
+    }
+    path = out / "run-manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def write_report(report, out):
     out.mkdir(parents=True, exist_ok=True)
     report["summary"] = summarize(report)
@@ -1059,7 +1149,8 @@ def write_report(report, out):
     md_path = out / "report.md"
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_report_md(report, md_path)
-    return json_path, md_path
+    manifest_path = write_run_manifest(report, out, json_path, md_path)
+    return json_path, md_path, manifest_path
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1179,10 @@ def run_bench(args):
         / ("run-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
     repos_raw = load_repos(args.repos)
     tasks = load_tasks(args.tasks)
+    inputs = {
+        "repos": file_fingerprint(args.repos),
+        "tasks": file_fingerprint(args.tasks),
+    }
     repos_base = Path(args.repos).expanduser().resolve().parent
     ui = resolve_ui(args.ui or os.environ.get("UI_BIN"))
 
@@ -1124,9 +1219,10 @@ def run_bench(args):
     elif mock:
         model = {"kind": "scripted", "label": "scripted mock（仅验证管线，不代表模型能力）"}
     elif args.provider:
-        model = {"kind": "external", "label": "provider:%s" % args.provider}
+        model = {"kind": "external", "label": redact(args.model_label or "provider:%s" % args.provider)}
     else:
-        model = {"kind": "external", "label": "UI_MODEL_CMD（命令原文不落盘）"}
+        model = {"kind": "external", "label": redact(
+            args.model_label or "UI_MODEL_CMD（未注明模型；请用 --model-label 补充）")}
 
     ui_version = None
     report = {
@@ -1136,7 +1232,9 @@ def run_bench(args):
         "dryRunReason": dry_run_reason,
         "model": model,
         "ui": {"bin": ui or "", "version": None},
-        "limits": {"timeoutSec": args.timeout},
+        "inputs": inputs,
+        "host": host_fingerprint(),
+        "limits": {"timeoutSec": args.timeout, "attempts": args.attempts},
         "repos": [],
         "summary": {},
         "notes": [],
@@ -1263,6 +1361,7 @@ def run_bench(args):
             "--mock 是脚本化模型，只验证管线，不是模型能力评测。",
             "占位符 REPLACE_ME 的仓库被 SKIP，不产生结果。",
             "报告不记录 provider 命令原文、环境变量或 API key；只记录 UI_BIN 与版本。",
+            "run-manifest.json 记录 report.json/report.md 与 repos/tasks 输入文件的 SHA-256；归档时请一并保存。",
         ]
     else:
         report["notes"] = [
@@ -1271,14 +1370,16 @@ def run_bench(args):
             "changedFiles 由运行前后工作区 size+mtime 快照得出，不读取 git 历史；被 .gitignore 的文件也算。",
             "tokens 优先取 ui run 状态行，取不到才用 journal 中 prompt/snapshot 的 tokens 求和。",
             "报告不记录 provider 命令原文、环境变量或 API key；只记录 UI_BIN 与版本。",
+            "run-manifest.json 记录 report.json/report.md 与 repos/tasks 输入文件的 SHA-256；归档时请一并保存。",
         ]
 
     report["durationMs"] = int((time.time() - started) * 1000)
-    json_path, md_path = write_report(report, out)
+    json_path, md_path, manifest_path = write_report(report, out)
     summary = report["summary"]
 
     print("报告 %s" % json_path)
     print("     %s" % md_path)
+    print("     %s" % manifest_path)
     print("mode=%s · repos ok=%d skipped=%d invalid=%d error=%d · tasks success=%d failed=%d dry-run=%d skipped=%d error=%d" % (
         mode,
         summary["repos"]["ok"], summary["repos"]["skipped"],
@@ -1302,6 +1403,7 @@ def build_parser():
     p.add_argument("--ui", help="ui 可执行文件路径（默认 UI_BIN 或 PATH 里的 ui）")
     p.add_argument("--provider", help="传给 ui run 的 --provider 名字（仓库需有 .ui/providers.json）")
     p.add_argument("--provider-cmd", help="设置 UI_MODEL_CMD 的模型命令；原文不写入报告")
+    p.add_argument("--model-label", help="外部 provider 的可公开模型标签；不得包含 key，默认不猜模型名")
     p.add_argument("--mock", help="传给 ui run 的 --mock 剧本文件（scripted，仅验证管线）")
     p.add_argument("--out", help="输出目录（默认 bench/out/run-<时间戳>）")
     p.add_argument("--attempts", type=int, default=1,
@@ -1320,6 +1422,8 @@ def main(argv):
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("--timeout 必须是正整数")
+    if args.attempts < 1 or args.attempts > 5:
+        parser.error("--attempts 必须在 1..5 之间")
     try:
         return run_bench(args)
     except Fatal as exc:

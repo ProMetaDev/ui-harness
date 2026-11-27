@@ -1,17 +1,19 @@
-# 真实多仓库评测（框架）
+# 真实多仓库评测（框架与小规模结果）
 
-> **状态：只有框架，没有真实结果。**
+> **状态：框架可用；正式 10 仓库 × 12 任务评测未跑；已有小规模真实 provider 结果。**
 >
-> 截至 2026-11-27，10 个真实仓库、12 个任务的正式评测**一次都没有跑**。
-> 已交付的是：仓库/任务校验、`ui index` 指标、`ui run` 记录、`ui verify` 校验、
-> expect 判定、失败隔离、`report.json` / `report.md`，以及用 12 个**合成 fixture**
-> 做的 dry-run 自测。合成 fixture 不是真实仓库，不能产生可对外引用的数字。
+> 截至 2026-11-27，已完成 3 个真实仓库的 5 个只读 pilot 任务，以及 1 个 Flask 仓库的
+> 3 个代码修改任务。它们不是正式的 120 任务评测，也不能外推为整体成功率。
+> 当前框架会输出 `report.json`、`report.md` 与 `run-manifest.json`；早期 pilot/change
+> 只留下叙述性记录，原始报告未归档，复现证据弱于后续运行。
 
 相关文件：
 
 - `tools/bench_repos.py`：评测执行器（Python 3.8+ 标准库）。
 - `tools/make_bench_fixtures.sh`：生成 12 个合成多文件仓库（每个约 1500 行，明确非真实）。
-- `tools/verify_bench_repos.sh`：自测 dry-run/index、占位符 SKIP、越界拒绝、报告结构。
+- `tools/verify_bench_repos.sh`：自测 dry-run/index、占位符 SKIP、越界拒绝、报告结构与证据清单。
+- `tools/test_bench_expect.py` / `tools/test_bench_tasks.py` / `tools/test_bench_retry.py` /
+  `tools/test_bench_evidence.py`：判定、修改任务 verify 强制、重试与归档指纹自测。
 - `bench/repos.example.json`：10 个真实仓库候选，`path` 全部是 `REPLACE_ME/...`。
 - `bench/tasks.example.json`：12 个通用任务。
 
@@ -25,8 +27,8 @@
    `success=0`，报告顶部写明“没有执行模型”。
 2. `--mock`：`ui run` 真的执行，但模型是脚本化的；报告 `model.kind=scripted`，
    只验证管线，不代表模型能力。
-3. 只有配置了真实 provider（`--provider-cmd` / `--provider`）且没有 `--dry-run`，
-   报告才是 `mode=real`。
+3. `--mock` 与真实 provider 都会让报告写成 `mode=real`，区别在 `model.kind`：
+   mock 是 `scripted`，真实 provider 是 `external`。只有后者能作为模型能力证据。
 4. 单任务失败会被隔离记录，任务失败是评测数据；只有仓库校验/索引/任务异常才退出 2。
 
 **不要把 dry-run 的 `success=0` 当成失败率，也不要把 mock 的数字当模型能力。**
@@ -60,12 +62,16 @@ python3 tools/bench_repos.py \
   --only ripgrep \
   --task t01-repo-overview \
   --provider-cmd "node /abs/path/to/tools/deepseek.mjs" \
+  --model-label "deepseek-flash" \
+  --attempts 2 \
   --timeout 600 \
   --out bench/out/ripgrep-t01
 ```
 
 `--provider-cmd` 只设置子进程的 `UI_MODEL_CMD`，命令原文不写进报告。
+`--model-label` 只记录可公开的模型名，不要放 key 或带凭据的端点。
 如果仓库内已有 `.ui/providers.json`，也可以用 `--provider NAME`。
+`--attempts N` 默认 1，范围 1–5；只对 `model_error` 且未改文件的任务重试。
 `--mock FILE` 传 `ui run --mock`，用于无网络自测。
 
 自测（不需要 provider，只跑合成 fixture）：
@@ -118,6 +124,7 @@ bench/repos.json            # 本机路径清单，不入库
   "prompt": "修复 tests/test_basic.py 里失败的 404 handler 用例；不要改测试。",
   "expect": {
     "changed": ["src/flask/app.py"],
+    "no_extra_changes": true,
     "answer_min_chars": 80
   },
   "verify": "python3 -m pytest tests/test_basic.py -q"
@@ -131,7 +138,10 @@ bench/repos.json            # 本机路径清单，不入库
 | `id` | 是 | 唯一任务名；报告与 `--task` 都用它 |
 | `prompt` | 是 | 原样传给 `ui run --task` |
 | `expect` | 否 | 字符串或对象；见下表 |
-| `verify` | 否 | 在仓库根执行的 shell 命令，rc=0 才算通过 |
+| `verify` | 否* | 在仓库根执行的 shell 命令，rc=0 才算通过 |
+
+\* 当 `expect` 声明 `changed` 或 `changed_any` 时，`verify` 变为必填；入口会拒绝
+“要求修改但不提供验证命令”的任务，避免把未验证的改动标成 success。
 
 `expect` 支持的键：
 
@@ -178,8 +188,9 @@ bench/repos.json            # 本机路径清单，不入库
    - 执行任务的 `verify` 命令（如果有）；
    - 按 `expect` 逐条判定，记录每条 check 的通过/失败与细节。
 
-一个任务只有在 **run rc=0 且 reason=done、verify 干净、任务 verify rc=0、expect 不失败**
-时才是 `success`。缺一不可。
+一个任务只有在 **run rc=0 且 reason=done、journal verify 干净、expect 不失败**，
+并且**定义了任务 verify 时它 rc=0**，才是 `success`。修改类任务因入口强制已经定义了
+verify；只读任务可以没有 verify，但不能把“没定义验证”写成“验证通过”。
 
 ## 5. 指标口径
 
@@ -197,6 +208,9 @@ bench/repos.json            # 本机路径清单，不入库
 | `verify.ok` | `ui verify` 输出 | 哈希链 + 无未完成 turn/tool |
 | `expect.passed` | `bench_repos.py` 判定 | `null` 表示没有 expect，不是通过 |
 | `taskVerify.rc` | 任务自己的命令 | 只有定义了 `verify` 才有 |
+| `attempts` / `retry.totalTokens` | 实际执行记录 | 默认 1 次；只对 model_error 且未改文件重试，token 汇总包含所有 attempt |
+| `inputs` / `host` | repos/tasks 文件指纹与本机信息 | 不记录 hostname、provider 命令、环境变量或 key |
+| `run-manifest.json` | 报告与输入文件的 SHA-256 | 归档时与 report.json/report.md 一起保存 |
 
 报告不把上面任何一项折算成单一“总分”。不同仓库、不同任务、不同 provider 之间
 不能直接横向比较。
@@ -218,7 +232,8 @@ bench/repos.json            # 本机路径清单，不入库
 - `mode=real` + `model.kind=scripted`：`--mock` 真的跑了工具，但模型是剧本；
   只能证明管线可用，不能证明模型能力。
 - `mode=real` + `model.kind=external`：真正的 provider 结果。必须同时归档
-  repo commit、ui 版本、provider 名称/模型、任务文件 sha256、运行时间与报告文件。
+  repo commit、ui 版本、provider 名称/模型、任务文件 sha256、运行时间、`report.json`、
+  `report.md` 与 `run-manifest.json`。`--provider-cmd` 模式请用 `--model-label` 注明模型。
 
 占位符 `REPLACE_ME/...` 的仓库在报告里是 `skipped`，`index=null`，不会生成任何结果。
 越界路径（相对路径用 `..` 逃出 repos 文件目录）、不存在路径、空目录是 `invalid`，
@@ -230,15 +245,16 @@ bench/repos.json            # 本机路径清单，不入库
 
 - 日期、试用者/组织（可匿名）、同意公开的范围；
 - 仓库 URL、**固定 commit**、clone 方式、`dirtyFiles`（应为 0）；
-- 任务文件路径与 sha256（`promptSha256` 每任务都在报告里）；
-- ui 版本（`ui --version`）、操作系统/架构；
+- 任务文件名与 sha256（报告 `inputs.tasks.sha256`；完整路径由归档者另行记录，避免泄漏目录结构；
+  `promptSha256` 每任务都在报告里）；
+- ui 版本（`ui --version`）、操作系统/架构（报告 `host`）；
 - provider 与模型名（不记录 key、不记录 provider 命令原文）；
 - 超时设置、开始/结束时间、总耗时；
 - 每任务：status、run rc/reason、tokens、toolCalls、changedFiles、verify rc、
   expect checks、任务 verify rc；
 - 花费（token 单价 × tokens；单价由用户提供，不猜）；
 - 失败与阻塞：模型错误、预算耗尽、超时、权限/网络问题；
-- 报告文件路径与 sha256（`report.json` 本身可校验）；
+- 报告文件路径与 sha256（`run-manifest.json` 记录 `report.json` / `report.md` 指纹）；
 - 复现命令（不含 key）与用户反馈；
 - 结论边界：单次、单机、非统计显著，不与榜单比较。
 
@@ -247,8 +263,14 @@ bench/repos.json            # 本机路径清单，不入库
 | 项目 | 状态 | 可引用的数字 |
 |---|---|---|
 | 10 个真实仓库 × 12 任务 | **未运行** | 无 |
+| 真实仓库只读 pilot | 已完成小规模运行 | serde/flask/axios，5/5 success，160,773 tokens，changed=0；不是修改成功率 |
+| Flask 代码修改任务 | 已完成小规模运行 | 3 个任务最终 pytest 135 passed；按新口径回判 c03 因额外文件失败，严格最终成功 2/3 |
 | 12 个合成 fixture × dry-run/index 自测 | 已通过（`tools/verify_bench_repos.sh`） | 12 个索引、144 条 dry-run 任务行；**不是真实结果** |
 | provider 真实长跑 | 未做 | 无 |
+
+pilot 与 change 的叙述见 [2026-11-27-pilot.md](../bench/results/2026-11-27-pilot.md) 和
+[2026-11-27-change.md](../bench/results/2026-11-27-change.md)。这两次早期运行没有归档原始
+`report.json` / `run-manifest.json`，因此只能作为观察记录，不能当作完整可复现实验包。
 
 自测命令：
 
@@ -256,9 +278,10 @@ bench/repos.json            # 本机路径清单，不入库
 bash tools/verify_bench_repos.sh
 ```
 
-它验证：报告结构、12 个 fixture 的 index 指标、占位符 SKIP、provider 命令不落盘、
-`..` 越界/空目录/缺失路径被拒绝且不终止其他仓库，以及 `--provider-cmd` 确实经
-`UI_MODEL_CMD` 传给子进程、假 provider 失败被隔离为任务失败。
+它验证：报告结构、输入指纹、`run-manifest.json` 哈希、12 个 fixture 的 index 指标、
+占位符 SKIP、provider 命令不落盘、`..` 越界/空目录/缺失路径被拒绝且不终止其他仓库，
+`--provider-cmd` 确实经 `UI_MODEL_CMD` 传给子进程、假 provider 失败被隔离为任务失败，
+以及修改类任务缺 verify、额外文件判定和 retry 汇总。
 它**不调用真实 provider**（第 6 项只用一个立即退出的本地假命令，不联网）。
 
 ## 9. 已知边界
@@ -266,7 +289,7 @@ bash tools/verify_bench_repos.sh
 - 示例任务偏“仓库理解”，区分度低；真实评测需要仓库专属任务与可执行 verify。
 - `changedFiles` 是 size+mtime 快照，不是 git diff；大仓库扫描有 20 万文件上限。
 - `tokens` 是 UI 账本口径；不同 provider 的 usage 上报可能不一致。
-- 每个任务只跑一次，没有多 seed、没有置信区间；不能据此宣称“模型 A 比 B 好”。
+- 默认每个任务只跑一次；`--attempts` 仅对 model_error 且未改文件重试，没有多 seed、没有置信区间。
 - `ui index` 的 symbol 提取是保守前缀匹配，不解析 AST，不能当代码理解能力指标。
 - 框架不与 SWE-bench、Terminal-Bench 等榜单对齐，不承诺可比性。
 - 真实任务可能修改仓库；正式评测应使用一次性 clone，跑完丢弃，不要在原仓库上反复跑。

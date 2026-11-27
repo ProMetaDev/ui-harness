@@ -13,6 +13,9 @@ pub const FS_WRITE: &str = "fs.write";
 pub const PROC_EXEC: &str = "proc.exec";
 pub const NET_FETCH: &str = "net.fetch";
 pub const SECRET_READ: &str = "secret.read";
+/// shell 命令串里出现了隐私路径。它只证明「这次调用可能读取隐私内容」，
+/// 不证明子进程真的读了什么；因此按执行通道仲裁，不冒充读侧沙箱。
+pub const READ_PRIVATE: &str = "read.private";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -331,6 +334,8 @@ impl Policy {
             Rule::new(PROC_EXEC, "**", Decision::Ask).with_note("执行命令"),
             Rule::new(NET_FETCH, "**", Decision::Ask).with_note("网络访问"),
             Rule::new(SECRET_READ, "**", Decision::Ask).with_note("读取密钥"),
+            Rule::new(READ_PRIVATE, "**", Decision::Ask)
+                .with_note("命令串可能读取隐私路径；只仲裁执行，不证明实际读取"),
         ]);
         rules
     }
@@ -469,6 +474,14 @@ mod tests {
             Effect::new(PROC_EXEC, "rm -rf /"),
         ]);
         assert_eq!(verdict.decision, Decision::Ask);
+    }
+
+    #[test]
+    fn private_read_effect_defaults_to_ask_without_claiming_observation() {
+        let policy = Policy::new(Policy::defaults(Path::new("/ws")), Path::new("/ws"));
+        let (decision, reason) = policy.explain(&Effect::new(READ_PRIVATE, "secrets"));
+        assert_eq!(decision, Decision::Ask);
+        assert!(reason.contains("不证明实际读取"), "{}", reason);
     }
 
     #[test]

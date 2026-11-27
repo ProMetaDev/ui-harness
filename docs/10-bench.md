@@ -58,15 +58,20 @@ external │ tok 4269/200000 │ calls 3/60 │ 8s
   下一步可以做 `lab verify --claims`：把报告里的数字与产物逐个比对，对不上就判无效。
 - `ablation` 的 `best_lr` 三个 seed 都是 0.5——任务太简单，区分度不够，后续换数据集再调。
 
-## 真实多仓库评测：仍未完成，只有框架
+## 真实多仓库评测：框架可用，正式 120 任务未跑
 
 上面的 3 个 CPU 任务和单仓库 `lr` 对照都**不是多仓库评测**。10 个真实仓库 × 12 个任务的
-正式评测目前**一次都没跑**，没有任何可对外引用的真实结果。
+正式评测目前**一次都没跑**；但已经不能再说“没有任何真实结果”：
 
-已经落地的只有框架与合成 fixture 自测：
+- 真实只读 pilot：serde / flask / axios，5 个任务全部完成，160,773 tokens，changed=0；
+- 真实代码修改：1 个 Flask 仓库、3 个自拟任务，最终 pytest 135 passed；
+- 按新增 `no_extra_changes` 口径回判，c03 因留下 `pytest_out.txt` 应判失败，严格最终成功 2/3。
+
+已经落地的框架与自测：
 
 - `tools/bench_repos.py`：仓库校验、`ui index` 指标、`ui run` 记录、`ui verify` 校验、
-  expect 判定、失败隔离，输出 `report.json` / `report.md`；
+  expect 判定、失败隔离、输入指纹与 `run-manifest.json`；
+- 修改类任务声明 `changed` / `changed_any` 时必须提供 `verify`；
 - `bench/repos.example.json`：10 个真实仓库候选，路径全是 `REPLACE_ME/...`；
 - `bench/tasks.example.json`：12 个通用任务；
 - `tools/make_bench_fixtures.sh` + `tools/verify_bench_repos.sh`：12 个合成 fixture 的

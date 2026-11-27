@@ -18,8 +18,10 @@ cat > "$WS/sc.json" <<'JSON'
   {"content":"完成"}]}
 JSON
 
-"$UI_BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --yes >/dev/null 2>&1
-
+UI_SANDBOX=0 "$UI_BIN" run --task t --mock "$WS/sc.json" --workspace "$WS" --yes >/dev/null 2>&1
+# 这个实验要观察“策略观测不到、但 OS 没拦住时确实会发生区外写入”。
+# 开启读侧/写入沙箱后该命令会被 Landlock 拒绝，那就无法证明观测下界；
+# 因而只在本实验内关闭沙箱，不改变产品默认值。
 observed=$(grep -c '"kind":"effect/observed"' "$WS/.ui/journal.jsonl" || true)
 echo "工作区外的文件是否真的被写了: $([ -f "$OUT" ] && echo 是 || echo 否)"
 echo "日志里 effect/observed 事件数: $observed"

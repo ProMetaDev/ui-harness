@@ -1,18 +1,16 @@
-//! OS 级沙箱：Linux 用 Landlock，Windows 用 Job Object（见 `winsandbox`）。
+//! OS 级沙箱：Linux 读侧最小根 + Landlock，Windows 用 Job Object（见 `winsandbox`）。
 //!
-//! 这一层只负责 **Linux 的文件系统写入限制**；Windows 的进程/资源约束在
-//! `winsandbox.rs`。两者不是同一件事，文档里也分开说：
-//!   - Landlock：**事前阻止**写工作区之外；
-//!   - Job Object：**保证回收** + 资源上限，不限制文件系统。
+//! Linux 的读侧视图在 `readjail.rs`：独立 user/mount namespace + chroot，只绑定
+//! 系统运行时与工作区，并把隐私路径遮成不可读。Landlock 在这个视图里限制写入；
+//! Windows 只有进程/资源约束，不限制文件系统。
 //!
 //! 零依赖：Linux 直接调 syscall，不引入 libc crate，也不用 bwrap。
-//! 要求：Linux 5.13+ 且内核启用 Landlock（unprivileged，不需要 root）。
+//! 读侧要求 Linux 支持 user/mount namespace；Landlock 要求 5.13+。
 //!
-//! 规则（保守但可用）：
-//!   - 整个文件系统：**读 + 执行**（否则跑不了任何程序）
-//!   - 工作区：读 + 写 + 执行（全部权限）
-//!   - /tmp：读 + 写（编译产物、临时文件）
-//!   - /dev/null：写（重定向别报错）
+//! Landlock 规则（作用在读侧视图内）：
+//!   - 系统运行时：读 + 执行
+//!   - 工作区与 extra_writable：读 + 写 + 执行
+//!   - /tmp：私有 tmpfs，读 + 写
 //!   - 网络：默认允许；开了 `net` 就禁止 TCP bind/connect（ABI>=4）
 
 use std::io;
@@ -26,6 +24,10 @@ pub struct Config {
     pub net: bool,
     /// 额外允许写的目录（例如构建缓存）
     pub extra_writable: Vec<String>,
+    /// Linux 读侧白名单视图（工作区隐私路径遮罩；Windows 暂不支持）
+    pub read: bool,
+    /// Linux 读侧白名单根。工作区与 extra_writable 会自动加入。
+    pub read_roots: Vec<String>,
 }
 
 impl Default for Config {
@@ -34,8 +36,29 @@ impl Default for Config {
             fs: true,
             net: false,
             extra_writable: Vec::new(),
+            read: true,
+            read_roots: default_read_roots(),
         }
     }
+}
+
+/// 默认允许子进程读取的系统运行时。PATH 里的其它工具目录也加入，避免
+/// 用户装在 HOME 下的 node/cargo 在读侧视图里突然消失；这些目录仍是只读。
+pub fn default_read_roots() -> Vec<String> {
+    let mut roots: Vec<String> = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.is_absolute() && dir.exists() {
+                roots.push(dir.to_string_lossy().to_string());
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 // ─────────────────────────── Linux 实现 ───────────────────────────
@@ -278,6 +301,11 @@ pub fn describe(cfg: &Config) -> String {
                     return format!("关闭（内核支持 ABI {}，用 UI_SANDBOX=0 关的）", abi);
                 }
                 let mut s = format!("Landlock ABI {} · 写入限制在工作区", abi);
+                if cfg.read {
+                    s.push_str(" · 读侧最小根（隐私路径遮罩）");
+                } else {
+                    s.push_str(" · 读侧未限制");
+                }
                 if cfg.net {
                     if abi >= 4 {
                         s.push_str(" · TCP 禁止");

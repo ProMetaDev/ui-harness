@@ -183,7 +183,7 @@ $ bash tools/kit.sh
 2 截短尾部             py=3 ui=0    py=3 ui=0          REPAIRED
 3 并发强杀             链完整/可修复 py=0               REPAIRED
 4 符号链接逃逸         拒绝读取     被拒               BLOCKED
-5 shell 间接读密钥     GAP（拦不住） 读到明文（日志已抹）  GAP
+5 shell 间接读密钥     Linux 被拒    被拒（Windows 仍 GAP） BLOCKED/GAP
 6 插件漏报效果         GAP（拦不住） 写了·观测已入日志     GAP
 7 验收失败             退出 3       code=3             BLOCKED
 8 shell 写工作区外     被拒         被拒               BLOCKED
@@ -193,9 +193,9 @@ $ bash tools/kit.sh
 `GAP` 是**现在拦不住**的意思，我们不假装。详见 [docs/22](docs/22-verify-kit.md)。
 
 两行 GAP 的**范围**要读准，别把它们读成"什么都没做"：
-场景 5 测的是**上下文里仍然是明文**（沙箱不限读，这一半没补）。
-日志那一半现在由落账前的脱敏门兜着——同一条命令的输出进日志时会是
-`[REDACTED:api_key]`，命中隐私清单时整段不进日志、只留字数与指纹。
+场景 5 在 Linux 默认读侧视图下应被隐私遮罩阻断；Windows 或显式关闭读沙箱时仍可能
+读到明文，这一半没有 OS 对等边界。日志那一半由落账前的脱敏门兜着——同一条命令的
+输出进日志时会是 `[REDACTED:api_key]`，命中隐私清单时整段不进日志、只留字数与指纹。
 
 **4. 知识与记忆是证据，不是黑箱。** 知识卡绑定它描述的那份源码，记忆的每次注入都留痕：
 
@@ -272,9 +272,10 @@ Word 专用方案与脚本在 [demo/skills/docx-safe-edit/SKILL.md](demo/skills/
 ## 诚实的边界
 
 - **shell 是信任边界，但 Linux 上有沙箱。** 批准一条命令，等于批准它内部的一切行为；
-  所以两件事一起做：`effect/observed` 记**实际改动**（事后），Landlock 把**写入**限制在工作区
-  与 /tmp（事前）。内核不支持时**命令直接失败**，不会偷偷降级成无沙箱执行（`UI_SANDBOX=0` 可显式关闭）。
-- **Windows 上没有文件写入隔离。** 但有 Job Object：进程树由内核强制回收、内存与进程数有上限，
+  所以两件事一起做：Linux 默认先建立只读最小根，把系统运行时、工作区与显式白名单
+  之外的路径遮住，再用 Landlock 把**写入**限制在工作区与私有 `/tmp`（事前）。
+  内核不支持时**命令直接失败**，不会偷偷降级成无沙箱执行（`UI_SANDBOX=0` 可显式关闭）。
+- **Windows 上没有文件读写隔离。** 但有 Job Object：进程树由内核强制回收、内存与进程数有上限，
   命令正常结束时也会连同后台子进程一起收掉（`start /b` 留下的孤儿不会活过命令）。
 - **插件声明不是强制约束。** `effects: []` 只表示"声称没有副作用"，内核不验证。
 - **MCP 同理。** 外部 server 在自己的进程里自主运行。
@@ -314,7 +315,7 @@ bash tools/soak_status.sh /tmp/ui-soak-long-state.json
 
 - **0.3.0**（本地开发版，尚未打 tag；打 tag 后 CHANGELOG 才会出现该版本段）· 测试与门禁由 `bash tools/test.sh` / `bash tools/debug.sh` 实跑给出 · CI 在 Linux 与 Windows 交叉编译上每推必跑。
 - 原型：能运行、有发布包（`bash tools/release.sh` 产出 tar.gz + sha256 并自解压校验）。
-  Linux 有 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
-  但 **Windows 没有文件写入隔离**；整体尚未经过第三方评审。
+  Linux 有读侧最小根（隐私路径遮罩）与 Landlock（写入限制在工作区与 /tmp），Windows 有 Job Object（进程树/内存/进程数上限），
+  但 **Windows 没有文件读写隔离**；整体尚未经过第三方评审。
 - 版本演进见 [CHANGELOG.md](CHANGELOG.md)；设计笔记在 [docs/](docs/)。
 - 许可证：Apache-2.0。

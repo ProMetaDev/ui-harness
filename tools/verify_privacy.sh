@@ -15,6 +15,10 @@ fi
 # 工作区放在本机文件系统，不放可能不带 unix 权限位的挂载盘：
 # 0600/0700 那两条在 drvfs（Windows 盘）上永远是 777，验不出真东西。
 WS=${TMPDIR:-/tmp}/ui-verify-privacy
+# 这一组验证的是“策略看见私密来源后扣留、落账前脱敏”，不是 OS 读侧拦截。
+# 关闭读侧视图，让 shell 真正读到 canary，才能证明来源扣留与落盘生命周期；
+# Linux 读侧视图另有 read_sandbox 集成测试与攻击包场景覆盖。
+export UI_SANDBOX_READ=0
 pass=0; fail=0
 ck() { case "$3" in *"$2"*) pass=$((pass+1)); echo "  ✓ $1";;
     *) fail=$((fail+1)); echo "  ✗ $1"; echo "      期望含: $2"; echo "      实得: $(head -c 260 <<<"$3")";; esac }

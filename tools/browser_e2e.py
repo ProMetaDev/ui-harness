@@ -168,6 +168,7 @@ def main():
         wait_url(f"http://127.0.0.1:{port}/api/state")
         chrome = subprocess.Popen(
             [browser, "--headless=new", "--disable-gpu", "--no-sandbox",
+             "--window-size=1440,900",
              f"--remote-debugging-port={debug}", f"--user-data-dir={profile}",
              "--no-first-run", "--no-default-browser-check",
              f"http://127.0.0.1:{port}/?shot=1"],
@@ -184,6 +185,7 @@ def main():
         ws = WS(page["webSocketDebuggerUrl"])
         # 不依赖 Chrome 的初始 target 是否已经加载；显式导航一次。
         cdp(ws, "Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
+        cdp(ws, "Page.bringToFront", {})
         time.sleep(0.8)
         value = evaluate(ws, """(() => {
           const b = document.getElementById('diffBtn');
@@ -198,13 +200,60 @@ def main():
             raise RuntimeError("page not mounted: " + repr(value))
         # 点一下“变更”，确认面板真的能打开（无 checkpoint 时应显示明确空态）。
         opened = evaluate(ws, """(async () => {
-          document.getElementById('diffBtn').click();
+          const b = document.getElementById('diffBtn');
+          b.focus();
+          b.click();
           await new Promise(r => setTimeout(r, 500));
           const o = document.getElementById('diffOverlay');
-          return {hidden: o.hidden, text: o.textContent.slice(0, 120)};
+          return {hidden: o.hidden, text: o.textContent.slice(0, 120), active: document.activeElement && document.activeElement.id};
         })()""")
         if not opened or opened.get("hidden") is not False:
             raise RuntimeError("diff overlay did not open: " + repr(opened))
+        if opened.get("active") != "diffClose":
+            raise RuntimeError("diff overlay did not take focus: " + repr(opened))
+        trapped = evaluate(ws, """(() => {
+          const o = document.getElementById('diffOverlay');
+          const items = Array.from(o.querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled),[tabindex]:not([tabindex=\"-1\"])'))
+            .filter((el) => el.getClientRects().length > 0);
+          if (!items.length) return false;
+          items[items.length - 1].focus();
+          document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true}));
+          return document.activeElement === items[0];
+        })()""")
+        if trapped is not True:
+            raise RuntimeError("diff overlay did not trap Tab focus")
+        closed = evaluate(ws, """(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+          const o = document.getElementById('diffOverlay');
+          return {hidden: o.hidden, active: document.activeElement && document.activeElement.id};
+        })()""")
+        if not closed or closed.get("hidden") is not True or closed.get("active") != "diffBtn":
+            raise RuntimeError("diff overlay did not restore focus: " + repr(closed))
+        # 右栏预算条必须跟随真实 token 数；旧实现读已删除的 #sBud，永远停在 0。
+        meter = evaluate(ws, """(async () => {
+          document.getElementById('tok').textContent = '50000';
+          await new Promise(r => setTimeout(r, 1200));
+          return {pct: document.getElementById('rpct').textContent, width: document.getElementById('rbar').style.width};
+        })()""")
+        if not meter or meter.get("pct") in (None, "0%") or meter.get("width") in (None, "", "0%"):
+            raise RuntimeError("budget meter did not update: " + repr(meter))
+        # UU 必须服从真实状态：审批卡在时保持 waiting，撤掉后回到 idle。
+        mood = evaluate(ws, """(() => {
+          const approvals = document.getElementById('approvals');
+          const card = document.createElement('div');
+          card.className = 'approval';
+          approvals.appendChild(card);
+          const live = document.getElementById('liveStrip');
+          if (live) live.dataset.busy = '0';
+          window.__uiMood('thinking');
+          window.__uiMoodSync();
+          const waiting = document.querySelector('.uu').dataset.mood;
+          card.remove();
+          window.__uiMoodSync();
+          return {waiting, idle: document.querySelector('.uu').dataset.mood};
+        })()""")
+        if not mood or mood.get("waiting") != "waiting" or mood.get("idle") != "idle":
+            raise RuntimeError("UU mood did not follow approval state: " + repr(mood))
         # 管理面：导航后检查真实 DOM，而不是只 curl HTML。
         cdp(ws, "Page.navigate", {"url": f"http://127.0.0.1:{port}/admin"})
         time.sleep(0.8)
@@ -226,7 +275,7 @@ def main():
         ):
             raise RuntimeError("admin page not mounted: " + repr(admin))
         print(
-            f"PASS browser e2e: title={value.get('title')} diff=ok overlay=ok admin=ok forms=ok"
+            f"PASS browser e2e: title={value.get('title')} diff=ok focus=ok trap=ok budget=ok mood=ok admin=ok forms=ok"
         )
         return 0
     finally:

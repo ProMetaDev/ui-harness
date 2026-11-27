@@ -190,6 +190,24 @@ pub fn apply_linux_sandbox(
         if cfg.fs {
             use std::os::unix::process::CommandExt;
             let ws = workspace.to_string_lossy().to_string();
+            // 先建立读侧最小根，再让 Landlock 在这个视图里限制写入。任一步
+            // 失败都让 spawn 失败，不退回整盘可读。
+            if cfg.read {
+                // 绝对路径启动的外部程序（MCP/插件脚本常见）必须能在读侧视图里
+                // 被解释器打开；只追加它所在目录，不放开其父目录。
+                let mut read_cfg = cfg.clone();
+                let program = Path::new(cmd.get_program());
+                if program.is_absolute() {
+                    if let Ok(resolved) = program.canonicalize() {
+                        if let Some(parent) = resolved.parent() {
+                            read_cfg.read_roots.push(parent.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+                let hook = crate::readjail::prepare(workspace, &read_cfg)
+                    .map_err(|e| format!("读侧沙箱不可用: {}", e))?;
+                unsafe { cmd.pre_exec(hook); }
+            }
             let hook = crate::sandbox::pre_exec(&ws, cfg)
                 .map_err(|e| format!("沙箱不可用: {}", e))?;
             unsafe {

@@ -115,16 +115,18 @@ cat > "$ws/sc.json" <<'JSON'
   {"content":"完成"}]}
 JSON
 out=$("$BIN" run --task t --mock "$ws/sc.json" --workspace "$ws" --yes 2>&1)
-# 两半分开测：上下文那一半沙箱管不着（读不限），日志那一半有落账前的门。
-# 混成一行会让"GAP"把已经收窄的那部分也一起抹掉。
+# 两半分开测：Linux 读侧视图拦路径，Windows/关闭读沙箱时上下文仍可能明文；
+# 日志那一半始终有落账前的门。混成一行会把已经收窄的部分一起抹掉。
 if printf '%s' "$out" | grep -q 'SUPER-SECRET-KEY'; then
   if grep -q 'SUPER-SECRET-KEY' "$ws/.ui/journal.jsonl" 2>/dev/null; then
-    row "5 shell 间接读密钥" "GAP（拦不住）" "读到明文·日志也留了" "GAP"
+    row "5 shell 间接读密钥" "按平台" "读到明文·日志也留了" "FAIL"
   else
-    row "5 shell 间接读密钥" "GAP（拦不住）" "读到明文（日志已抹）" "GAP"
+    row "5 shell 间接读密钥" "按平台" "读到明文（日志已抹）" "GAP"
   fi
+elif [ "$(uname -s)" = "Linux" ]; then
+  row "5 shell 间接读密钥" "读不到" "被读侧视图拦截" "BLOCKED"
 else
-  row "5 shell 间接读密钥" "GAP（拦不住）" "意外被拦" "BLOCKED"
+  row "5 shell 间接读密钥" "无 OS 读隔离" "输出已脱敏" "GAP"
 fi
 
 # ── 6. 插件漏报效果（已知缺口）──

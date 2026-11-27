@@ -598,6 +598,8 @@ impl Agent {
                 fs: std::env::var("UI_SANDBOX").map(|v| v != "0").unwrap_or(true),
                 net: std::env::var("UI_SANDBOX_NET").map(|v| v == "1").unwrap_or(false),
                 extra_writable: Vec::new(),
+                read: std::env::var("UI_SANDBOX_READ").map(|v| v != "0").unwrap_or(true),
+                read_roots: crate::sandbox::default_read_roots(),
             },
             plugins: None,
             mcp: None,
@@ -770,8 +772,9 @@ impl Agent {
     /// 工作区前缀要先挖掉（`mentioned_in_under`）：工作区自己住在 `~/secrets/`
     /// 下面时，不能每次读写都算命中。
     ///
-    /// 这一层是补读取侧的洞：`cat secrets/x` 在工具层挡不住（沙箱按设计只限写、
-    /// 不限读，见 `sandbox.rs`），那就至少别让它的结果顺手抄进一份会外流的日志里。
+    /// 这一层补的是工具层检测不到的输出泄露：命令串没写隐私路径，或用了
+    /// 变量/拼接时，输出仍可能含凭据。Linux 读侧视图会阻断清单内路径，但
+    /// 硬链接别名、非清单机密与关闭读沙箱的执行仍需靠落账前脱敏兜底。
     ///
     /// **豁免跟着工具层那唯一一条读例外走**。`.ui/tool-output/` 是模型本来就能
     /// `fs_read` 的地方，把"重读截断缓存"算成隐私来源有两个实测的坏处：每重读一次
@@ -1857,6 +1860,41 @@ impl Agent {
                     ]));
                 }
             }
+        }
+
+        // `read.private` 不是「观测到了读取」：它只是命令串里出现了隐私路径。
+        // 即使工作区没有任何变化，也要把这条不确定性写清楚，否则审计者容易
+        // 把「批准后执行了」误读成「内核证明它读了/没读某个文件」。
+        let private_reads: Vec<Json> = effects
+            .iter()
+            .filter(|e| e.kind == crate::policy::READ_PRIVATE)
+            .map(|e| {
+                Json::obj(vec![
+                    ("target", Json::from(e.target.as_str())),
+                    ("enforcement", Json::from("approval-only")),
+                    ("provesRead", Json::Bool(false)),
+                ])
+            })
+            .collect();
+        if !private_reads.is_empty() {
+            let payload = Json::obj(vec![
+                ("callId", Json::from(call.id.as_str())),
+                ("tool", Json::from(name.as_str())),
+                (
+                    "summary",
+                    Json::from("命令串命中隐私路径；只仲裁执行与否，不能证明实际读取内容"),
+                ),
+                ("changes", Json::Arr(vec![])),
+                ("overflowed", Json::Bool(false)),
+                ("source", Json::from("command-string")),
+                ("readPrivate", Json::Arr(private_reads)),
+                ("provesRead", Json::Bool(false)),
+            ]);
+            self.log_event("effect/observed", payload.clone())?;
+            hooks.on_event(&Json::obj(vec![
+                ("kind", Json::from("effect/observed")),
+                ("payload", payload),
+            ]));
         }
         Ok((result, name))
     }
@@ -3026,6 +3064,127 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shell_private_read_is_approved_and_observed_without_claiming_proof() {
+        struct PrivateReadHooks {
+            effects: Vec<Effect>,
+        }
+        impl Hooks for PrivateReadHooks {
+            fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
+                self.effects = req.effects.clone();
+                ApprovalResponse::allow_once()
+            }
+        }
+
+        let ws = workspace("approval-private-read");
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![
+                        ("content", Json::from("读取隐私路径")),
+                        (
+                            "toolCalls",
+                            Json::Arr(vec![Json::obj(vec![
+                                ("name", Json::from("shell")),
+                                (
+                                    "args",
+                                    Json::obj(vec![(
+                                        "command",
+                                        Json::from("cat secrets/canary.txt"),
+                                    )]),
+                                ),
+                            ])]),
+                        ),
+                    ]),
+                    Json::obj(vec![("content", Json::from("完成"))]),
+                ]),
+            ),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws, Limits::default());
+        // 不真的派生 shell：这条测试只验证策略、审批与 observed 接线。
+        agent
+            .tools
+            .iter_mut()
+            .find(|t| t.name == "shell")
+            .unwrap()
+            .run = |_, _| ToolResult::ok("ok");
+        let mut hooks = PrivateReadHooks {
+            effects: Vec::new(),
+        };
+        agent.run_turn("读隐私路径", &mut hooks).unwrap();
+
+        assert!(hooks
+            .effects
+            .iter()
+            .any(|e| e.kind == crate::policy::READ_PRIVATE && e.target == "secrets"));
+
+        let observed = agent
+            .journal
+            .events
+            .iter()
+            .find(|e| {
+                e.str_at("kind") == Some("effect/observed")
+                    && e.str_at("source") == Some("command-string")
+            })
+            .expect("隐私路径命中必须留下 observed 事件");
+        assert_eq!(observed.bool_at("provesRead"), Some(false));
+        assert_eq!(observed.str_at("source"), Some("command-string"));
+        assert!(observed
+            .str_at("summary")
+            .unwrap_or_default()
+            .contains("不能证明实际读取"));
+        let read_private = observed.arr_at("readPrivate").unwrap();
+        assert_eq!(read_private.len(), 1);
+        assert_eq!(read_private[0].str_at("target"), Some("secrets"));
+        assert_eq!(read_private[0].bool_at("provesRead"), Some(false));
+    }
+
+    #[test]
+    fn private_read_without_an_approval_channel_never_reaches_the_tool() {
+        let ws = workspace("approval-private-read-unavailable");
+        let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws, Limits::default());
+        let command = "cat secrets/canary.txt";
+        // 单把 proc.exec 放行，确保这次拒绝确实来自 read.private，而不是
+        // 「所有 shell 本来就要问」这条默认规则。
+        agent.policy.add_rule(
+            Rule::new(crate::policy::PROC_EXEC, command, Decision::Allow)
+                .with_note("test: exec already approved"),
+        );
+        let call = ToolCall {
+            id: "call-private-read".to_string(),
+            name: "shell".to_string(),
+            args: Json::obj(vec![("command", Json::from(command))]),
+            parse_error: None,
+            raw: None,
+        };
+        let (result, _) = agent.dispatch(&call, &mut NullHooks).unwrap();
+        assert_eq!(result.error.as_deref(), Some("用户拒绝了这次调用"));
+        assert!(!agent
+            .journal
+            .events
+            .iter()
+            .any(|e| e.str_at("kind") == Some("tool/start")));
+        assert!(!agent.journal.events.iter().any(|e| {
+            e.str_at("kind") == Some("effect/observed")
+                && e.str_at("source") == Some("command-string")
+        }));
+        let answered = agent
+            .journal
+            .events
+            .iter()
+            .find(|e| e.str_at("kind") == Some("approval/answered"))
+            .unwrap();
+        assert_eq!(answered.str_at("via"), Some("no-channel"));
+    }
+
     /// 没有审批通道时的拒绝，不能在人眼里和「人说不」长得一样。
     /// 安全默认不变（仍旧拒绝），但账本必须写清这个决定是谁做的。
     #[test]
@@ -3465,10 +3624,9 @@ mod tests {
     /// 第二档：来源命中隐私清单时，整段原文不进日志，只留字数、指纹和
     /// 指回 0600 落盘文件的指针。
     ///
-    /// 走 `shell` 而不是 `fs_read`：`cat secrets/x` 是读取侧唯一挡不住的那条路
-    /// （Landlock 只限制写），也正是这一档存在的理由。也因此只有真子进程能验
-    /// 这条链路——判定逻辑本身的跨平台覆盖在
-    /// `source_judgement_reads_effects_not_prose`。
+    /// 走未启用 OS 沙箱的 `shell` 而不是 `fs_read`：这一档验证的是来源扣留
+    /// 本身，不依赖 Linux 读侧视图。也因此只有真子进程能验这条链路——判定
+    /// 逻辑本身的跨平台覆盖在 `source_judgement_reads_effects_not_prose`。
     #[test]
     #[cfg(unix)]
     fn output_from_a_private_source_leaves_only_a_pointer() {
@@ -3478,6 +3636,9 @@ mod tests {
             Json::obj(vec![("command", Json::from("cat secrets/api.txt"))]),
         );
         let (mut agent, ws) = disk_agent("redact-source", &script);
+        // 这一档验证的是“读到原文后如何扣留”，不是 OS 读侧拦截；显式关掉
+        // 读侧视图，避免 Linux 隐私遮罩让测试在更早一层结束。
+        agent.sandbox.read = false;
         std::fs::create_dir_all(ws.join("secrets")).unwrap();
         std::fs::write(ws.join("secrets/api.txt"), canary).unwrap();
         // shell 的效果是 proc.exec：默认要问人，这里代答「允许这一次」
@@ -3535,6 +3696,7 @@ mod tests {
 
         // 关掉模式脱敏不会关掉按来源扣留：后者看的是「从哪来」，与正则无关
         let (mut off, ws2) = disk_agent("redact-source-off", &script);
+        off.sandbox.read = false;
         std::fs::create_dir_all(ws2.join("secrets")).unwrap();
         std::fs::write(ws2.join("secrets/api.txt"), canary).unwrap();
         off.set_redact_output(false);
@@ -3556,6 +3718,7 @@ mod tests {
             Json::obj(vec![("command", Json::from("cat secrets/aws.txt"))]),
         );
         let (mut both, ws3) = disk_agent("redact-source-key", &keyed);
+        both.sandbox.read = false;
         std::fs::create_dir_all(ws3.join("secrets")).unwrap();
         std::fs::write(ws3.join("secrets/aws.txt"), format!("{}\n", key)).unwrap();
         let mut hooks = Recorder {

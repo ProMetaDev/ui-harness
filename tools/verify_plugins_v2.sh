@@ -7,11 +7,13 @@ cd "$UI_ROOT"
 BIN="$UI_BIN"
 WS=/tmp/ui-plug
 rm -rf "$WS"; mkdir -p "$WS/.ui"
-cp fixtures/plugin/demo.py "$WS/.ui/demo.py"
+# 插件配置在 .ui 里，但可执行入口放在普通工作区路径：读侧沙箱会遮住整个
+# .ui，避免插件进程借运行入口把工具私有目录一并读走。
+cp fixtures/plugin/demo.py "$WS/demo.py"
 
 cat > "$WS/.ui/plugins.json" <<EOF
 {"plugins":[
-  {"name":"demo","cmd":"python3 $WS/.ui/demo.py","tools":[
+  {"name":"demo","cmd":"python3 $WS/demo.py","tools":[
     {"name":"echo","summary":"原样返回","effects":[]},
     {"name":"write","summary":"写文件","effects":["fs.write out.txt"]}
   ]}

@@ -337,6 +337,14 @@ pub fn private_subpaths(workspace: &Path) -> Vec<String> {
     out
 }
 
+/// 追加清单里的绝对路径（含 `~/` 展开），给 OS 读侧视图准备遮罩用。
+///
+/// 工具层与策略层仍用 `is_private_path` 做最终判定；这里只暴露已经解析好的
+/// 路径，避免沙箱层重新实现一套 `--private` 语法。
+pub fn declared_absolute_paths() -> Vec<PathBuf> {
+    table().lock().unwrap().iter().filter_map(|e| e.absolute.clone()).collect()
+}
+
 /// 某个路径段名字是否命中隐私清单（默认清单 + 单段声明）。
 pub fn is_private_dir_name(name: &str) -> bool {
     if is_protected_dir(name) {
@@ -455,10 +463,10 @@ fn tokens(text: &str) -> Vec<String> {
 
 /// 文本里是否出现了隐私清单上的路径。
 ///
-/// 这是给**观测不到的通道**用的：`shell` 的读取无法拦（Landlock 只限制写，
-/// 见 `sandbox.rs`），但命令串里写了 `secrets/api.txt`、`~/.aws/credentials`，
-/// 我们就知道"这一次可能读到了私密内容"——足够把它记成可审计的事实，
-/// 并据此决定输出要不要出链（见 `agent::journal_tool_output`）。
+/// 这是给**命令串观测**用的：Linux 读侧视图按路径遮住清单项，但硬链接别名、
+/// 变量拼接与关闭读沙箱的平台仍可能读到私密内容。命令串里写了
+/// `secrets/api.txt`、`~/.aws/credentials`，就足以追加 `read.private`、
+/// 触发审批，并决定输出要不要出链（见 `agent::journal_tool_output`）。
 ///
 /// 返回命中的那一条声明，供日志回显。
 pub fn mentioned_in(text: &str) -> Option<String> {
@@ -1036,7 +1044,7 @@ mod tests {
         clear_private();
         add_private("vendor/keys").unwrap();
         add_private("~/.aws/credentials").unwrap();
-        // shell 的读拦不住（Landlock 只管写），命令串是唯一的观测面
+        // 命令串检测与 OS 读侧视图互补：前者覆盖审批/留痕，后者兜底路径读取。
         assert_eq!(mentioned_in("cat vendor/keys/deploy.pem").as_deref(), Some("vendor/keys"));
         assert_eq!(mentioned_in("cat VENDOR/KEYS/x").as_deref(), Some("vendor/keys"));
         assert_eq!(mentioned_in("ls ~/.aws/credentials").as_deref(), Some("~/.aws/credentials"));

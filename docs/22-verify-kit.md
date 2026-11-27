@@ -14,7 +14,7 @@ bash tools/kit.sh        # 八个场景，一张表
 2 截短尾部             py=3 ui=0    py=3 ui=0          REPAIRED
 3 并发强杀             链完整/可修复 py=0               REPAIRED
 4 符号链接逃逸         拒绝读取     被拒               BLOCKED
-5 shell 间接读密钥     GAP（拦不住） 读到明文（日志已抹）  GAP
+5 shell 间接读密钥     Linux 被拒    被读侧视图拦截       BLOCKED
 6 插件漏报效果         GAP（拦不住） 写了·观测已入日志     GAP
 7 验收失败             退出 3       code=3             BLOCKED
 ```
@@ -58,18 +58,19 @@ python3 tools/verify_journal.py <journal.jsonl>
 | 2 截短尾部 | 砍掉最后 40 字节 | 独立校验器报"残缺"，我们的 `verify` 修复后退出 0 |
 | 3 并发强杀 | 3 个进程同写、`kill -9` | 链仍完整（flock + 补尾） |
 | 4 符号链接逃逸 | 链接指向工作区外的文件 | 真实路径检查拒绝 |
-| 5 shell 间接读密钥 | `cat secrets/providers.toml` | **读到了**——沙箱不限读，见下面。日志那一半有落账前的门：表里「日志已抹」就是它 |
+| 5 shell 间接读密钥 | `cat secrets/providers.toml` | **Linux 默认被读侧视图阻断**；Windows/关闭读沙箱时仍可能读到。命令串会追加 `read.private`（默认 ask），日志侧有落账前的门，observed 不证明实际读取 |
 | 6 插件漏报效果 | 声明 `effects: []` 但写文件 | **写了**——声明不是强制，拦不住；但 `effect/observed` 会把它记下来（`+1 sneaky.txt`） |
 | 7 合并后验收失败 | `--accept "test -f 不存在"` | 退出 3，不许宣布完成 |
 | 8 shell 写工作区外 | `echo evil > $HOME/x` | **被 Landlock 拒绝**（写沙箱生效） |
 
 ## 必须承认的两个 GAP（范围比初见时小了）
 
-1. **shell 是信任边界**：批准一条命令，等于批准它内部的一切读写与联网。
-   效果集仲裁的是"这条命令要不要跑"，不是"它内部做了什么"。
-   补救了一半：`effect/observed` 在执行前后各扫一次工作区，把**实际改动**记进日志；
-   Landlock 把**写**限制在工作区与 `/tmp`（fail closed）。**读**仍然不限——
-   所以场景 5 到现在还是 GAP，而且这一半只能等 Phase 1-B（读路径拦截）。
+1. **shell 的命令语义仍是信任边界**：效果集仲裁的是"这条命令要不要跑"，不是
+   "它内部做了什么"。`effect/observed` 事后扫工作区，把**实际改动**记进日志；
+   Linux Landlock 把**写**限制在工作区与 `/tmp`，读侧最小根遮住隐私路径（均 fail
+   closed）。但 Windows 没有对等文件视图，硬链接别名也不在路径遮罩内；这些情况下
+   场景 5 仍可能读到。`read.private`、默认 ask 与 `provesRead:false` observed 让审批
+   与不确定性可审计，但不能替代 OS 边界。
 2. **插件声明不是强制约束**：`effects: []` 只表示"它声称没有副作用"，内核不验证。
    写文件照样发生（场景 6 至今 GAP）。但"什么都没记下来"这半句**已经不成立**：
    实测 `effect/observed · plugin_call · 实际改动 +1 ~0 -0 · 例 sneaky.txt`。

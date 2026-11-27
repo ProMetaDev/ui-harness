@@ -34,6 +34,7 @@ pub mod plugin;
 pub mod policy;
 pub mod prompt;
 pub mod protected;
+pub mod readjail;
 pub mod sandbox;
 pub mod secrets;
 pub mod sha256;

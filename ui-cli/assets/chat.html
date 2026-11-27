@@ -1174,7 +1174,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
 <div class="shell" id="shell">
   <nav class="activity">
     <a class="rail-brand" href="#" title="U:I · Unleash your imagination" onclick="return false">U:I</a>
-    <button class="act active" data-view="chat" data-label="对话" aria-label="对话" title="对话 · Ctrl+1">
+    <button class="act active" data-view="chat" data-label="对话" aria-label="对话" aria-current="page" title="对话 · Ctrl+1">
       <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>
     <button class="act" data-view="workspace" data-label="工作区" aria-label="工作区" title="工作区 · Ctrl+2">
@@ -1910,8 +1910,9 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
       const st = document.getElementById('stepTime');
       if (st) st.textContent = lastElapsedSec ? lastElapsedSec + 's' : '—';
     }
-    // UU 跟着状态走：跑的时候转圈，停下来就眨眼睛
-    if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
+    // UU 跟着真实状态走：审批卡仍在时保持 waiting，不能被 busy=false 覆盖。
+    if (window.__uiMoodSync) window.__uiMoodSync();
+    else if (window.__uiMood) window.__uiMood(busy ? 'thinking' : 'idle');
   }
 
   // 「停谁」必须是页面和服务端共同知道的事实：正在跑的那条 ID，或队列里的某一条。
@@ -2087,7 +2088,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   });
 
   const modelEl = document.getElementById('model');
-  const modelStat = document.getElementById('modelStat');
 
   const hintEl = document.getElementById('hint');
 
@@ -2319,10 +2319,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     }
     switch (ev.type) {
       case 'session':
-        if (ev.model) {
-          modelEl.textContent = ev.model;
-          if (modelStat) modelStat.style.display = 'flex';
-        }
+        if (ev.model) modelEl.textContent = ev.model;
         if (ev.workspace) hintEl.textContent = '工作区 ' + ev.workspace + ' · 工具调用都会先过策略与审批';
         break;
       case 'events-dropped':
@@ -2494,12 +2491,8 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   renderSpark();
   function updateMeter(tokens, calls) {
     const tok = document.getElementById('mTok');
-    const bar = document.getElementById('mBar');
     const n = Number(tokens || 0);
     if (tok) tok.textContent = n.toLocaleString();
-    if (bar && budgetTokens > 0) {
-      bar.style.width = Math.min(100, (n / budgetTokens) * 100) + '%';
-    }
     const delta = Math.max(0, n - lastMeterTokens);
     lastMeterTokens = n;
     const now = Date.now();
@@ -2641,12 +2634,8 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     fetch('/api/ready')
       .then((r) => r.json())
       .then((ready) => {
+        budgetTokens = Number(ready && ready.budget || 0);
         if (!ready || ready.splash === false) { splash.hidden = true; emptyEl.classList.add('show'); setEmptyMode(true); return; }
-        budgetTokens = Number(ready.budget || 0);
-        if (budgetTokens > 0) {
-          const bud = document.getElementById('mBud');
-          if (bud) bud.textContent = Math.round(budgetTokens / 1000) + 'k';
-        }
         // 空状态在开机画面淡出之后再出现，避免两块内容抢注意力
         setTimeout(() => {
           if (!log.children.length) { emptyEl.classList.add('show'); setEmptyMode(true); }
@@ -2694,8 +2683,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     document.getElementById('stop').style.display = 'none';
     if (window.__UI_READY__ && Number(window.__UI_READY__.budget) > 0) {
       budgetTokens = Number(window.__UI_READY__.budget);
-      const bud = document.getElementById('mBud');
-      if (bud) bud.textContent = Math.round(budgetTokens / 1000) + 'k';
     }
     // 空状态看的是「真的渲染出了消息」，不是事件条数：
     // session / lab-run 这类元事件不会生成消息行，用它们判断会白屏。
@@ -2850,7 +2837,10 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     if (view === 'caps') renderCaps();
     if (view === 'lab') renderLabOverview();
     document.querySelectorAll('.act[data-view]').forEach((b) => {
-      b.classList.toggle('active', b.dataset.view === view);
+      const active = b.dataset.view === view;
+      b.classList.toggle('active', active);
+      if (active) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
     });
     for (const [k, id] of Object.entries(BODIES)) {
       const el = document.getElementById(id);
@@ -3001,16 +2991,11 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   function paintMode(mode) {
     currentMode = mode;
     const sb = document.getElementById('sbMode');
-    const rm = document.getElementById('rmode');
     const wm = document.getElementById('wmMode');
     const mh = document.getElementById('mhMode');
     if (sb) sb.textContent = mode;
-    if (rm) rm.textContent = mode;
     if (wm) wm.textContent = mode;
     if (mh) mh.textContent = mode;
-    document.querySelectorAll('#modeChips .mode-chip').forEach((b) => {
-      b.classList.toggle('on', b.textContent === mode);
-    });
   }
   window.__uiModeChanged = paintMode;
   async function setMode(mode) {
@@ -3025,25 +3010,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     } catch (e) {
       notify('模式切换失败：' + e.message, 'error');
     }
-  }
-  function buildModeChips(mode) {
-    const wrap = document.getElementById('modeChips');
-    if (!wrap) return;
-    wrap.innerHTML = '';
-    const TITLE = {
-      quiet: '安静：能自决的都自决，只拦策略明确拒绝的动作',
-      standard: '标准：写文件放行、执行命令要问',
-      strict: '严格：写入与执行都要问，只有读取放行',
-    };
-    for (const m of ['quiet', 'standard', 'strict']) {
-      const b = document.createElement('button');
-      b.className = 'mode-chip' + (m === mode ? ' on' : '');
-      b.textContent = m;
-      b.title = TITLE[m];
-      b.onclick = () => setMode(m);
-      wrap.appendChild(b);
-    }
-    paintMode(mode);
   }
   const mhModeBtn = document.getElementById('mhMode');
   if (mhModeBtn) {
@@ -3064,17 +3030,15 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   fetch('/api/meta')
     .then((r) => r.json())
     .then((meta) => {
+      budgetTokens = Number(meta.budget || budgetTokens || 0);
       const bud = fmtBudget(meta.budget);
       const set = (id, text) => {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
       };
-      set('rmodel', meta.model || '—');
       set('wmModel', meta.model || '—');
       set('mhModel', meta.model || '—');
-      set('sBud', bud);
       set('rbud', bud);
-      set('mBud', bud);
       set('sbWs', String(meta.workspace || '').split('/').filter(Boolean).slice(-1)[0] || '—');
       const crumbs = document.getElementById('crumbs');
       if (crumbs) crumbs.textContent = meta.workspace || '—';
@@ -3103,7 +3067,7 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
           if (b) b.click();
         };
       }
-      buildModeChips(meta.mode || 'standard');
+      paintMode(meta.mode || 'standard');
     })
     .catch(() => {});
 
@@ -3450,13 +3414,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   // ── 右栏 / 操作 ──
   const rightToggle = document.getElementById('rightToggle');
   if (rightToggle) rightToggle.onclick = () => toggleInspector();
-  const snap = document.getElementById('actSnapshot');
-  if (snap) {
-    snap.onclick = () =>
-      window.open('/snapshot?theme=' + (document.documentElement.dataset.theme || 'auto'), '_blank');
-  }
-  const stopAct = document.getElementById('actStop');
-  if (stopAct) stopAct.onclick = () => fetch('/api/cancel', { method: 'POST' });
 
   // ── 命令面板 ──
   const palette = document.getElementById('palette');
@@ -3579,8 +3536,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
 
   function setMascot(on) {
     document.documentElement.dataset.mascot = on ? 'on' : 'off';
-    const label = document.getElementById('mascotState');
-    if (label) label.textContent = on ? '开' : '关';
     try {
       localStorage.setItem('ui.mascot', on ? 'on' : 'off');
     } catch (e) {}
@@ -3592,10 +3547,6 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
     } catch (e) {}
     setMascot(v !== 'off');
   })();
-  const mascotRow = document.getElementById('actMascot');
-  if (mascotRow) {
-    mascotRow.onclick = () => setMascot(document.documentElement.dataset.mascot === 'off');
-  }
 
   // ── 顶部“更多”：低频操作只放这里，侧栏保持会话单职责 ──
   const moreBtn = document.getElementById('moreBtn');
@@ -3757,23 +3708,16 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   const qr = new URLSearchParams(location.search).get('report');
   if (qr) setTimeout(() => openReport(qr, true), 120);
 
-  // 数字镜像：聊天区更新 #tok/#calls 后，侧栏与右栏跟着变（轮询兜底，1s 一次）
-  let budgetCache = 0;
+  // 数字镜像：聊天区更新 #tok/#calls 后，右栏跟着变（轮询兜底，1s 一次）
   setInterval(() => {
     const tok = (document.getElementById('tok') || {}).textContent || '0';
     const calls = (document.getElementById('calls') || {}).textContent || '0';
-    const sTok = document.getElementById('sTok');
-    if (sTok) sTok.textContent = tok + ' tok';
     const tokNum = Number(String(tok).replace(/,/g, '')) || 0;
     const rTok = document.getElementById('rtok');
     if (rTok) rTok.textContent = tokNum.toLocaleString();
     const rCalls = document.getElementById('rcalls');
     if (rCalls) rCalls.textContent = calls;
-    const budEl = document.getElementById('sBud');
-    if (budEl && budEl.textContent.endsWith('k')) {
-      budgetCache = Number(budEl.textContent.replace('k', '')) * 1000 || 0;
-    }
-    const pct = budgetCache > 0 ? Math.min(100, (tokNum / budgetCache) * 100) : 0;
+    const pct = budgetTokens > 0 ? Math.min(100, (tokNum / budgetTokens) * 100) : 0;
     const bar = document.getElementById('rbar');
     if (bar) bar.style.width = pct + '%';
     const rpct = document.getElementById('rpct');
@@ -3792,17 +3736,30 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   const select = document.getElementById('diffCheckpoint');
   const all = document.getElementById('diffAll');
   const apply = document.getElementById('diffApply');
+  const closeBtn = document.getElementById('diffClose');
   const hint = document.getElementById('diffHint');
   const history = document.getElementById('diffHistory');
-  if (!request || !overlay || !body || !select || !all || !apply) return;
+  if (!request || !overlay || !body || !select || !all || !apply || !closeBtn) return;
   let current = '';
+  let lastFocus = null;
 
   const boxes = () => Array.from(body.querySelectorAll('input[type="checkbox"]'));
+  function focusables() {
+    return Array.from(overlay.querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled),[tabindex]:not([tabindex="-1"])'))
+      .filter((el) => el.getClientRects().length > 0);
+  }
   function syncCount() {
     const n = boxes().filter((b) => b.checked).length;
     hint.textContent = n ? n + ' 个 hunk 被选中；未选中的会回退到 checkpoint' : '未选中的 hunk 会回退到 checkpoint';
   }
-  function close() { overlay.hidden = true; }
+  function close() {
+    if (overlay.hidden) return;
+    overlay.hidden = true;
+    const target = lastFocus && lastFocus.isConnected && lastFocus !== document.body && !overlay.contains(lastFocus)
+      ? lastFocus
+      : btn;
+    if (target) target.focus();
+  }
 
   function render(report) {
     current = report.checkpoint || '';
@@ -3933,7 +3890,12 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
   }
 
   async function open() {
+    if (!overlay.hidden) return;
+    lastFocus = document.activeElement;
     overlay.hidden = false;
+    // 先同步聚焦，兼容后台标签页/无头浏览器不触发 rAF 的环境；再补一帧兜底。
+    closeBtn.focus();
+    requestAnimationFrame(() => closeBtn.focus());
     loadHistory();
     try {
       const rows = await request('/api/checkpoints');
@@ -3958,10 +3920,27 @@ main>.scroll{padding:28px clamp(20px,3vw,40px) 20px}
 
   const btn = document.getElementById('diffBtn');
   if (btn) btn.onclick = open;
-  document.getElementById('diffClose').onclick = close;
+  closeBtn.onclick = close;
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !overlay.hidden) close();
+    if (overlay.hidden) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const items = focusables();
+    if (!items.length) { e.preventDefault(); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   });
   all.onchange = () => {
     boxes().forEach((b) => { b.checked = all.checked; });

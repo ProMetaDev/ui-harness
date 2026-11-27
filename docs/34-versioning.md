@@ -92,8 +92,9 @@
 0.3.0   ← 企业 L2：RBAC/用户存储/OIDC、审计签名/锚定/WORM、
            review intent 对账、checkpoint GC、管理台写表单
            （本地开发版，尚未打 tag；打 tag 后由 tools/changelog.sh 补出 CHANGELOG 段）
-        399 个测试 / 57 项门禁 / OIDC e2e / 2h 与 0.3.0 基线 24h soak 通过
-        仍未：最终发布二进制重跑 24h、真实付费 provider、真实 IdP、S3 Object Lock
+        402 个测试 / 57 项门禁 / OIDC e2e / 2h 与 0.3.0 基线 24h soak 通过
+        真实 provider 小规模 pilot/修改任务已跑；正式 10 仓库评测与付费长跑未做
+        仍未：最终发布二进制重跑 24h、真实 IdP、S3 Object Lock
 ```
 
 ---
