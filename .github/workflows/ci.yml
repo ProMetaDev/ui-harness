@@ -23,6 +23,15 @@ jobs:
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Ubuntu 24.04+ 默认用 AppArmor 禁止非特权 user namespace；读侧沙箱
+      # 需要它来建立私有 mount namespace。CI runner 是临时环境，这里只恢复
+      # 测试所需能力，产品代码仍保持“拿不到 namespace 就失败关闭”。
+      - name: 允许读侧沙箱创建 user namespace
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: 缓存 cargo
         uses: actions/cache@v4
         with:
