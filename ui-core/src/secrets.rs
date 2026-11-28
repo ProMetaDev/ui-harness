@@ -191,6 +191,10 @@ fn key_is_structural(name: &str) -> bool {
             | "callid"
             | "toolcallid"
             | "approvalid"
+            // prompt/snapshot 的 16 位哈希。它不是正文，却会随机以 `a` 开头；
+            // 一旦走进跨事件流，就会和已发布的 `AKI` 拼成 19 字符候选，再被
+            // 下一个段落 id 补成完整密钥并清空状态，后续正文尾部就漏了。
+            | "snapshotid"
             | "step"
             | "turn"
             | "seq"
@@ -908,7 +912,11 @@ impl StreamRedactor {
                             continue;
                         }
                     }
-                    let structural = root && key_is_structural(key);
+                    // `sections` 只出现在内核生成的 prompt/snapshot 事件里，
+                    // 数组内是段落 id、owner、volatility 等元数据。它们不是正文：
+                    // 若让段落 id 接入跨事件流，前一段遗留的候选会被元数据补全
+                    // 并清空，后面真正的正文尾部反而以明文发布。
+                    let structural = root && (key_is_structural(key) || key == "sections");
                     let child_stream = stream_text && !structural;
                     hits += self.redact_json_inner(value, child_stream, false);
                 }
@@ -1363,6 +1371,79 @@ mod tests {
                 rebuilt
             );
         }
+    }
+
+    #[test]
+    fn nested_sections_remain_model_controlled_content() {
+        // `sections` 只在根层是内核元数据。模型可以把同名键放进 args；
+        // 那里必须继续走跨事件门，不能借名字豁免。
+        let mut stream = StreamRedactor::default();
+        let mut first = J::obj(vec![(
+            "args",
+            J::obj(vec![("sections", J::Arr(vec![J::s("AKI")]))]),
+        )]); // allowlist secret（测试夹具，非真凭据）
+        assert_eq!(stream.redact_json(&mut first), 0);
+
+        let mut second = J::obj(vec![(
+            "args",
+            J::obj(vec![(
+                "note",
+                J::s("AWEBASSISTANTTEST12"), // allowlist secret（测试夹具，非真凭据）
+            )]),
+        )]);
+        stream.redact_json(&mut second);
+        let joined = format!("{}{}", first.to_compact(), second.to_compact());
+        assert!(
+            !joined.contains("AKIAWEBASSISTANTTEST12"), // allowlist secret（测试夹具，非真凭据）
+            "嵌套 sections 不能绕过流式门: {}",
+            joined
+        );
+        assert!(joined.contains("[REDACTED:"), "{}", joined);
+    }
+
+    #[test]
+    fn snapshot_metadata_cannot_consume_a_published_prefix() {
+        // Linux CI 实际漏过：16 位 snapshotId 随机以 `a` 开头时，和已发布的
+        // `AKI` 拼成 19 字符候选，下一段 id `core` 再把它补成完整密钥并清空
+        // 前缀，随后 model/response 的正文尾部就以明文进入 Journal/Hub。
+        let mut stream = StreamRedactor::default();
+        let mut first = J::obj(vec![("content", J::s("AKI"))]); // allowlist secret（测试夹具，非真凭据）
+        assert_eq!(stream.redact_json(&mut first), 0);
+
+        let mut snapshot = J::obj(vec![
+            ("snapshotId", J::s("a5fb5ae60570e927")),
+            (
+                "sections",
+                J::Arr(vec![J::obj(vec![
+                    ("id", J::s("core")),
+                    ("owner", J::s("kernel")),
+                    ("tokens", J::n(120.0)),
+                    ("bytes", J::n(424.0)),
+                ])]),
+            ),
+        ]);
+        stream.redact_json(&mut snapshot);
+        assert_eq!(
+            snapshot.str_at("snapshotId"),
+            Some("a5fb5ae60570e927"),
+            "快照 ID 是内核元数据，不能被流式门扣留或改写"
+        );
+        assert_eq!(
+            snapshot
+                .arr_at("sections")
+                .and_then(|items| items.first())
+                .and_then(|section| section.str_at("id")),
+            Some("core"),
+            "段落 id 是内核元数据，不能参与凭据拼接"
+        );
+
+        let tail = stream.push("AWEBASSISTANTTEST12"); // allowlist secret（测试夹具，非真凭据）
+        assert!(
+            !tail.contains("AWEBASSISTANTTEST12"),
+            "跨事件尾部不能明文外发: {}",
+            tail
+        );
+        assert!(tail.contains("[REDACTED:aws key]"), "{}", tail);
     }
 
     #[test]

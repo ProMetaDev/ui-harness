@@ -157,6 +157,10 @@ bind 进入视图，merged-/usr 保留 `/bin`、`/sbin`、`/lib*` 兼容软链�
 所有字符串都做静态凭据检测，正文类字段额外做跨事件前缀保护；只有事件根层的既有结构字段只做静态
 检测，嵌套的 `args` / `effects` 等模型可控字段不能按 `path`、`name`、`url` 等键名豁免；根层
 `path` / `file` / `filename` / `artifact` 以及观测里的 `added` / `removed` 等模型可控名称同样不能豁免。
+`prompt/snapshot` 的 `snapshotId` 和 `sections` 元数据也按内核结构做静态检测：它们是 16 位哈希或
+固定段落 id，不是正文。若让随机哈希进入跨事件流，它可能与已发布的公开前缀拼成完整凭据形状，再被
+下一段元数据补全并清空状态，随后真正的正文尾部就会以明文发布；同名 `sections` 出现在模型可控的
+`args` 里时仍必须走跨事件门，不能按名字豁免。
 命中密钥形状的
 （`api_key = "sk-…"`、`Bearer`/`Basic` 认证头、PEM/SSH2/PGP 私钥头、`X-*-Token` 之类）换成 `[REDACTED:<label>]`，
 并在同一条事件上盖 `redacted: N`。N 是来源处理与本次发生变化的字符串字段计数之和，不保证等于秘密的

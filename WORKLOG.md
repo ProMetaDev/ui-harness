@@ -1,5 +1,18 @@
 # Worklog
 
+## 2026-11-28 · Linux CI 快照元数据脱敏泄漏修复
+
+- Linux CI 的 `hub_publishes_only_journal_safe_content_after_an_external_writer` 不是抖动：
+  200 次直跑在第 29 次复现；随机 16 位 `snapshotId` 以 `a` 开头时与已发布的 `AKI`
+  拼成 19 字符候选，下一段 `core` 再把它补成 AWS 形状并清空前缀，后续 model 尾部
+  以明文进入 Journal/Hub。
+- `snapshotId` 与根层 `sections` 元数据改为只做静态检测，不再进入跨事件流；嵌套
+  `args` 里的同名 `sections` 仍走流式门，并加确定性回归钉住。
+- WSL Rust 1.100.0 全量测试 262 passed / 0 failed / 1 ignored；文档 79/79；门禁 57/57。
+- **v2 最终 RC 作废**（SHA-256 `08d1f6d42d498e1ce89c62195815386b15c5346de63024bdd273612576708436`）：
+  其 Linux CI 红，不能用于发布验收；在修复后的 v3 跑完 24h soak 与正式 120 任务前
+  不创建 `v0.3.0` tag。
+
 ## 2026-11-28 · 0.3.0 最终 RC 审批卡 P1 收口与验收重启
 
 - 审批卡参数改为复用 `tool/request` 的 Journal 安全副本，`approval/requested` 不再重复写 args；
