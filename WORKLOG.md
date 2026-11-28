@@ -1,5 +1,16 @@
 # Worklog
 
+## 2026-11-28 · 0.3.0 最终 RC 审批卡 P1 收口与验收重启
+
+- 审批卡参数改为复用 `tool/request` 的 Journal 安全副本，`approval/requested` 不再重复写 args；
+  政策决策提示也改用安全字段，新增真实 dispatch 跨字段 PEM 回归。
+- 独立复核：未发现 P0，原审批卡 P1 已关闭；既有 P2（`tool/start` 重复 args、批准执行/resume 语义）
+  已写入安全文档与 v1 限制清单。
+- WSL Rust 1.100.0：475 passed / 0 failed / 1 ignored；门禁 57/57；文档 79/79；密钥扫描通过。
+- 重新冻结最终 v2 Linux RC：SHA-256 `08d1f6d42d498e1ce89c62195815386b15c5346de63024bdd273612576708436`。
+- 已启动该二进制的累计活跃 24h soak，以及真实 Qwen3 的正式 10 仓库 × 120 任务评测；
+  两项仍在运行，未提前宣称最终验收通过。
+
 ## 2026-11-27 · UI 与看板娘局部体验收口
 
 - 导航按钮同步 `aria-current="page"`，当前视图对辅助技术可感知；

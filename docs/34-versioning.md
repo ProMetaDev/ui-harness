@@ -92,9 +92,13 @@
 0.3.0   ← 企业 L2：RBAC/用户存储/OIDC、审计签名/锚定/WORM、
            review intent 对账、checkpoint GC、管理台写表单
            （本地开发版，尚未打 tag；打 tag 后由 tools/changelog.sh 补出 CHANGELOG 段）
-        402 个测试 / 57 项门禁 / OIDC e2e / 2h 与 0.3.0 基线 24h soak 通过
-        真实 provider 小规模 pilot/修改任务已跑；正式 10 仓库评测与付费长跑未做
-        仍未：最终发布二进制重跑 24h、真实 IdP、S3 Object Lock
+        475 个测试 / 57 项门禁 / OIDC e2e / 2h 与 0.3.0 基线 24h soak 通过
+        RC 前 P1：模型 delta 原文不再发布；Journal 与 Hub 全出口共用跨事件脱敏状态，
+        嵌套模型可控字段不再按结构键名豁免；PEM 正文与 Bearer/Basic/AWS 分片受保护；
+        审批卡复用 tool/request 的 Journal 安全副本，原始 args 不再重复进入审批事件
+        真实 provider 小规模 pilot/修改任务已跑；Qwen3 正式评测探针已通过，
+        10 仓库 × 120 任务正绑定最终 v2 二进制运行
+        仍未：最终 RC 24h soak 与正式 120 任务完成、真实 IdP、S3 Object Lock
 ```
 
 ---
@@ -112,5 +116,5 @@
 与 `33-review-response.md`（外部评审逐条回应，README 与历史讨论大量用 `docs/33` 指代）。
 
 所有引用已同步（`README.md`、本文件、两份文档自己的标题）；旧路径已不存在，
-`bash tools/verify_docs.sh` 为 **79 / 79**。以后引用这四份文档时，写全文件名而不只写编号。
+`bash tools/verify_docs.sh` 当前为 **80 / 80**（数量以脚本实际输出为准）。以后引用这四份文档时，写全文件名而不只写编号。
 编号 56 / 57 是当时未被占用的最小可用号，继续新增文档从 58 起排。

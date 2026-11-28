@@ -95,11 +95,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     // 绝对路径（CLI 的 workspace 总是 canonicalize 过的）则一律规范化：
     // `<ws>/./secrets` 和 `<ws>/secrets` 是同一个目录，策略层按字面匹配，
     // 不折掉 `.`/尾斜杠就等于给 Deny 规则留了一条后缀绕过。
-    if !path.is_absolute()
-        && !path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-    {
+    if !path.is_absolute() && !path.components().any(|c| matches!(c, Component::ParentDir)) {
         return path.to_path_buf();
     }
     let mut out = PathBuf::new();
@@ -146,6 +142,16 @@ impl ToolResult {
             meta: Json::Obj(vec![]),
         }
     }
+
+    /// 模型、Journal 与 Web 全文共用的规范化文本。失败命令也可能先写 stdout，
+    /// 再有非零退出错误；只取 error 会把现场输出永久丢掉。
+    pub fn combined_text(&self) -> String {
+        match &self.error {
+            Some(e) if self.content.trim().is_empty() => e.clone(),
+            Some(e) => format!("{}\n\n[错误] {}", self.content, e),
+            None => self.content.clone(),
+        }
+    }
 }
 
 pub struct Tool {
@@ -167,7 +173,8 @@ fn cap(text: &str) -> String {
     }
     format!(
         "{}\n… [已截断到 {} 字节，用 offset/limit 继续读]",
-        &text[..end], MAX_OUTPUT_BYTES
+        &text[..end],
+        MAX_OUTPUT_BYTES
     )
 }
 
@@ -202,7 +209,10 @@ fn blocked_write(ctx: &Ctx, path: &Path) -> bool {
 
 fn fs_read_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
     let p = args.str_at("path").unwrap_or("");
-    vec![Effect::new(FS_READ, ctx.resolve(p).to_string_lossy().to_string())]
+    vec![Effect::new(
+        FS_READ,
+        ctx.resolve(p).to_string_lossy().to_string(),
+    )]
 }
 
 /// 「文件不存在」在 `.ui/tool-output/` 上有第二种解释：原文被保留策略清掉了。
@@ -283,7 +293,10 @@ fn fs_read_run(args: &Json, ctx: &Ctx) -> ToolResult {
 
 fn fs_write_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
     let p = args.str_at("path").unwrap_or("");
-    vec![Effect::new(FS_WRITE, ctx.resolve(p).to_string_lossy().to_string())]
+    vec![Effect::new(
+        FS_WRITE,
+        ctx.resolve(p).to_string_lossy().to_string(),
+    )]
 }
 
 fn fs_write_run(args: &Json, ctx: &Ctx) -> ToolResult {
@@ -317,7 +330,10 @@ fn fs_write_run(args: &Json, ctx: &Ctx) -> ToolResult {
 
 fn fs_edit_effects(args: &Json, ctx: &Ctx) -> Vec<Effect> {
     let p = args.str_at("path").unwrap_or("");
-    vec![Effect::new(FS_WRITE, ctx.resolve(p).to_string_lossy().to_string())]
+    vec![Effect::new(
+        FS_WRITE,
+        ctx.resolve(p).to_string_lossy().to_string(),
+    )]
 }
 
 fn fs_edit_run(args: &Json, ctx: &Ctx) -> ToolResult {
@@ -443,10 +459,7 @@ fn walk(workspace: &Path, dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
         }
         // metadata() 会跟随符号链接。工作区里一个 `alias -> secrets`
         // 就能绕过按名字的跳过表，所以在跟随之前先看真实目标。
-        let is_symlink = entry
-            .file_type()
-            .map(|t| t.is_symlink())
-            .unwrap_or(false);
+        let is_symlink = entry.file_type().map(|t| t.is_symlink()).unwrap_or(false);
         if is_symlink && !symlink_target_is_safe(workspace, &path) {
             continue;
         }
@@ -606,8 +619,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     #[cfg(target_os = "linux")]
     let sandbox_label = {
         if ctx.sandbox.fs {
-            if let Err(e) =
-                crate::exec::apply_linux_sandbox(&mut cmd, &ctx.workspace, &ctx.sandbox)
+            if let Err(e) = crate::exec::apply_linux_sandbox(&mut cmd, &ctx.workspace, &ctx.sandbox)
             {
                 return ToolResult::err(format!(
                     "沙箱不可用（{}）。要么升级内核，要么显式设置 UI_SANDBOX=0 关闭限制——\
@@ -637,7 +649,7 @@ fn shell_run(args: &Json, ctx: &Ctx) -> ToolResult {
     if ctx.sandbox.fs {
         return ToolResult::err(
             "当前平台没有可用的文件系统沙箱（只有 Linux Landlock / Windows Job Object）。\
-             确认要在此平台执行命令，请显式设置 UI_SANDBOX=0。"
+             确认要在此平台执行命令，请显式设置 UI_SANDBOX=0。",
         );
     }
 
@@ -834,7 +846,10 @@ pub fn plan_tool() -> Tool {
         name: "plan",
         summary: "提交任务拆分计划：parallel 是并行的子任务列表",
         idempotent: true,
-        params: &[("parallel", "array of {prompt}", true), ("summary", "string", false)],
+        params: &[
+            ("parallel", "array of {prompt}", true),
+            ("summary", "string", false),
+        ],
         effects: |_args, _ctx| Vec::new(),
         run: |args, _ctx| {
             let n = args.arr_at("parallel").map(|a| a.len()).unwrap_or(0);
@@ -861,7 +876,10 @@ pub fn registry() -> Vec<Tool> {
             ],
             effects: |args, ctx| {
                 let p = args.str_at("path").unwrap_or(".");
-                vec![Effect::new("fs.read", ctx.resolve(p).to_string_lossy().to_string())]
+                vec![Effect::new(
+                    "fs.read",
+                    ctx.resolve(p).to_string_lossy().to_string(),
+                )]
             },
             run: |args, ctx| run_grep(args, ctx),
         },
@@ -872,7 +890,10 @@ pub fn registry() -> Vec<Tool> {
             params: &[("path", "string", true), ("diff", "string (unified)", true)],
             effects: |args, ctx| {
                 let p = args.str_at("path").unwrap_or("");
-                vec![Effect::new("fs.write", ctx.resolve(p).to_string_lossy().to_string())]
+                vec![Effect::new(
+                    "fs.write",
+                    ctx.resolve(p).to_string_lossy().to_string(),
+                )]
             },
             run: |args, ctx| run_patch(args, ctx),
         },
@@ -880,7 +901,11 @@ pub fn registry() -> Vec<Tool> {
             name: "todo",
             summary: "任务清单：add / done / list，存在 .ui/todos.json",
             idempotent: false,
-            params: &[("action", "add|done|list", true), ("text", "string", false), ("index", "number", false)],
+            params: &[
+                ("action", "add|done|list", true),
+                ("text", "string", false),
+                ("index", "number", false),
+            ],
             effects: |_args, _ctx| Vec::new(),
             run: |args, ctx| run_todo(args, ctx),
         },
@@ -888,10 +913,17 @@ pub fn registry() -> Vec<Tool> {
             name: "tree",
             summary: "列目录树（跳过 .git/target/node_modules/.ui），可限深度",
             idempotent: true,
-            params: &[("path", "string", false), ("depth", "number", false), ("maxEntries", "number", false)],
+            params: &[
+                ("path", "string", false),
+                ("depth", "number", false),
+                ("maxEntries", "number", false),
+            ],
             effects: |args, ctx| {
                 let p = args.str_at("path").unwrap_or(".");
-                vec![Effect::new("fs.read", ctx.resolve(p).to_string_lossy().to_string())]
+                vec![Effect::new(
+                    "fs.read",
+                    ctx.resolve(p).to_string_lossy().to_string(),
+                )]
             },
             run: |args, ctx| run_tree(args, ctx),
         },
@@ -902,8 +934,18 @@ pub fn registry() -> Vec<Tool> {
             params: &[("from", "string", true), ("to", "string", true)],
             effects: |args, ctx| {
                 vec![
-                    Effect::new("fs.write", ctx.resolve(args.str_at("from").unwrap_or("")).to_string_lossy().to_string()),
-                    Effect::new("fs.write", ctx.resolve(args.str_at("to").unwrap_or("")).to_string_lossy().to_string()),
+                    Effect::new(
+                        "fs.write",
+                        ctx.resolve(args.str_at("from").unwrap_or(""))
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                    Effect::new(
+                        "fs.write",
+                        ctx.resolve(args.str_at("to").unwrap_or(""))
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
                 ]
             },
             run: |args, ctx| run_mv(args, ctx),
@@ -923,7 +965,10 @@ pub fn registry() -> Vec<Tool> {
                 match &ctx.plugins {
                     // 用插件**声明**的效果，而不是我们猜的
                     Some(set) => set.effects_for(plugin, tool, &ctx.workspace),
-                    None => vec![Effect::new("proc.exec", format!("plugin:{}:{}", plugin, tool))],
+                    None => vec![Effect::new(
+                        "proc.exec",
+                        format!("plugin:{}:{}", plugin, tool),
+                    )],
                 }
             },
             run: |args, ctx| {
@@ -1064,7 +1109,10 @@ mod tests {
     fn ctx() -> Ctx {
         let dir = std::env::temp_dir().join(format!("ui-tools-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        Ctx { workspace: dir, ..Default::default() }
+        Ctx {
+            workspace: dir,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1153,7 +1201,12 @@ mod tests {
             &c,
         );
         assert!(!r.ok);
-        assert_eq!(r.meta.num_at("status"), Some(3.0), "{}", r.error.unwrap_or_default());
+        assert_eq!(
+            r.meta.num_at("status"),
+            Some(3.0),
+            "{}",
+            r.error.unwrap_or_default()
+        );
     }
 
     #[test]
@@ -1269,25 +1322,19 @@ mod tests {
             body
         );
         assert!(
-            literal_search(
-                &c.workspace,
-                &protected_dir,
-                "api_key",
-                None,
-                false,
-                100
-            )
-            .is_err(),
+            literal_search(&c.workspace, &protected_dir, "api_key", None, false, 100).is_err(),
             "literal_search(path=受保护目录) 必须返回错误"
         );
 
         // ④ tree：列工作区时不能出现受保护目录；直接指向它必须被拒。
-        let r = (find(&tools, "tree").unwrap().run)(
-            &Json::obj(vec![("path", Json::from("."))]),
-            &c,
-        );
+        let r =
+            (find(&tools, "tree").unwrap().run)(&Json::obj(vec![("path", Json::from("."))]), &c);
         assert!(r.ok, "{:?}", r.error);
-        assert!(!r.content.contains("astra.json"), "tree 列出了：{}", r.content);
+        assert!(
+            !r.content.contains("astra.json"),
+            "tree 列出了：{}",
+            r.content
+        );
         assert!(
             !r.content.contains(protected),
             "tree 在根目录列出受保护目录：{}",
@@ -1380,10 +1427,8 @@ mod tests {
         );
 
         // ③ tree：既不列出，也不能被直接展开
-        let r = (find(&tools, "tree").unwrap().run)(
-            &Json::obj(vec![("path", Json::from("."))]),
-            &c,
-        );
+        let r =
+            (find(&tools, "tree").unwrap().run)(&Json::obj(vec![("path", Json::from("."))]), &c);
         assert!(r.ok, "{:?}", r.error);
         assert!(
             !r.content.contains("deploy.pem"),
@@ -1436,12 +1481,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ui-boundary-{}-{}-{}",
-            tag,
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ui-boundary-{}-{}-{}", tag, std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Ctx {
@@ -1451,10 +1492,7 @@ mod tests {
     }
 
     fn run_read(c: &Ctx, path: &str) -> ToolResult {
-        (find(&registry(), "fs_read").unwrap().run)(
-            &Json::obj(vec![("path", Json::from(path))]),
-            c,
-        )
+        (find(&registry(), "fs_read").unwrap().run)(&Json::obj(vec![("path", Json::from(path))]), c)
     }
 
     /// 评审 N-P0-1：`.ui/tool-output/` 是唯一读例外，但例外只对**真实路径**
@@ -1535,7 +1573,12 @@ mod tests {
             fs::write(&p, format!("{}\n", canary)).unwrap();
             let r = run_read(&c, path);
             assert!(!r.ok, "{} 不该读得到: {}", path, r.content);
-            assert!(!r.content.contains(canary), "{} 泄露了内容: {}", path, r.content);
+            assert!(
+                !r.content.contains(canary),
+                "{} 泄露了内容: {}",
+                path,
+                r.content
+            );
         }
         // 普通文件不受牵连
         fs::write(ws.join("notes.txt"), "hello\n").unwrap();
@@ -1605,14 +1648,15 @@ mod tests {
         let r = run_tool(
             &c,
             "grep",
-            vec![
-                ("pattern", Json::from("CANARY")),
-                ("path", Json::from(".")),
-            ],
+            vec![("pattern", Json::from("CANARY")), ("path", Json::from("."))],
         );
         assert!(r.ok, "{:?}", r.error);
         assert_no_leak(&r, &leaked, "grep");
-        assert!(r.content.contains("main.rs"), "grep 丢了普通文件：{}", r.content);
+        assert!(
+            r.content.contains("main.rs"),
+            "grep 丢了普通文件：{}",
+            r.content
+        );
 
         // 只出现在敏感文件里的串必须零命中。
         let r = run_tool(
@@ -1640,14 +1684,18 @@ mod tests {
 
         // 没有 grep 时的兜底实现同一档：普通文件返回，敏感文件不读。
         let body = literal_search(ws, ws, "CANARY", None, false, 100).unwrap();
-        assert_no_leak(
-            &ToolResult::ok(body.clone()),
-            &leaked,
-            "literal_search",
+        assert_no_leak(&ToolResult::ok(body.clone()), &leaked, "literal_search");
+        assert!(
+            body.contains("main.rs"),
+            "literal_search 丢了普通文件：{}",
+            body
         );
-        assert!(body.contains("main.rs"), "literal_search 丢了普通文件：{}", body);
         let body = literal_search(ws, ws, "ENV-SEARCH-CANARY", None, false, 100).unwrap();
-        assert!(!body.contains("ENV-SEARCH-CANARY"), "literal_search 泄露：{}", body);
+        assert!(
+            !body.contains("ENV-SEARCH-CANARY"),
+            "literal_search 泄露：{}",
+            body
+        );
 
         let _ = fs::remove_dir_all(&c.workspace);
         crate::protected::clear_private();
@@ -1681,11 +1729,7 @@ mod tests {
         );
 
         // 正常文件仍然能被搜到（过滤不是把搜索关掉）。
-        let r = run_tool(
-            &c,
-            "fs_search",
-            vec![("pattern", Json::from("fn main"))],
-        );
+        let r = run_tool(&c, "fs_search", vec![("pattern", Json::from("fn main"))]);
         assert!(r.ok, "{:?}", r.error);
         assert!(r.content.contains("src/main.rs"), "{}", r.content);
 
@@ -1696,7 +1740,11 @@ mod tests {
         );
         assert!(r.ok, "{:?}", r.error);
         assert_no_leak(&r, &[".env", "server.key", "id_rsa", "deploy.pem"], "tree");
-        assert!(r.content.contains("main.rs"), "tree 丢了普通文件：{}", r.content);
+        assert!(
+            r.content.contains("main.rs"),
+            "tree 丢了普通文件：{}",
+            r.content
+        );
 
         // 把敏感文件当列目录的根：同样拒绝。
         let r = run_tool(&c, "tree", vec![("path", Json::from(".env"))]);
@@ -1756,7 +1804,10 @@ mod tests {
             "patch",
             vec![
                 ("path", Json::from(".env")),
-                ("diff", Json::from("@@ -1 +1 @@\n-ENV-WRITE-CANARY\n+pwned\n")),
+                (
+                    "diff",
+                    Json::from("@@ -1 +1 @@\n-ENV-WRITE-CANARY\n+pwned\n"),
+                ),
             ],
         );
         assert!(!r.ok, "patch(.env) 必须拒绝：{}", r.content);
@@ -1939,7 +1990,8 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     }
     cmd.arg("--").arg(pattern).arg(path);
     cmd.current_dir(&ctx.workspace);
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if ctx.sandbox.fs {
         if let Err(e) = crate::exec::apply_linux_sandbox(&mut cmd, &ctx.workspace, &ctx.sandbox) {
             return ToolResult::err(format!("grep 沙箱不可用: {}", e));
@@ -1961,10 +2013,9 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
                 args.bool_at("ignoreCase") == Some(true),
                 max_hits as usize,
             ) {
-                Ok(body) => ToolResult::ok(format!(
-                    "（本机没有 grep，已退化为字面匹配）\n{}",
-                    body
-                )),
+                Ok(body) => {
+                    ToolResult::ok(format!("（本机没有 grep，已退化为字面匹配）\n{}", body))
+                }
                 Err(e) => ToolResult::err(e),
             }
         }
@@ -1983,29 +2034,32 @@ fn run_grep(args: &Json, ctx: &Ctx) -> ToolResult {
     // 正则错误、I/O 错误等仍旧失败，不把真实故障静默掉。
     let masked_permission_denied = code == Some(2)
         && !out.stderr.is_empty()
-        && out.stderr.lines().all(|line| line.contains("Permission denied"));
+        && out
+            .stderr
+            .lines()
+            .all(|line| line.contains("Permission denied"));
     if code == Some(0) || code == Some(1) || masked_permission_denied {
-            let text = &out.stdout;
-            // `--exclude-dir` 只认名字：多段（`vendor/keys`）与绝对声明它排不掉。
-            // 结果行按真实路径再判一次，否则"清单里加了目录，grep 照样把它捞出来"
-            // ——边界必须取决于清单，不取决于哪条命令更快。
-            let mut lines: Vec<&str> = text
-                .lines()
-                .filter(|l| !grep_line_is_hidden(&ctx.workspace, l))
-                .collect();
-            let total = lines.len();
-            if total == 0 {
-                return ToolResult::ok("（无匹配）");
-            }
-            let truncated = total > max_hits as usize;
-            if truncated {
-                lines.truncate(max_hits as usize);
-            }
-            let mut body = lines.join("\n");
-            if truncated {
-                body.push_str(&format!("\n…（共 {} 行，已截断到 {}）", total, max_hits));
-            }
-            ToolResult::ok(body)
+        let text = &out.stdout;
+        // `--exclude-dir` 只认名字：多段（`vendor/keys`）与绝对声明它排不掉。
+        // 结果行按真实路径再判一次，否则"清单里加了目录，grep 照样把它捞出来"
+        // ——边界必须取决于清单，不取决于哪条命令更快。
+        let mut lines: Vec<&str> = text
+            .lines()
+            .filter(|l| !grep_line_is_hidden(&ctx.workspace, l))
+            .collect();
+        let total = lines.len();
+        if total == 0 {
+            return ToolResult::ok("（无匹配）");
+        }
+        let truncated = total > max_hits as usize;
+        if truncated {
+            lines.truncate(max_hits as usize);
+        }
+        let mut body = lines.join("\n");
+        if truncated {
+            body.push_str(&format!("\n…（共 {} 行，已截断到 {}）", total, max_hits));
+        }
+        ToolResult::ok(body)
     } else {
         ToolResult::err(format!(
             "grep 失败（退出码 {:?}）：{}",
@@ -2087,7 +2141,11 @@ fn literal_search(
                 Err(_) => continue,
             };
             for (i, line) in text.lines().enumerate() {
-                let hay = if ignore_case { line.to_lowercase() } else { line.to_string() };
+                let hay = if ignore_case {
+                    line.to_lowercase()
+                } else {
+                    line.to_string()
+                };
                 if hay.contains(needle) {
                     hits.push(format!("{}:{}:{}", p.display(), i + 1, line.trim_end()));
                     if hits.len() >= max {
@@ -2097,7 +2155,15 @@ fn literal_search(
             }
         }
     }
-    walk(workspace, root, &needle, ignore_case, include, &mut hits, max_hits);
+    walk(
+        workspace,
+        root,
+        &needle,
+        ignore_case,
+        include,
+        &mut hits,
+        max_hits,
+    );
     if hits.is_empty() {
         Ok("（无匹配）".to_string())
     } else {
@@ -2274,8 +2340,17 @@ fn run_todo(args: &Json, ctx: &Ctx) -> ToolResult {
     }
     let mut out = String::new();
     for (i, it) in items.iter().enumerate() {
-        let mark = if it.bool_at("done") == Some(true) { "x" } else { " " };
-        out.push_str(&format!("{}. [{}] {}\n", i + 1, mark, it.str_at("text").unwrap_or("")));
+        let mark = if it.bool_at("done") == Some(true) {
+            "x"
+        } else {
+            " "
+        };
+        out.push_str(&format!(
+            "{}. [{}] {}\n",
+            i + 1,
+            mark,
+            it.str_at("text").unwrap_or("")
+        ));
     }
     if out.is_empty() {
         out.push_str("（清单是空的）");
@@ -2325,7 +2400,12 @@ fn run_tree(args: &Json, ctx: &Ctx) -> ToolResult {
             }
             let is_symlink = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
             let is_dir = p.is_dir();
-            out.push(format!("{}{}{}", prefix, name, if is_dir { "/" } else { "" }));
+            out.push(format!(
+                "{}{}{}",
+                prefix,
+                name,
+                if is_dir { "/" } else { "" }
+            ));
             if is_dir {
                 // 符号链接指向工作区外/受保护目录时只列名字，不进去。
                 if !is_symlink || symlink_target_is_safe(workspace, &p) {

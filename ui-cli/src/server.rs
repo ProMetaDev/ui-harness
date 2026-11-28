@@ -14,7 +14,7 @@ use ui_core::json::{self, Json};
 use ui_core::prompt::Snapshot;
 
 use ui_core::tools::ToolResult;
-use ui_core::{Agent, Decision};
+use ui_core::{Agent, AgentError, Decision};
 
 const CHAT_HTML: &str = include_str!("../assets/chat.html");
 const ADMIN_HTML: &str = include_str!("../assets/admin.html");
@@ -52,6 +52,22 @@ struct PendingApproval {
 struct Hub {
     /// 已广播的事件（序号 + JSON 行），新连接用 `?since=` 补齐，重连不重复
     log: Mutex<Vec<(u64, String)>>,
+    /// 所有 Hub 外发正文共用的跨事件脱敏状态；助手、工具摘要、工具全文
+    /// 不能各用一份，否则秘密可以拆在两个出口之间还原。不按任务重置。
+    redaction_stream: Mutex<ui_core::secrets::StreamRedactor>,
+    /// 与活动流对应的日志路径；补记可以单独切 Agent，不能误导 Hub 保存状态。
+    redaction_path: Mutex<Option<std::path::PathBuf>>,
+    /// 离开会话时保存的 Hub 流状态，按真实日志路径恢复；同时保存它对应的
+    /// Journal 位置，防止旧快照覆盖其他进程随后写入的威胁状态。
+    redaction_streams: Mutex<
+        std::collections::HashMap<
+            std::path::PathBuf,
+            (ui_core::secrets::StreamRedactor, u64, String),
+        >,
+    >,
+    /// 串行化“推进脱敏流 + 标记会话 + 发布”与整段会话切换。单独锁 stream/session
+    /// 不够：切换可能先克隆旧状态，并发 push 随后更新真实流，最后被旧快照覆盖。
+    redaction_lock: Mutex<()>,
     /// 事件序号
     seq: std::sync::atomic::AtomicU64,
     /// 当前 log 里最早还保留的 seq；客户端 since 更旧时明确告知丢了窗口
@@ -66,9 +82,9 @@ struct Hub {
     active: Mutex<Option<WebTask>>,
     /// 排队中、worker 还没取走的任务
     queue: Mutex<Vec<WebTask>>,
-    /// 排队期间被撤掉的任务（id + 原文）：日志只能由 worker 单点写，
+    /// 排队期间被撤掉的任务（id + 原文 + 原会话）：日志只能由 worker 单点写，
     /// HTTP 线程把账放在这儿，worker 下一次醒来时补上 `turn/skipped`。
-    skipped: Mutex<Vec<(String, String)>>,
+    skipped: Mutex<Vec<(String, String, String)>>,
     /// 任务序号：给页面一个能贴住「停止哪个」的稳定 ID
     task_seq: std::sync::atomic::AtomicU64,
     /// 工具的完整输出（页面上点开再看）：按调用序号存
@@ -365,9 +381,10 @@ impl UserRecord {
         let Json::Obj(fields) = value else {
             return Err("必须是对象".to_string());
         };
-        if let Some((key, _)) = fields.iter().find(|(k, _)| {
-            !matches!(k.as_str(), "id" | "role" | "disabled" | "display")
-        }) {
+        if let Some((key, _)) = fields
+            .iter()
+            .find(|(k, _)| !matches!(k.as_str(), "id" | "role" | "disabled" | "display"))
+        {
             return Err(format!(
                 "未知字段 {}（只允许 id/role/disabled/display）",
                 key
@@ -475,10 +492,7 @@ fn role_perms(value: &Json, allow_name: bool) -> Result<RolePerms, String> {
     if let Some((key, _)) = items.iter().find(|(k, _)| {
         !matches!(k.as_str(), "write" | "audit" | "manage") && !(allow_name && k == "name")
     }) {
-        return Err(format!(
-            "未知权限字段 {}（只允许 write/audit/manage）",
-            key
-        ));
+        return Err(format!("未知权限字段 {}（只允许 write/audit/manage）", key));
     }
     let bool_at = |name: &str| match value.get(name) {
         Some(Json::Bool(b)) => Ok(*b),
@@ -499,7 +513,10 @@ fn parse_roles(
     for (raw_name, spec) in items {
         let name = raw_name.trim().to_ascii_lowercase();
         if !valid_role_name(&name) {
-            return Err(format!("非法角色名: {:?}（只允许字母数字 _ - .）", raw_name));
+            return Err(format!(
+                "非法角色名: {:?}（只允许字母数字 _ - .）",
+                raw_name
+            ));
         }
         if roles.contains_key(&name) {
             return Err(format!("重复的角色名: {}", name));
@@ -533,8 +550,7 @@ fn load_rbac(workspace: &std::path::Path) -> RbacConfig {
 /// 不会读到半个 JSON。`users.json` 与 `rbac.json` 共用这一条落盘路径。
 fn write_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("创建 {} 失败: {}", dir.display(), e))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {}", dir.display(), e))?;
     }
     // 序号只用于避免同一毫秒内的两个写者抢同一个临时名。
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -598,7 +614,10 @@ fn load_users(workspace: &std::path::Path, rbac: &Rbac) -> UsersConfig {
 
 /// 当前生效的用户表：`users.json` 存在就只看它；否则把 `rbac.json` 的旧映射
 /// 投影成同样的记录形状（停用状态未知，按启用处理）。
-fn effective_users(store: &UsersStore, rbac: &Rbac) -> std::collections::BTreeMap<String, UserRecord> {
+fn effective_users(
+    store: &UsersStore,
+    rbac: &Rbac,
+) -> std::collections::BTreeMap<String, UserRecord> {
     match store.source {
         UsersSource::File => store.users.clone(),
         UsersSource::LegacyRbac => rbac
@@ -718,10 +737,7 @@ fn secret_eq(got: &str, expected: &str) -> bool {
 /// 旧实现是 `cookie.contains("ui_token=<token>")`：`ui_token=<token>-suffix`
 /// 或别的 cookie 值里恰好包含这段文本都会通过。这里按 `;` 拆 cookie、只比较
 /// `ui_token` 这一项的完整值，并且比较本身复用 `secret_eq`。
-fn cookie_token_ok(
-    headers: &std::collections::HashMap<String, String>,
-    expected: &str,
-) -> bool {
+fn cookie_token_ok(headers: &std::collections::HashMap<String, String>, expected: &str) -> bool {
     headers
         .get("cookie")
         .map(|cookie| {
@@ -772,13 +788,19 @@ pub fn check_trusted_proxy_secret(
     }
     match secret {
         Some(s) if !s.trim().is_empty() => Ok(()),
-        _ => Err("--trusted-proxy 必须同时提供非空的 --trusted-proxy-secret：\
+        _ => Err(
+            "--trusted-proxy 必须同时提供非空的 --trusted-proxy-secret：\
              没有共享密钥时，127.0.0.1 上任意本机进程都能伪造 X-UI-* 身份"
-            .to_string()),
+                .to_string(),
+        ),
     }
 }
 
-fn actor_from(hub: &Hub, headers: &std::collections::HashMap<String, String>, peer: Option<std::net::IpAddr>) -> Option<Actor> {
+fn actor_from(
+    hub: &Hub,
+    headers: &std::collections::HashMap<String, String>,
+    peer: Option<std::net::IpAddr>,
+) -> Option<Actor> {
     let trusted = hub.trusted_proxy.as_deref()?;
     // 先验共享密钥再谈身份：源地址（loopback）只说明"同机"，不说明"是代理"。
     if !proxy_secret_ok(hub, headers) {
@@ -792,7 +814,11 @@ fn actor_from(hub: &Hub, headers: &std::collections::HashMap<String, String>, pe
     if !allowed {
         return None;
     }
-    let id = headers.get("x-ui-userid").or_else(|| headers.get("x-ui-user"))?.trim().to_string();
+    let id = headers
+        .get("x-ui-userid")
+        .or_else(|| headers.get("x-ui-user"))?
+        .trim()
+        .to_string();
     if id.is_empty() {
         return None;
     }
@@ -824,11 +850,12 @@ impl Hub {
     /// 为什么在这里而不是前端：`/snapshot` 会把整个 `hub.log` 原样嵌进一份
     /// **可分享**的 HTML。前端打码只保护屏幕，保护不了"另存为 / 转发"。
     /// 判据与 `Journal` 落账门共用 `secrets`（单一来源），所以两边不会漂。
+    /// 所有外发字符串还共用同一条跨事件状态链，避免在助手/工具出口之间拆片。
     ///
     /// 返回值写进事件的 `redacted` 字段：页面能说"这里抹过几处"，
     /// 而不是让人以为原本就是这样。
     fn redact(&self, event: &mut Json) -> usize {
-        ui_core::secrets::redact_json(event)
+        hub_lock(&self.redaction_stream).redact_json(event)
     }
 
     fn clear_log(&self) {
@@ -840,12 +867,47 @@ impl Hub {
         self.min_seq.load(Ordering::SeqCst)
     }
 
-    fn push(&self, mut event: Json) {
+    /// 模型 assistant 正文的唯一发布口。正文交给 Hub 的统一跨事件门，
+    /// 不在这里提前 finish，也不另起一份状态。
+    fn push_assistant(&self, text: &str) {
+        self.push(Json::obj(vec![
+            ("type", Json::from("assistant")),
+            ("text", Json::from(text)),
+        ]));
+    }
+
+    fn push(&self, event: Json) {
+        let _serial = hub_lock(&self.redaction_lock);
+        self.push_locked(event);
+    }
+
+    /// 调用方必须持有 `redaction_lock`，保证脱敏流、会话名与发布顺序不可分割。
+    fn push_locked(&self, mut event: Json) {
         // log → subs 是唯一锁顺序；取号也必须在 log 临界区内。
         // 否则并发事件可能乱序，订阅交接也可能同时收到 backlog 和 live 副本。
         let hits = self.redact(&mut event);
+        self.push_redacted(event, hits);
+    }
+
+    /// 发布只需静态清洗的历史事件，不推进当前会话的活动威胁状态。
+    fn push_static(&self, event: Json) {
+        let _serial = hub_lock(&self.redaction_lock);
+        self.push_static_locked(event);
+    }
+
+    fn push_static_locked(&self, mut event: Json) {
+        let hits = ui_core::secrets::redact_json(&mut event);
+        self.push_redacted(event, hits);
+    }
+
+    /// 发布已经由共享流处理过的事件。工具摘要必须从同一份安全全文派生，
+    /// 不能再把原始分片推进一次，否则会消费前缀候选并让摘要拼回凭据。
+    fn push_redacted(&self, mut event: Json, hits: usize) {
         if hits > 0 {
             event.set("redacted", Json::from(hits as u64));
+            if event.str_at("type") == Some("assistant") && event.str_at("text") == Some("") {
+                event.set("text", Json::from(DELTA_SAFE_NOTICE));
+            }
         }
         // 每个事件带上产生它的会话：/snapshot 和前端据此丢弃切换前/切换后
         // 串进来的旧会话事件。
@@ -890,12 +952,7 @@ impl Hub {
     /// 旧实现是 `take().send(decision)`：谁回答都算、答几次都行，于是
     /// 「双击批准」= 批准两次，「页面开着上一轮的批准按钮」= 把答案投给
     /// 下一次审批。这里对不上身份就把原审批**放回去**，让它继续等人。
-    fn answer(
-        &self,
-        approval_id: &str,
-        call_id: &str,
-        response: ApprovalResponse,
-    ) -> Answer {
+    fn answer(&self, approval_id: &str, call_id: &str, response: ApprovalResponse) -> Answer {
         let mut slot = self.approval.lock().unwrap();
         let pending = match slot.take() {
             Some(p) => p,
@@ -966,17 +1023,14 @@ impl Hub {
     }
 
     /// 取走并清空「排队时被撤掉」的账（由 worker 写进日志）。
-    fn take_skipped(&self) -> Vec<(String, String)> {
+    fn take_skipped(&self) -> Vec<(String, String, String)> {
         std::mem::take(&mut *self.skipped.lock().unwrap())
     }
 
     /// 当前在跑的任务 + 排队中的任务 ID（给 /api/state 与页面用）。
     fn task_view(&self) -> (Option<String>, Vec<String>) {
         let active = hub_lock(&self.active).as_ref().map(|t| t.id.clone());
-        let queued = hub_lock(&self.queue)
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
+        let queued = hub_lock(&self.queue).iter().map(|t| t.id.clone()).collect();
         (active, queued)
     }
 
@@ -1016,6 +1070,7 @@ impl Hub {
             self.skipped.lock().unwrap().push((
                 task.id.clone(),
                 task.text.chars().take(200).collect::<String>(),
+                task.session.clone(),
             ));
         }
         Cancelled::Queued(ids)
@@ -1063,20 +1118,23 @@ impl Hub {
             .map(|p| (p.approval_id.clone(), p.call_id.clone()))
     }
 
-    /// 存一份完整工具输出，返回给页面用的 id
-    fn store_tool(&self, name: &str, result: &ToolResult) -> u64 {
+    /// 返回 id、已脱敏全文、已脱敏工具名与命中数。工具名也是模型可控字符串，
+    /// 必须和正文共用一条流；摘要与全文元数据都复用这次结果，不能二次推进。
+    fn store_tool_redacted(&self, name: &str, result: &ToolResult) -> (u64, String, String, usize) {
         let mut base = self.tool_base.lock().unwrap();
         let mut tools = self.tools.lock().unwrap();
+        let (safe_name, name_hits) = hub_lock(&self.redaction_stream).redact_stream_text(name);
         // 同一条判据：点开「展开」看到的是完整输出，它比摘要更容易带出凭据。
-        let mut text = Json::from(match &result.error {
-            Some(e) if result.content.trim().is_empty() => e.clone(),
-            Some(e) => format!("{}\n\n[错误] {}", result.content, e),
-            None => result.content.clone(),
-        });
-        let hits = ui_core::secrets::redact_json(&mut text);
+        let mut text = Json::from(result.combined_text());
+        let text_hits = self.redact(&mut text);
+        let hits = name_hits + text_hits;
+        let safe_text = match &text {
+            Json::Str(text) => text.clone(),
+            _ => String::new(),
+        };
         let session = hub_lock(&self.session).clone();
         tools.push(Json::obj(vec![
-            ("name", Json::from(name)),
+            ("name", Json::from(safe_name.as_str())),
             ("ok", Json::Bool(result.ok)),
             ("text", text),
             ("redacted", Json::from(hits as u64)),
@@ -1089,13 +1147,18 @@ impl Hub {
             tools.drain(0..excess);
             *base += excess as u64;
         }
-        *base + tools.len() as u64
+        (*base + tools.len() as u64, safe_text, safe_name, hits)
     }
 
     fn tool(&self, id: u64) -> Option<Json> {
-        let base = *self.tool_base.lock().unwrap();
-        let idx = id.checked_sub(base + 1)?;
-        let item = self.tools.lock().unwrap().get(idx as usize).cloned()?;
+        // id 的基准和数组必须在同一临界区读：写入方裁剪时两者一起变化，
+        // 分两次取锁会把 N 错配成 N+1 的全文。
+        let item = {
+            let base = self.tool_base.lock().unwrap();
+            let tools = self.tools.lock().unwrap();
+            let idx = id.checked_sub(*base + 1)?;
+            tools.get(idx as usize)?.clone()
+        };
         let current = hub_lock(&self.session).clone();
         if item.str_at("session") != Some(current.as_str()) {
             return None;
@@ -1148,32 +1211,70 @@ fn matches_target(id: &str, target: Option<&str>) -> bool {
     }
 }
 
+/// 模型增量不直接进入浏览器：任意分片都可能跨回复/跨任务拼成凭据。
+///
+/// 只在收到首个增量时发一条固定提示；权威正文由 `assistant` 整条发布并经 Hub 脱敏。
+/// 提示是常量，不包含、也不缓存任何模型分片。
+/// 这不是渐进式脱敏的折中，而是从协议层取消“可拼接的模型原文分片”。
+const DELTA_SAFE_NOTICE: &str = "[模型正在生成；正文将在回复完成后安全显示]";
+
+#[derive(Default)]
 struct WebHooks {
     hub: Arc<Hub>,
+    /// 当前任务 ID：用户正文在 Journal 落账后随事件一起展示。
+    task_id: String,
     /// `ui serve --yes`：自动批准，不再等浏览器（脚本/演示用）
     auto_yes: bool,
+    /// 当前回复是否已发布固定提示；不缓存增量原文。
+    delta_notice_sent: bool,
+}
+
+impl WebHooks {
+    /// 首个模型增量发布固定提示；同一回复的后续增量不重复发布。
+    fn publish_delta_notice(&mut self) {
+        if self.delta_notice_sent {
+            return;
+        }
+        self.delta_notice_sent = true;
+        self.hub.push(Json::obj(vec![
+            ("type", Json::from("delta")),
+            ("text", Json::from(DELTA_SAFE_NOTICE)),
+        ]));
+    }
+
+    /// 事件边界结束当前预览；下一条回复可以重新显示固定提示。
+    fn flush_pending_delta(&mut self) {
+        self.delta_notice_sent = false;
+    }
+
+    /// 最终 assistant 事件是权威文本；临时提示不能抢在它前面重放一遍。
+    fn discard_pending_delta(&mut self) {
+        self.delta_notice_sent = false;
+    }
 }
 
 impl Hooks for WebHooks {
-    fn on_delta(&mut self, text: &str) {
-        // 逐字增量：页面先追加到当前气泡，最终的 assistant 事件会整段替换它。
-        if text.is_empty() {
-            return;
-        }
+    fn on_user(&mut self, text: &str) {
         self.hub.push(Json::obj(vec![
-            ("type", Json::from("delta")),
+            ("type", Json::from("user")),
+            ("taskId", Json::from(self.task_id.as_str())),
             ("text", Json::from(text)),
         ]));
+    }
+
+    fn on_delta(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.publish_delta_notice();
+        }
     }
 
     fn on_assistant(&mut self, text: &str) {
-        self.hub.push(Json::obj(vec![
-            ("type", Json::from("assistant")),
-            ("text", Json::from(text)),
-        ]));
+        self.discard_pending_delta();
+        self.hub.push_assistant(text);
     }
 
     fn on_snapshot(&mut self, snapshot: &Snapshot) {
+        self.flush_pending_delta();
         // 右栏「当前步」的数据源：分段 + 计价，和 journal 同一处产生。
         self.hub.push(Json::obj(vec![
             ("type", Json::from("snapshot")),
@@ -1201,6 +1302,7 @@ impl Hooks for WebHooks {
     }
 
     fn on_decision(&mut self, call_id: &str, tool: &str, decision: Decision, reason: &str) {
+        self.flush_pending_delta();
         self.hub.push(Json::obj(vec![
             ("type", Json::from("decision")),
             ("callId", Json::from(call_id)),
@@ -1211,22 +1313,29 @@ impl Hooks for WebHooks {
     }
 
     fn on_tool(&mut self, name: &str, _args: &Json, result: &ToolResult) {
-        let detail = result
-            .error
-            .clone()
-            .unwrap_or_else(|| result.content.lines().next().unwrap_or("").to_string());
-        // 完整输出单独存：列表里只发摘要，点开时再按 id 取
-        let id = self.hub.store_tool(name, result);
-        self.hub.push(Json::obj(vec![
+        self.flush_pending_delta();
+        let _serial = hub_lock(&self.hub.redaction_lock);
+        // 完整输出单独存：列表里只发摘要，点开时再按 id 取。摘要从已经
+        // 过门的全文派生，不再把同一份原始正文送进共享流第二次。
+        let (id, safe_text, safe_name, stream_hits) = self.hub.store_tool_redacted(name, result);
+        // 失败时优先展示已经过门的错误摘要；stdout 仍完整保存在 tools 全文里。
+        // 不能直接读 result.error，那会绕过 Journal/Hub 共用的脱敏流。
+        let detail = tool_summary_from_safe_text(&safe_text, result.ok);
+        let mut event = Json::obj(vec![
             ("type", Json::from("tool")),
-            ("name", Json::from(name)),
+            ("name", Json::from(safe_name.as_str())),
             ("ok", Json::Bool(result.ok)),
-            ("detail", Json::from(detail.trim())),
+            ("detail", Json::from(detail)),
             ("id", Json::from(id)),
-        ]));
+        ]);
+        // 结构字段只做静态检测；name/detail 已经是共享流的安全输出。
+        let static_hits = ui_core::secrets::redact_json(&mut event);
+        let redacted = stream_hits + static_hits;
+        self.hub.push_redacted(event, redacted);
     }
 
     fn on_budget(&mut self, tokens: u64, calls: u64) {
+        self.flush_pending_delta();
         self.hub.push(Json::obj(vec![
             ("type", Json::from("budget")),
             ("tokens", Json::from(tokens)),
@@ -1240,6 +1349,7 @@ impl Hooks for WebHooks {
     /// 只推 `kind` 与 `payload`，不带 seq/hash——页面要的是"发生了什么"，
     /// 链的完整性由 `ui verify` 负责。
     fn on_event(&mut self, event: &Json) {
+        self.flush_pending_delta();
         let kind = match event.str_at("kind") {
             Some(k) => k.to_string(),
             None => return,
@@ -1255,6 +1365,7 @@ impl Hooks for WebHooks {
     }
 
     fn on_compact(&mut self, before: u64, after: u64, dropped: usize) {
+        self.flush_pending_delta();
         self.hub.push(Json::obj(vec![
             ("type", Json::from("compact")),
             ("before", Json::from(before)),
@@ -1264,6 +1375,7 @@ impl Hooks for WebHooks {
     }
 
     fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
+        self.flush_pending_delta();
         if self.auto_yes {
             self.hub.push(Json::obj(vec![
                 ("type", Json::from("approved")),
@@ -1363,19 +1475,81 @@ impl WebHooks {
     }
 }
 
+/// 从已经过 Journal/Hub 脱敏门的合并正文派生列表摘要。
+/// 失败时优先展示 `[错误]` 段，避免 stdout 首行盖掉失败原因；空正文也不能
+/// 泄漏原始 error 或私档指针，只能给固定占位说明。
+fn tool_summary_from_safe_text(safe_text: &str, ok: bool) -> String {
+    let first_line = || {
+        safe_text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    if !ok {
+        if let Some((_, error)) = safe_text.rsplit_once("\n\n[错误] ") {
+            return error.lines().next().unwrap_or("").trim().to_string();
+        }
+        if safe_text.is_empty() {
+            return "工具执行失败（输出已脱敏扣留）".to_string();
+        }
+    }
+    first_line()
+}
+
 /// 把 journal 的事件翻译成页面消费的 UI 事件。
 ///
 /// 只翻译“聊天里需要看见”的四类：user / assistant / tool / turn。
 /// 审批、快照、预算等内部事件不重放，避免重连时伪造一张已经过期的审批卡。
-fn replay_journal_into_hub(hub: &Hub, path: &std::path::Path) {
+/// `preserve_stream=true` 时历史已经过 Journal 的门，只做静态展示，不能消耗
+/// 当前会话刚恢复的候选或 PEM 抑制状态。启动与切会话先从 Journal 恢复状态，
+/// 再走 true；false 只供直接重放旧日志的兼容测试使用。
+fn replay_journal_into_hub_mode(hub: &Hub, path: &std::path::Path, preserve_stream: bool) {
+    replay_journal_into_hub_impl(hub, path, preserve_stream, false);
+}
+
+/// 会话切换持有 `redaction_lock` 时重放历史，避免重新取锁造成死锁。
+fn replay_journal_into_hub_locked(hub: &Hub, path: &std::path::Path, preserve_stream: bool) {
+    replay_journal_into_hub_impl(hub, path, preserve_stream, true);
+}
+
+fn replay_journal_into_hub_impl(
+    hub: &Hub,
+    path: &std::path::Path,
+    preserve_stream: bool,
+    lock_held: bool,
+) {
     let events = match ui_core::Journal::read(path) {
         Ok((events, _)) => events,
         Err(_) => return,
+    };
+    let publish = |event: Json| {
+        if lock_held {
+            if preserve_stream {
+                hub.push_static_locked(event);
+            } else {
+                hub.push_locked(event);
+            }
+        } else if preserve_stream {
+            hub.push_static(event);
+        } else {
+            hub.push(event);
+        }
     };
     for event in events {
         let Some(kind) = event.str_at("kind") else {
             continue;
         };
+        if kind == "model/response" {
+            if let Some(text) = event.str_at("content").filter(|s| !s.is_empty()) {
+                publish(Json::obj(vec![
+                    ("type", Json::from("assistant")),
+                    ("text", Json::from(text)),
+                ]));
+            }
+            continue;
+        }
         let ui_event = match kind {
             "turn/start" => event.str_at("prompt").map(|text| {
                 Json::obj(vec![
@@ -1383,38 +1557,41 @@ fn replay_journal_into_hub(hub: &Hub, path: &std::path::Path) {
                     ("text", Json::from(text)),
                 ])
             }),
-            "model/response" => event.str_at("content").filter(|s| !s.is_empty()).map(|text| {
-                Json::obj(vec![
-                    ("type", Json::from("assistant")),
-                    ("text", Json::from(text)),
-                ])
-            }),
             "tool/output" => {
-                let detail = event
-                    .str_at("text")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
+                let ok = event.bool_at("ok").unwrap_or(true);
+                let detail = if !ok && event.str_at("withheld").is_some() {
+                    // 私档正文不进 Hub；重放只能显示固定失败占位，不能把私档
+                    // 文件指针当成失败原因发给页面。
+                    "工具执行失败（输出已按隐私清单扣留）".to_string()
+                } else {
+                    let text = event.str_at("text").unwrap_or("");
+                    let summary = tool_summary_from_safe_text(text, ok);
+                    if ok && summary.is_empty() {
                         event.str_at("file").map(|file| {
                             format!(
                                 "输出 {} 字，原文在 {}（需要时用 fs_read）",
                                 event.u64_at("chars").unwrap_or(0),
                                 file
                             )
-                        })
-                    })
-                    .unwrap_or_default();
+                        }).unwrap_or_default()
+                    } else {
+                        summary
+                    }
+                };
                 let clipped: String = detail.chars().take(4000).collect();
                 Some(Json::obj(vec![
                     ("type", Json::from("tool")),
                     ("name", Json::from(event.str_at("tool").unwrap_or("tool"))),
-                    ("ok", Json::Bool(event.bool_at("ok").unwrap_or(true))),
+                    ("ok", Json::Bool(ok)),
                     ("detail", Json::from(clipped.as_str())),
                 ]))
             }
             "turn/end" => Some(Json::obj(vec![
                 ("type", Json::from("turn")),
-                ("reason", Json::from(event.str_at("reason").unwrap_or("done"))),
+                (
+                    "reason",
+                    Json::from(event.str_at("reason").unwrap_or("done")),
+                ),
                 ("steps", Json::from(event.u64_at("steps").unwrap_or(0))),
                 ("calls", Json::from(event.u64_at("toolCalls").unwrap_or(0))),
             ])),
@@ -1426,12 +1603,15 @@ fn replay_journal_into_hub(hub: &Hub, path: &std::path::Path) {
                 ),
                 ("written", Json::from(event.u64_at("written").unwrap_or(0))),
                 ("removed", Json::from(event.u64_at("removed").unwrap_or(0))),
-                ("actor", Json::from(event.str_at("actor").unwrap_or("unknown"))),
+                (
+                    "actor",
+                    Json::from(event.str_at("actor").unwrap_or("unknown")),
+                ),
             ])),
             _ => None,
         };
         if let Some(event) = ui_event {
-            hub.push(event);
+            publish(event);
         }
     }
 }
@@ -1494,6 +1674,9 @@ pub fn serve(
     hub0.users = Mutex::new(users_loaded);
     hub0.epoch = ui_core::time::now_ms();
     let initial_session = session_arg.unwrap_or("default").to_string();
+    if !valid_session(&initial_session) {
+        return Err("拒绝使用非法或疑似凭据的会话名".to_string());
+    }
     *hub0.session.lock().unwrap() = initial_session.clone();
     let hub = Arc::new(hub0);
     // 页面事件源同样从 journal 恢复：否则 `ui serve` 一重启，日志还在，
@@ -1506,7 +1689,14 @@ pub fn serve(
             .switch_journal(&initial_path)
             .map_err(|e| format!("恢复初始会话失败: {}", e))?;
     }
-    replay_journal_into_hub(&hub, &initial_path);
+    let initial_key = journal_state_key(&initial_path);
+    let initial_snapshot = restore_hub_snapshot_from_journal(&initial_path)
+        .ok_or_else(|| "恢复初始会话的脱敏流状态失败（fail closed）".to_string())?;
+    *hub_lock(&hub.redaction_stream) = initial_snapshot.0.clone();
+    hub_lock(&hub.redaction_streams).insert(initial_key.clone(), initial_snapshot);
+    *hub_lock(&hub.redaction_path) = Some(initial_key);
+    // 历史已经过 Journal 的门；恢复威胁状态后只做静态展示，不能再次推进活动流。
+    replay_journal_into_hub_mode(&hub, &initial_path, true);
     // 通道只是「队列里有活」的信号：真正执行哪个任务以 hub.queue 为准，
     // 这样排队期间被取消（已从队列摘走）的任务不会被 worker 再捡起来。
     let (task_tx, task_rx) = channel::<WebTask>();
@@ -1534,18 +1724,27 @@ pub fn serve(
                 // 排队期间被撤掉的任务：这一轮压根不该开始——不烧预算、不叫模型。
                 // 但它**必须留下痕迹**：这条任务确实存在过、被撤掉了、为什么没跑。
                 // 只在 SSE 里喊一嗓子等于事后查不到，日志才是这套内核的账本。
-                for (id, text) in hub.take_skipped() {
-                    // 走 `log_event`，不走 `journal.append`：这里的 text 是
-                    // **人自己打的那句话**，排队时撤掉不等于它没外流过——
-                    // 实测直接把 AKIA… 写进了 journal.jsonl。
-                    let _ = agent.log_event(
-                        "turn/skipped",
-                        Json::obj(vec![
-                            ("task", Json::from(id.as_str())),
-                            ("reason", Json::from("cancelled-while-queued")),
-                            ("text", Json::from(text.as_str())),
-                        ]),
-                    );
+                // 每条任务入队时已记录原会话；补记前先切到该会话，绝不能写进
+                // 当前 UI 会话。相同会话相邻处理，保留跨事件脱敏状态。
+                let mut skipped = hub.take_skipped();
+                skipped.sort_by(|a, b| a.2.cmp(&b.2));
+                for (id, text, task_session) in skipped {
+                    if let Err(e) = append_skipped_audit(
+                        &mut agent,
+                        &hub,
+                        &id,
+                        &text,
+                        &task_session,
+                        "cancelled-while-queued",
+                    ) {
+                        eprintln!("{}", e);
+                        hub.push(Json::obj(vec![
+                            ("type", Json::from("error")),
+                            ("taskId", Json::from(id.as_str())),
+                            ("message", Json::from(e)),
+                        ]));
+                        return;
+                    }
                 }
                 // 队列为准：排队中被取消的任务已被 cancel_task 摘走，这里拿不到就是空闲。
                 let task = match hub.take_queued() {
@@ -1557,84 +1756,60 @@ pub fn serve(
                 // 会话切换跟着任务走：任务入队时记录了它属于哪个会话。
                 // 用全局 pending 值会把切换前排队的旧任务一起搬到新会话。
                 let task_session = task.session.clone();
-                if !task_session.is_empty()
-                    && task_session != *hub_lock(&hub.session)
-                {
-                    let path = session_file(&hub.workspace, &task_session);
-                    match agent.switch_journal(&path) {
-                        Ok(()) => {
-                            *hub_lock(&hub.session) = task_session.clone();
-                            // 只清掉与本次任务相同的 pending，避免把更晚的切换吞掉。
-                            let mut pending = hub_lock(&hub.pending_session);
-                            if pending.as_deref() == Some(task_session.as_str()) {
-                                *pending = None;
-                            }
-                            drop(pending);
-                            // 先清掉旧会话事件，再通知切会话，最后重放目标历史。
-                            // 顺序反了会让前端先清空、再被旧事件污染。
-                            hub.clear_log();
-                            hub.push(Json::obj(vec![
-                                ("type", Json::from("session-switched")),
-                                ("session", Json::from(task_session.as_str())),
-                            ]));
-                            replay_journal_into_hub(&hub, &path);
-                        }
-                        Err(e) => {
-                            *hub_lock(&hub.active) = None;
-                            hub.busy.store(false, Ordering::SeqCst);
-                            hub.push(Json::obj(vec![
-                                ("type", Json::from("error")),
-                                ("taskId", Json::from(task.id.as_str())),
-                                ("message", Json::from(format!("切换会话失败: {}", e))),
-                            ]));
-                            continue;
-                        }
-                    }
+                if let Err(e) = switch_agent_to_task_session(&mut agent, &hub, &task_session) {
+                    *hub_lock(&hub.active) = None;
+                    hub.busy.store(false, Ordering::SeqCst);
+                    hub.push(Json::obj(vec![
+                        ("type", Json::from("error")),
+                        ("taskId", Json::from(task.id.as_str())),
+                        ("message", Json::from(e)),
+                    ]));
+                    continue;
                 }
-                // 会话已经切到 task.session，现在发 user 事件；前端不会因为
-                // 随后的 session-switched 清空而丢掉第一条消息。
-                hub.push(Json::obj(vec![
-                    ("type", Json::from("user")),
-                    ("taskId", Json::from(task.id.as_str())),
-                    ("text", Json::from(task.text.as_str())),
-                ]));
                 // 刚认领就被撤：`take_queued` 已经把它记成 active，所以这一路也会走到这儿。
                 // 同样是"没开始"，账要照记，active 要清掉，否则停止按钮下次点到旧任务。
                 if task.cancel.is_cancelled() {
                     *hub_lock(&hub.active) = None;
-                    let _ = agent.log_event(
-                        "turn/skipped",
-                        Json::obj(vec![
-                            ("task", Json::from(task.id.as_str())),
-                            ("reason", Json::from("cancelled-on-claim")),
-                            (
-                                "text",
-                                Json::from(
-                                    task.text.chars().take(200).collect::<String>().as_str(),
-                                ),
-                            ),
-                        ]),
-                    );
+                    hub.busy.store(false, Ordering::SeqCst);
+                    if let Err(e) = append_skipped_audit(
+                        &mut agent,
+                        &hub,
+                        &task.id,
+                        &task.text,
+                        &task.session,
+                        "cancelled-on-claim",
+                    ) {
+                        eprintln!("{}", e);
+                        hub.push(Json::obj(vec![
+                            ("type", Json::from("error")),
+                            ("taskId", Json::from(task.id.as_str())),
+                            ("message", Json::from(e)),
+                        ]));
+                        return;
+                    }
                     hub.push(Json::obj(vec![
                         ("type", Json::from("task-cancelled")),
                         ("taskId", Json::from(task.id.as_str())),
                         ("stage", Json::from("queued")),
                     ]));
-                    hub.busy.store(false, Ordering::SeqCst);
                     continue;
                 }
                 // run 边界由 worker 划：预算、工具序号、会话审批规则、取消令牌
                 // 全部换成这一份任务自己的，上一任务留下的东西一样带不过来。
                 agent.begin_run_with_cancel(Some(task.cancel.clone()));
+                let mut hooks = WebHooks {
+                    hub: Arc::clone(&hub),
+                    task_id: task.id.clone(),
+                    auto_yes,
+                    ..Default::default()
+                };
                 // active 在 `take_queued` 里就登记了：认领与"可被停止"之间不留窗口。
                 hub.push(Json::obj(vec![
                     ("type", Json::from("task-started")),
                     ("taskId", Json::from(task.id.as_str())),
                 ]));
-                let mut hooks = WebHooks {
-                    hub: Arc::clone(&hub),
-                    auto_yes,
-                };
+                // 用户正文由 run_turn 在 turn/start 成功落账后通过 on_user 发布。
+                // 不能在这里先 push，否则崩溃重启会丢掉输入已建立的脱敏边界。
                 let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     agent.run_turn(&task.text, &mut hooks)
                 })) {
@@ -1642,6 +1817,7 @@ pub fn serve(
                     Err(_) => {
                         // 一个坏工具/坏插件/坏模型输出不能把整个 worker 带走。
                         // 清理 active/approval/busy，留下事件，继续接下一轮。
+                        hooks.flush_pending_delta();
                         *hub_lock(&hub.active) = None;
                         hub.clear_approval();
                         hub.busy.store(false, Ordering::SeqCst);
@@ -1653,6 +1829,9 @@ pub fn serve(
                         continue;
                     }
                 };
+                // 模型报错/取消/panic 可能没有 on_assistant 或 model/response 边界；
+                // 未发布的增量仍须整体脱敏后再补发，不能悄悄丢掉或留到下一轮。
+                hooks.flush_pending_delta();
                 *hub_lock(&hub.active) = None;
                 // 这一轮结束后不该再有人能回答它的审批
                 hub.clear_approval();
@@ -1735,8 +1914,10 @@ fn resolve_in_workspace(
     }
     // 名字过滤看的是 URL 里的段，符号链接能把一个安全名字指到受保护目录
     // （`notes/link -> ../secrets`）。canonicalize 之后必须按真实路径再判一次，
-    // 判据和工具侧共用同一个函数。
-    if ui_core::protected::is_private_path(&root, &path) {
+    // 判据和工具侧共用同一个函数；target/node_modules 的展示阻断也同样穿透别名。
+    if real_path_has_blocked_component(&root, &path)
+        || ui_core::protected::is_private_path(&root, &path)
+    {
         return Err("路径不允许".to_string());
     }
     Ok((rel, path))
@@ -1747,11 +1928,7 @@ fn resolve_in_workspace(
 /// `resolve_in_workspace` 已经挡住越界与反斜杠；这里再限制为单段，保持
 /// 「name 是包名，不是包内路径」的接口语义。
 fn valid_bundle_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 /// `/api/lab/run` 的 shell 平台。
@@ -1778,15 +1955,9 @@ impl LabShellPlatform {
 ///
 /// Windows 走 `cmd /C <command>`（没有 `sh`），其他平台走 `sh -c <command>`。
 /// 命令原文原样作为**一个**参数传入，不在这里做二次引号/转义。
-fn lab_shell_invocation(
-    platform: LabShellPlatform,
-    command: &str,
-) -> (&'static str, Vec<String>) {
+fn lab_shell_invocation(platform: LabShellPlatform, command: &str) -> (&'static str, Vec<String>) {
     match platform {
-        LabShellPlatform::Windows => (
-            "cmd",
-            vec!["/C".to_string(), command.to_string()],
-        ),
+        LabShellPlatform::Windows => ("cmd", vec!["/C".to_string(), command.to_string()]),
         LabShellPlatform::Unix => ("sh", vec!["-c".to_string(), command.to_string()]),
     }
 }
@@ -1813,6 +1984,19 @@ fn is_blocked_component(name: &str) -> bool {
     name.eq_ignore_ascii_case("target") || name.eq_ignore_ascii_case("node_modules")
 }
 
+/// canonicalize 之后仍要按真实路径的目录段判一次：`alias -> target` 的名字
+/// 本身安全，但点击它必须和直接写 `target/...` 得到同样的拒绝结果。
+fn real_path_has_blocked_component(workspace: &std::path::Path, path: &std::path::Path) -> bool {
+    let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let rel = real.strip_prefix(workspace).unwrap_or(&real);
+    rel.components().any(|component| match component {
+        std::path::Component::Normal(name) => {
+            name.to_str().map(is_blocked_component).unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
 /// 列目录时这个条目要不要藏起来。
 ///
 /// 名字能判的先按名字判（默认清单与单段声明都是名字型的），只有人追加过
@@ -1821,6 +2005,8 @@ fn is_blocked_component(name: &str) -> bool {
 /// `walk` 已经按同一形状做了，两边不一致的话「看得见」和「读得到」就分家了。
 fn blocked_entry(workspace: &std::path::Path, path: &std::path::Path, name: &str) -> bool {
     is_blocked_component(name)
+        // 别名名字安全但真实路径落在 target/node_modules 时，列表里也不能露出入口。
+        || real_path_has_blocked_component(workspace, path)
         // 文件级敏感名（`.env*`、私钥、证书）与工具读入口共用一份清单：
         // 浏览器里能看见的名字不该比模型能读到的更宽。按真实名字判，所以
         // `looks-safe.txt -> .env` 这类别名也不会出现在列表里。
@@ -2066,14 +2252,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             html(&mut stream, &page)
         }
         ("GET", "/api/ready") => {
-            let payload = hub
-                .ready
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or(Json::Null);
+            let payload = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
             let mut with_splash = payload;
             with_splash.set("splash", Json::Bool(hub.splash.load(Ordering::SeqCst)));
+            ui_core::secrets::redact_json(&mut with_splash);
             json_response(&mut stream, &with_splash.to_compact())
         }
         // 侧栏用的元信息：工具、技能、模式、工作区根
@@ -2099,13 +2281,14 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     ])
                 })
                 .collect::<Vec<_>>();
-            let meta = Json::obj(vec![
+            let mut meta = Json::obj(vec![
                 ("model", Json::from(ready.str_at("model").unwrap_or(""))),
                 ("workspace", Json::from(ws)),
                 ("budget", ready.get("budget").cloned().unwrap_or(Json::Null)),
                 ("tools", Json::Arr(tools)),
                 ("skills", Json::Arr(skills)),
             ]);
+            ui_core::secrets::redact_json(&mut meta);
             json_response(&mut stream, &meta.to_compact())
         }
         // 工作区文件树（只读）：与 /api/file 共用同一套路径校验。
@@ -2189,7 +2372,11 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 let _ = f.take(512 * 1024).read_to_end(&mut bytes);
             }
             let binary = bytes.contains(&0);
-            let text = if binary { String::new() } else { String::from_utf8_lossy(&bytes).to_string() };
+            let text = if binary {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&bytes).to_string()
+            };
             let out = Json::obj(vec![
                 ("ok", Json::Bool(true)),
                 ("path", Json::from(rel.as_str())),
@@ -2204,7 +2391,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         ("GET", "/api/lab/bundles") => {
             let list = crate::lab::list_bundles(&hub.bundles);
             let out = Json::obj(vec![
-                ("root", Json::from(hub.bundles.to_string_lossy().to_string())),
+                (
+                    "root",
+                    Json::from(hub.bundles.to_string_lossy().to_string()),
+                ),
                 ("bundles", Json::Arr(list)),
             ]);
             json_response(&mut stream, &out.to_compact())
@@ -2223,9 +2413,8 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Ok(_) => return json_response(&mut stream, &error_body("非法包名")),
                 Err(e) => return json_response(&mut stream, &error_body(&e)),
             };
-            let read = |f: &str| {
-                std::fs::read_to_string(dir.join(f)).unwrap_or_else(|_| String::new())
-            };
+            let read =
+                |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_else(|_| String::new());
             let out = Json::obj(vec![
                 ("name", Json::from(name.as_str())),
                 ("report", Json::from(read("report.md"))),
@@ -2237,7 +2426,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         // 实验室：跑一次（后台执行，结果用 SSE 通知，页面据事件刷新列表）
         ("POST", "/api/lab/run") => {
             if hub.bench.is_none() {
-                return json_response(&mut stream, "{\"ok\":false,\"reason\":\"未配置 --bench-cmd\"}");
+                return json_response(
+                    &mut stream,
+                    "{\"ok\":false,\"reason\":\"未配置 --bench-cmd\"}",
+                );
             }
             if hub
                 .lab_busy
@@ -2283,7 +2475,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
         // 会话：列表 / 切换 / 新建
         ("GET", "/api/sessions") => {
             let current = hub.session.lock().unwrap().clone();
-            json_response(&mut stream, &session_list(&hub.workspace, &current).to_compact())
+            json_response(
+                &mut stream,
+                &session_list(&hub.workspace, &current).to_compact(),
+            )
         }
         ("POST", "/api/session") => {
             let value = json::parse(body.trim()).unwrap_or(Json::Null);
@@ -2310,7 +2505,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path);
             *hub.pending_session.lock().unwrap() = Some(name);
             json_response(&mut stream, "{\"ok\":true}")
         }
@@ -2342,9 +2540,7 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 ),
             }
         }
-        ("GET", "/api/reviews") => {
-            json_response(&mut stream, &review_history(&hub).to_compact())
-        }
+        ("GET", "/api/reviews") => json_response(&mut stream, &review_history(&hub).to_compact()),
         ("GET", "/api/audit/export") => {
             let since = query
                 .split('&')
@@ -2375,9 +2571,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             Err(e) => admin_unavailable(&mut stream, &e),
         },
         ("GET", "/api/admin/users") => match effective_state(&hub) {
-            Ok((rbac, users, source)) => {
-                json_response(&mut stream, &users_payload(&users, source, &rbac).to_compact())
-            }
+            Ok((rbac, users, source)) => json_response(
+                &mut stream,
+                &users_payload(&users, source, &rbac).to_compact(),
+            ),
             Err(e) => admin_unavailable(&mut stream, &e),
         },
         ("PUT", "/api/admin/roles") => {
@@ -2417,29 +2614,28 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 .unwrap_or_else(|| "unknown".to_string());
             let roles_json = next.to_json().get("roles").cloned().unwrap_or(Json::Null);
             let intent_payload = Json::obj(vec![("roles", roles_json.clone())]);
-            let intent_seq = match audit_rbac(
-                &hub,
-                "rbac/role-update-intent",
-                &actor_id,
-                intent_payload,
-            ) {
-                Ok(seq) => seq,
-                Err(e) => {
-                    return json_response_status(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        &Json::obj(vec![
-                            ("ok", Json::Bool(false)),
-                            ("applied", Json::Bool(false)),
-                            (
-                                "error",
-                                Json::from(format!("角色矩阵未更新：审计 intent 写入失败: {}", e)),
-                            ),
-                        ])
-                        .to_compact(),
-                    )
-                }
-            };
+            let intent_seq =
+                match audit_rbac(&hub, "rbac/role-update-intent", &actor_id, intent_payload) {
+                    Ok(seq) => seq,
+                    Err(e) => {
+                        return json_response_status(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            &Json::obj(vec![
+                                ("ok", Json::Bool(false)),
+                                ("applied", Json::Bool(false)),
+                                (
+                                    "error",
+                                    Json::from(format!(
+                                        "角色矩阵未更新：审计 intent 写入失败: {}",
+                                        e
+                                    )),
+                                ),
+                            ])
+                            .to_compact(),
+                        )
+                    }
+                };
             if let Err(e) = persist_rbac(&hub, &next) {
                 let error_audit =
                     audit_admin_update_error(&hub, &actor_id, "roles", intent_seq, &e);
@@ -2487,7 +2683,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                         ("ok", Json::Bool(false)),
                         ("applied", Json::Bool(true)),
                         ("intentSeq", Json::from(intent_seq)),
-                        ("error", Json::from(format!("角色矩阵已更新，但审计失败: {}", e))),
+                        (
+                            "error",
+                            Json::from(format!("角色矩阵已更新，但审计失败: {}", e)),
+                        ),
                     ])
                     .to_compact(),
                 ),
@@ -2511,7 +2710,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 AdminCapability::Manage,
             ) {
                 Ok(perms) => perms,
-                Err(e) => return json_response_status(&mut stream, "403 Forbidden", &error_body(&e)),
+                Err(e) => {
+                    return json_response_status(&mut stream, "403 Forbidden", &error_body(&e))
+                }
             };
             let value = match json::parse(body.trim()) {
                 Ok(v) => v,
@@ -2524,9 +2725,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 }
             };
             if let Json::Obj(fields) = &value {
-                if let Some((key, _)) = fields.iter().find(|(k, _)| {
-                    !matches!(k.as_str(), "id" | "role" | "disabled" | "display")
-                }) {
+                if let Some((key, _)) = fields
+                    .iter()
+                    .find(|(k, _)| !matches!(k.as_str(), "id" | "role" | "disabled" | "display"))
+                {
                     return json_response_status(
                         &mut stream,
                         "400 Bad Request",
@@ -2686,29 +2888,28 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     payload.set("display", Json::from(display.as_str()));
                 }
             }
-            let intent_seq = match audit_rbac(
-                &hub,
-                "rbac/user-update-intent",
-                &actor_id,
-                payload.clone(),
-            ) {
-                Ok(seq) => seq,
-                Err(e) => {
-                    return json_response_status(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        &Json::obj(vec![
-                            ("ok", Json::Bool(false)),
-                            ("applied", Json::Bool(false)),
-                            (
-                                "error",
-                                Json::from(format!("用户表未更新：审计 intent 写入失败: {}", e)),
-                            ),
-                        ])
-                        .to_compact(),
-                    )
-                }
-            };
+            let intent_seq =
+                match audit_rbac(&hub, "rbac/user-update-intent", &actor_id, payload.clone()) {
+                    Ok(seq) => seq,
+                    Err(e) => {
+                        return json_response_status(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            &Json::obj(vec![
+                                ("ok", Json::Bool(false)),
+                                ("applied", Json::Bool(false)),
+                                (
+                                    "error",
+                                    Json::from(format!(
+                                        "用户表未更新：审计 intent 写入失败: {}",
+                                        e
+                                    )),
+                                ),
+                            ])
+                            .to_compact(),
+                        )
+                    }
+                };
             if let Err(e) = persist_users(&hub, &next) {
                 let error_audit =
                     audit_admin_update_error(&hub, &actor_id, "users", intent_seq, &e);
@@ -2760,7 +2961,9 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 AdminCapability::Manage,
             ) {
                 Ok(perms) => perms,
-                Err(e) => return json_response_status(&mut stream, "403 Forbidden", &error_body(&e)),
+                Err(e) => {
+                    return json_response_status(&mut stream, "403 Forbidden", &error_body(&e))
+                }
             };
             let id = query
                 .split('&')
@@ -2914,7 +3117,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                                 ("applied", Json::Bool(true)),
                                 (
                                     "error",
-                                    Json::from(format!("{}；文件已回退，但审计失败，需要人工补账", e)),
+                                    Json::from(format!(
+                                        "{}；文件已回退，但审计失败，需要人工补账",
+                                        e
+                                    )),
                                 ),
                             ])
                             .to_compact(),
@@ -2977,45 +3183,40 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 }
             };
             match ui_core::checkpoint::review(&hub.workspace, checkpoint, &accepted) {
-                Ok(mut out) => match audit_review(
-                    &hub,
-                    checkpoint,
-                    &accepted,
-                    &out,
-                    actor_id,
-                    intent_seq,
-                ) {
-                    Ok(seq) => {
-                        out.set("journalSeq", Json::from(seq));
-                        out.set("intentSeq", Json::from(intent_seq));
-                        hub.push(Json::obj(vec![
-                            ("type", Json::from("review")),
-                            ("checkpoint", Json::from(checkpoint)),
-                            ("written", Json::from(out.u64_at("written").unwrap_or(0))),
-                            ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
-                            ("journalSeq", Json::from(seq)),
-                            ("intentSeq", Json::from(intent_seq)),
-                        ]));
-                        json_response(&mut stream, &out.to_compact())
-                    }
-                    Err(e) => json_response_status(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        &Json::obj(vec![
-                            ("ok", Json::Bool(false)),
-                            ("applied", Json::Bool(true)),
-                            ("intentSeq", Json::from(intent_seq)),
-                            (
-                                "error",
-                                Json::from(format!(
+                Ok(mut out) => {
+                    match audit_review(&hub, checkpoint, &accepted, &out, actor_id, intent_seq) {
+                        Ok(seq) => {
+                            out.set("journalSeq", Json::from(seq));
+                            out.set("intentSeq", Json::from(intent_seq));
+                            hub.push(Json::obj(vec![
+                                ("type", Json::from("review")),
+                                ("checkpoint", Json::from(checkpoint)),
+                                ("written", Json::from(out.u64_at("written").unwrap_or(0))),
+                                ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
+                                ("journalSeq", Json::from(seq)),
+                                ("intentSeq", Json::from(intent_seq)),
+                            ]));
+                            json_response(&mut stream, &out.to_compact())
+                        }
+                        Err(e) => json_response_status(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            &Json::obj(vec![
+                                ("ok", Json::Bool(false)),
+                                ("applied", Json::Bool(true)),
+                                ("intentSeq", Json::from(intent_seq)),
+                                (
+                                    "error",
+                                    Json::from(format!(
                                     "{}；文件已写回，但结论审计失败，intent 已落账，需要人工补账",
                                     e
                                 )),
-                            ),
-                        ])
-                        .to_compact(),
-                    ),
-                },
+                                ),
+                            ])
+                            .to_compact(),
+                        ),
+                    }
+                }
                 Err(e) => {
                     let _ = audit_review_error(&hub, checkpoint, &e, actor_id, intent_seq);
                     json_response_status(
@@ -3167,7 +3368,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                 Cancelled::Queued(ids) => {
                     hub.push(Json::obj(vec![
                         ("type", Json::from("task-cancelled")),
-                        ("taskIds", Json::Arr(ids.iter().map(|i| Json::from(i.as_str())).collect())),
+                        (
+                            "taskIds",
+                            Json::Arr(ids.iter().map(|i| Json::from(i.as_str())).collect()),
+                        ),
                         ("stage", Json::from("queued")),
                     ]));
                     // 叫醒 worker 去补那笔「没跑」的账：不叫的话，最后一条被撤的消息
@@ -3199,8 +3403,8 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             match id.ok().and_then(|i| hub.tool(i)) {
                 Some(tool) => json_response(&mut stream, &tool.to_compact()),
                 None => {
-                    let _ = stream
-                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
                     Ok(())
                 }
             }
@@ -3243,7 +3447,10 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
             // 身份必须点名对上：旧实现谁答都算，于是「双击批准」= 批准两次，
             // 开着的老页面还能把答案投给下一张根本不同的审批卡。
             let reply = match hub.answer(approval_id, call_id, response.clone()) {
-                Answer::Accepted { approval_id, call_id } => {
+                Answer::Accepted {
+                    approval_id,
+                    call_id,
+                } => {
                     let mut reply = Json::obj(vec![
                         ("ok", Json::Bool(true)),
                         ("approvalId", Json::from(approval_id.as_str())),
@@ -3256,11 +3463,17 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>, task_tx: Sender<WebTask>) -> std
                     }
                     reply
                 }
-                Answer::Stale { expected_approval_id, expected_call_id } => {
+                Answer::Stale {
+                    expected_approval_id,
+                    expected_call_id,
+                } => {
                     let mut reply = Json::obj(vec![
                         ("ok", Json::Bool(false)),
                         ("reason", Json::from("stale")),
-                        ("expectedApprovalId", Json::from(expected_approval_id.as_str())),
+                        (
+                            "expectedApprovalId",
+                            Json::from(expected_approval_id.as_str()),
+                        ),
                         ("expectedCallId", Json::from(expected_call_id.as_str())),
                     ]);
                     // 认错人之外还可能认错词：两种失败都得当场说清，
@@ -3334,7 +3547,8 @@ fn disabled_account(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {
     stream.write_all(body.as_bytes())
 }
 
-fn unauthorized(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {    if api {
+fn unauthorized(stream: &mut TcpStream, api: bool) -> std::io::Result<()> {
+    if api {
         let body = "{\"error\":\"unauthorized\"}";
         let head = format!(
             "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -3365,7 +3579,9 @@ fn make_token() -> Result<String, String> {
     make_token_with(fill_random)
 }
 
-fn make_token_with(mut fill: impl FnMut(&mut [u8]) -> Result<(), String>) -> Result<String, String> {
+fn make_token_with(
+    mut fill: impl FnMut(&mut [u8]) -> Result<(), String>,
+) -> Result<String, String> {
     let mut bytes = [0u8; 16];
     fill(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
@@ -3379,7 +3595,8 @@ fn fill_random(buf: &mut [u8]) -> Result<(), String> {
 #[cfg(unix)]
 fn fill_random_from(path: &std::path::Path, buf: &mut [u8]) -> Result<(), String> {
     let mut f = std::fs::File::open(path).map_err(|e| format!("打开随机源失败: {}", e))?;
-    f.read_exact(buf).map_err(|e| format!("读取随机源失败: {}", e))
+    f.read_exact(buf)
+        .map_err(|e| format!("读取随机源失败: {}", e))
 }
 
 #[cfg(windows)]
@@ -3424,14 +3641,204 @@ fn valid_session(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && ui_core::secrets::find(name).is_empty()
 }
 
 fn session_file(ws: &std::path::Path, name: &str) -> std::path::PathBuf {
     if name == "default" {
         ws.join(".ui").join("journal.jsonl")
     } else {
-        ws.join(".ui").join("sessions").join(format!("{}.jsonl", name))
+        ws.join(".ui")
+            .join("sessions")
+            .join(format!("{}.jsonl", name))
     }
+}
+
+/// 补记一条从未开始的任务。切会话与写账任何一个失败都必须向上返回；
+/// worker 收到错误后停止，绝不能吞掉错误继续执行后面的任务。
+fn append_skipped_audit(
+    agent: &mut Agent,
+    hub: &Hub,
+    id: &str,
+    text: &str,
+    task_session: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let task_session = if task_session.is_empty() {
+        hub_lock(&hub.session).clone()
+    } else {
+        task_session.to_string()
+    };
+    let task_session = if task_session.is_empty() {
+        "default".to_string()
+    } else {
+        task_session
+    };
+    if !valid_session(&task_session) {
+        return Err("拒绝补记到非法或疑似凭据的会话名".to_string());
+    }
+    let path = session_file(&hub.workspace, &task_session);
+    if agent.journal_path() != path.as_path() {
+        agent
+            .switch_journal(&path)
+            .map_err(|e| format!("补记排队取消失败，拒绝写入其他会话: {}", e))?;
+    }
+    agent
+        .log_event(
+            "turn/skipped",
+            Json::obj(vec![
+                ("task", Json::from(id)),
+                ("session", Json::from(task_session.as_str())),
+                ("reason", Json::from(reason)),
+                ("text", Json::from(text)),
+            ]),
+        )
+        .map_err(|e| format!("补记排队取消写账失败，停止 worker: {}", e))
+}
+
+fn journal_state_key(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Journal 每条记录都带安全的最小威胁状态。Hub 重启或首次切换到某个会话时，
+/// 必须恢复它，再静态重放已经落账的历史；否则模型尾部会从空 Hub 流漏出去。
+fn restore_hub_snapshot_from_journal(
+    path: &std::path::Path,
+) -> Option<(ui_core::secrets::StreamRedactor, u64, String)> {
+    let (events, corrupt) = ui_core::Journal::read(path).ok()?;
+    if corrupt.is_some() {
+        return None;
+    }
+    let mut stream = ui_core::secrets::StreamRedactor::default();
+    let identity = if let Some(last) = events.last() {
+        stream
+            .restore_durable_state(last.str_at("redactionState")?)
+            .ok()?;
+        (
+            last.u64_at("seq").unwrap_or(0),
+            last.str_at("hash")?.to_string(),
+        )
+    } else {
+        (0, ui_core::journal::GENESIS.to_string())
+    };
+    Some((stream, identity.0, identity.1))
+}
+
+#[cfg(test)]
+fn restore_hub_stream_from_journal(
+    path: &std::path::Path,
+) -> Option<ui_core::secrets::StreamRedactor> {
+    restore_hub_snapshot_from_journal(path).map(|(stream, _, _)| stream)
+}
+
+/// 以 Agent 的实际 journal 和 Hub 当前会话共同决定是否切换。补记排队取消时
+/// Agent 可能已切到别的会话，只有 Hub 名称相等不足以证明落账目标正确。
+fn restore_target_hub_stream(
+    hub: &Hub,
+    path: &std::path::Path,
+    target: &ui_core::Journal,
+) -> Result<ui_core::secrets::StreamRedactor, AgentError> {
+    let target_key = journal_state_key(path);
+    let target_identity = target.stream_identity();
+    hub_lock(&hub.redaction_streams)
+        .get(&target_key)
+        .filter(|(_, seq, prev)| *seq == target_identity.0 && *prev == target_identity.1)
+        .map(|(stream, _, _)| stream.clone())
+        .or_else(|| {
+            restore_hub_snapshot_from_journal(path)
+                .filter(|(_, seq, prev)| *seq == target_identity.0 && *prev == target_identity.1)
+                .map(|(stream, _, _)| stream)
+        })
+        .ok_or_else(|| {
+            AgentError::Journal(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "恢复目标会话的脱敏流状态失败（fail closed）",
+            ))
+        })
+}
+
+/// 以 Agent 的实际 journal 和 Hub 当前会话共同决定是否切换。补记排队取消时
+/// Agent 可能已切到别的日志，只有 Hub 名称相等不足以证明落账目标正确。
+fn switch_agent_to_task_session(
+    agent: &mut Agent,
+    hub: &Hub,
+    task_session: &str,
+) -> Result<bool, String> {
+    switch_agent_to_task_session_with(agent, hub, task_session, |path, target| {
+        restore_target_hub_stream(hub, path, target)
+    })
+}
+
+fn switch_agent_to_task_session_with(
+    agent: &mut Agent,
+    hub: &Hub,
+    task_session: &str,
+    restore: impl FnOnce(
+        &std::path::Path,
+        &ui_core::Journal,
+    ) -> Result<ui_core::secrets::StreamRedactor, AgentError>,
+) -> Result<bool, String> {
+    if task_session.is_empty() {
+        return Ok(false);
+    }
+    if !valid_session(task_session) {
+        return Err("拒绝切换到非法或疑似凭据的会话名".to_string());
+    }
+    let path = session_file(&hub.workspace, task_session);
+    // 从读取当前会话到重放完目标历史，整段切换都与 Hub 发布串行。
+    // 否则并发 push 可能在旧状态克隆后更新真实流，随后被切换写回的旧快照覆盖。
+    let _serial = hub_lock(&hub.redaction_lock);
+    let current_session = hub_lock(&hub.session).clone();
+    if agent.journal_path() == path.as_path() && current_session == task_session {
+        return Ok(false);
+    }
+
+    // Agent 可能因排队取消补记而单独切到别的日志；此时它的 identity 不属于
+    // Hub 当前会话。无法证明对应关系时就放弃内存快照，回到目标日志的持久状态，
+    // 绝不能把旧 Hub 流绑到一个无关 Journal 位置上。
+    let current_path = hub_lock(&hub.redaction_path).clone();
+    let current_identity = current_path.as_ref().and_then(|current| {
+        (agent.journal_path() == current.as_path()).then(|| agent.journal.stream_identity())
+    });
+    let mut prepared: Option<(ui_core::secrets::StreamRedactor, std::path::PathBuf)> = None;
+
+    // 两阶段切换：Agent 先验证并打开目标日志，再调用这里的闭包准备 Hub 状态。
+    // 恢复失败时 Agent 尚未提交切换，Hub/session/log 也全部保持原样。
+    agent
+        .switch_journal_with(&path, |target| {
+            let target_key = journal_state_key(&path);
+            let restored = restore(&path, target)?;
+
+            if let (Some(current), Some((seq, prev))) =
+                (current_path.as_ref(), current_identity.as_ref())
+            {
+                let state = hub_lock(&hub.redaction_stream).clone();
+                hub_lock(&hub.redaction_streams)
+                    .insert(current.clone(), (state, *seq, prev.clone()));
+            }
+            prepared = Some((restored, target_key));
+            Ok::<(), AgentError>(())
+        })
+        .map_err(|e| format!("切换会话失败: {}", e))?;
+
+    let (restored, target_key) = prepared.expect("目标状态准备成功后才能提交切换");
+    *hub_lock(&hub.session) = task_session.to_string();
+    // 只清掉与本次任务相同的 pending，避免把更晚的切换吞掉。
+    let mut pending = hub_lock(&hub.pending_session);
+    if pending.as_deref() == Some(task_session) {
+        *pending = None;
+    }
+    drop(pending);
+    *hub_lock(&hub.redaction_stream) = restored;
+    *hub_lock(&hub.redaction_path) = Some(target_key);
+    hub.clear_log();
+    hub.push_locked(Json::obj(vec![
+        ("type", Json::from("session-switched")),
+        ("session", Json::from(task_session)),
+    ]));
+    // 同进程快照与跨进程持久状态都已恢复；历史只能静态展示。
+    replay_journal_into_hub_locked(hub, &path, true);
+    Ok(true)
 }
 
 /// 列出会话：名字、事件数、最后活动时间
@@ -3443,7 +3850,11 @@ fn audit_review_intent(
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let path = session_file(&hub.workspace, &session);
     let mut journal =
@@ -3473,7 +3884,11 @@ fn audit_review_error(
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let path = session_file(&hub.workspace, &session);
     let mut journal =
@@ -3502,7 +3917,11 @@ fn audit_review(
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let path = session_file(&hub.workspace, &session);
     let mut journal =
@@ -3516,10 +3935,7 @@ fn audit_review(
         ),
         ("written", Json::from(out.u64_at("written").unwrap_or(0))),
         ("removed", Json::from(out.u64_at("removed").unwrap_or(0))),
-        (
-            "backup",
-            out.get("backup").cloned().unwrap_or(Json::Null),
-        ),
+        ("backup", out.get("backup").cloned().unwrap_or(Json::Null)),
         ("intentSeq", Json::from(intent_seq)),
     ]);
     let event = journal
@@ -3531,7 +3947,11 @@ fn audit_review(
 fn review_history(hub: &Hub) -> Json {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let path = session_file(&hub.workspace, &session);
     let Ok((events, _)) = ui_core::Journal::read(&path) else {
@@ -3549,7 +3969,10 @@ fn review_history(hub: &Hub) -> Json {
             Json::obj(vec![
                 ("kind", Json::from(e.str_at("kind").unwrap_or(""))),
                 ("ts", Json::from(e.u64_at("ts").unwrap_or(0))),
-                ("checkpoint", Json::from(e.str_at("checkpoint").unwrap_or(""))),
+                (
+                    "checkpoint",
+                    Json::from(e.str_at("checkpoint").unwrap_or("")),
+                ),
                 ("path", Json::from(e.str_at("path").unwrap_or(""))),
                 ("actor", Json::from(e.str_at("actor").unwrap_or(""))),
                 ("written", Json::from(e.u64_at("written").unwrap_or(0))),
@@ -3571,7 +3994,11 @@ fn audit_revert(
 ) -> Result<u64, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let journal_path = session_file(&hub.workspace, &session);
     let mut journal =
@@ -3593,7 +4020,11 @@ fn audit_revert(
 fn audit_export(hub: &Hub, since: Option<u64>, limit: Option<usize>) -> Result<Json, String> {
     let session = {
         let s = hub_lock(&hub.session).clone();
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let path = session_file(&hub.workspace, &session);
     let (mut events, corrupt) =
@@ -3631,7 +4062,10 @@ fn audit_export(hub: &Hub, since: Option<u64>, limit: Option<usize>) -> Result<J
     );
     let hmac = hub.audit_hmac_key.as_deref().map(|key| {
         let bytes = ui_core::sha256::hmac_sha256(key.as_bytes(), signed.as_bytes());
-        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     });
     Ok(Json::obj(vec![
         ("version", Json::from(1u64)),
@@ -3882,7 +4316,10 @@ fn user_change_reply(
                 ("ok", Json::Bool(false)),
                 ("applied", Json::Bool(true)),
                 ("intentSeq", Json::from(intent_seq)),
-                ("error", Json::from(format!("用户表已更新，但审计失败: {}", e))),
+                (
+                    "error",
+                    Json::from(format!("用户表已更新，但审计失败: {}", e)),
+                ),
             ])
             .to_compact(),
         ),
@@ -3897,9 +4334,9 @@ fn ensure_owner_invariant(
 ) -> Result<(), String> {
     match roles.get("owner") {
         None => Err("角色矩阵必须保留 owner 角色（不能整表删除）".to_string()),
-        Some(perms) if !perms.manage => Err(
-            "owner 角色的 manage 必须为 true（不能清空 owner 的管理权限）".to_string(),
-        ),
+        Some(perms) if !perms.manage => {
+            Err("owner 角色的 manage 必须为 true（不能清空 owner 的管理权限）".to_string())
+        }
         Some(_) => Ok(()),
     }
 }
@@ -3968,6 +4405,10 @@ fn session_list(ws: &std::path::Path, current: &str) -> Json {
         names.push("default".to_string());
     }
     for name in names {
+        // 磁盘里的历史名字也要过同一道；非法/疑似凭据的名字不进 API 列表。
+        if !valid_session(&name) {
+            continue;
+        }
         let p = session_file(ws, &name);
         let events = std::fs::read_to_string(&p)
             .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
@@ -4023,7 +4464,8 @@ fn snapshot_page(hub: &Hub, limit: Option<usize>) -> String {
         lines.drain(0..start);
     }
     let boot = lines.join(",");
-    let ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
+    let mut ready = hub.ready.lock().unwrap().clone().unwrap_or(Json::Null);
+    ui_core::secrets::redact_json(&mut ready);
     let inject = format!(
         "<script>window.__UI_BOOT__=[{}];window.__UI_BUSY__={};window.__UI_READY__={};</script>\n</head>",
         script_safe_json(&boot),
@@ -4033,7 +4475,8 @@ fn snapshot_page(hub: &Hub, limit: Option<usize>) -> String {
     CHAT_HTML.replace("</head>", &inject)
 }
 
-fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {    let head = format!(
+fn html(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     );
@@ -4058,8 +4501,14 @@ fn pct_decode(s: &str) -> String {
                 out.push(b[i]);
                 i += 1;
             }
-            b'+' => { out.push(b' '); i += 1; }
-            c => { out.push(c); i += 1; }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
         }
     }
     String::from_utf8_lossy(&out).to_string()
@@ -4199,6 +4648,11 @@ fn sse(stream: &mut TcpStream, hub: Arc<Hub>, query: &str) -> std::io::Result<()
         }
     }
     stream.flush()?;
+    // 明确的订阅就绪注释：调用方可在此之后产生事件，区分实时推送与 backlog。
+    if write!(stream, ": ready\n\n").is_err() {
+        return Ok(());
+    }
+    stream.flush()?;
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(15)) {
@@ -4234,6 +4688,7 @@ mod tests {
         let mut hooks = WebHooks {
             hub: hub.clone(),
             auto_yes: true,
+            ..Default::default()
         };
         hooks.on_event(&Json::obj(vec![
             ("kind", Json::from("memory/used")),
@@ -4250,7 +4705,11 @@ mod tests {
         let log = hub.log.lock().unwrap();
         assert_eq!(log.len(), 1, "应当恰好推一条 SSE 事件");
         let line = &log[0].1;
-        assert!(line.contains("\"type\":\"journal\""), "类型应当是 journal: {}", line);
+        assert!(
+            line.contains("\"type\":\"journal\""),
+            "类型应当是 journal: {}",
+            line
+        );
         assert!(line.contains("memory/used"), "应当带 kind: {}", line);
         assert!(line.contains("m-abc123"), "应当带 payload: {}", line);
         assert!(!line.contains("hash"), "不该把链字段推给页面: {}", line);
@@ -4309,7 +4768,10 @@ mod tests {
         let hub = Hub::default();
         // 没有等待者：不能说成功
         assert!(
-            matches!(hub.answer("ap-1-0", "call-1", ApprovalResponse::allow_once()), Answer::Gone),
+            matches!(
+                hub.answer("ap-1-0", "call-1", ApprovalResponse::allow_once()),
+                Answer::Gone
+            ),
             "没有等待者时不能返回成功"
         );
         let (tx, rx) = channel::<ApprovalResponse>();
@@ -4320,7 +4782,10 @@ mod tests {
         });
         // 认错人：原审批必须被放回，继续等人，而不是被这一次点击消耗掉
         match hub.answer("ap-2-0", "call-9", ApprovalResponse::allow_session()) {
-            Answer::Stale { expected_approval_id, expected_call_id } => {
+            Answer::Stale {
+                expected_approval_id,
+                expected_call_id,
+            } => {
                 assert_eq!(expected_approval_id, "ap-1-0");
                 assert_eq!(expected_call_id, "call-1");
             }
@@ -4337,7 +4802,10 @@ mod tests {
         ));
         assert_eq!(rx.recv().unwrap(), ApprovalResponse::allow_session());
         assert!(
-            matches!(hub.answer("ap-1-0", "call-1", ApprovalResponse::deny()), Answer::Gone),
+            matches!(
+                hub.answer("ap-1-0", "call-1", ApprovalResponse::deny()),
+                Answer::Gone
+            ),
             "第二次回答必须失败"
         );
 
@@ -4349,7 +4817,10 @@ mod tests {
         });
         drop(rx);
         assert!(
-            matches!(hub.answer("ap-3-0", "call-3", ApprovalResponse::allow_once()), Answer::Gone),
+            matches!(
+                hub.answer("ap-3-0", "call-3", ApprovalResponse::allow_once()),
+                Answer::Gone
+            ),
             "接收端断开必须返回失败"
         );
     }
@@ -4376,11 +4847,289 @@ mod tests {
         }
 
         // 点开「展开」看到的全文是第二处，同样要抹
-        let id = hub.store_tool("shell", &ToolResult::ok(format!("cat .env\nKEY={}", CANARY)));
+        let id = hub
+            .store_tool_redacted(
+                "shell",
+                &ToolResult::ok(format!("cat .env\nKEY={}", CANARY)),
+            )
+            .0;
         let tools = hub.tools.lock().unwrap();
         let text = tools[(id - 1) as usize].str_at("text").unwrap_or("");
         assert!(!text.contains(CANARY), "工具全文库不能带明文：{}", text);
         assert!(text.contains("[REDACTED"), "应当替换成标记：{}", text);
+    }
+
+    #[test]
+    fn model_delta_text_never_reaches_sse_or_snapshot() {
+        const AWS_CANARY: &str = "AKIAWEBDELTATEST123456"; // allowlist secret（测试夹具，非真凭据）
+        const PEM_BODY: &str = "WEBPEMDELTATESTCANARY"; // allowlist secret（测试夹具，非真凭据）
+        let pem = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----", // allowlist secret（测试夹具，非真凭据）
+            PEM_BODY
+        );
+        let streamed = format!("before {} middle {} after", AWS_CANARY, pem);
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: true,
+            ..Default::default()
+        };
+
+        // 故意按 7 字节切开：AWS 前缀、私钥头、正文都会跨事件。
+        for chunk in streamed.as_bytes().chunks(7) {
+            hooks.on_delta(std::str::from_utf8(chunk).unwrap());
+        }
+        let before_boundary = hub.log.lock().unwrap().to_vec();
+        assert_eq!(before_boundary.len(), 1, "首个增量只发布一条固定提示");
+        assert!(before_boundary[0].1.contains(DELTA_SAFE_NOTICE));
+        assert!(!before_boundary[0].1.contains(&streamed));
+
+        hooks.on_event(&Json::obj(vec![
+            ("kind", Json::from("model/response")),
+            ("payload", Json::obj(vec![("content", Json::from("done"))])),
+        ]));
+        // 权威 assistant 仍走 Hub 的整体脱敏；delta 只允许固定安全提示。
+        hooks.on_assistant(&streamed);
+        let logged = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(logged.contains("\"type\":\"delta\""), "{}", logged);
+        assert!(logged.contains(DELTA_SAFE_NOTICE), "{}", logged);
+        assert!(logged.contains("[REDACTED:"), "{}", logged);
+        let delta_text = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .filter(|event| event.str_at("type") == Some("delta"))
+            .filter_map(|event| event.str_at("text").map(str::to_string))
+            .collect::<String>();
+        assert_eq!(delta_text, DELTA_SAFE_NOTICE, "delta 不能带模型正文");
+        assert!(
+            !logged.contains(AWS_CANARY),
+            "SSE 日志不能带 AWS 明文: {}",
+            logged
+        );
+        assert!(
+            !logged.contains(PEM_BODY),
+            "SSE 日志不能带 PEM 正文: {}",
+            logged
+        );
+
+        let snapshot = snapshot_page(&hub, None);
+        assert!(!snapshot.contains(AWS_CANARY), "可分享快照不能带 AWS 明文");
+        assert!(!snapshot.contains(PEM_BODY), "可分享快照不能带 PEM 正文");
+    }
+
+    #[test]
+    fn secret_split_across_tasks_cannot_be_reconstructed() {
+        const CANARY: &str = "AKIAWEBCROSSTASKTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let hub = Arc::new(Hub::default());
+        for chunk in [&CANARY[..4], &CANARY[4..]] {
+            let mut hooks = WebHooks {
+                hub: hub.clone(),
+                auto_yes: true,
+                ..Default::default()
+            };
+            hooks.on_delta(chunk);
+            hooks.on_budget(1, 1);
+        }
+        let logged = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(logged.matches(DELTA_SAFE_NOTICE).count(), 2, "{}", logged);
+        assert!(
+            !logged.contains(CANARY),
+            "跨任务分片也不能拼回明文: {}",
+            logged
+        );
+        assert!(
+            !logged.contains("AKIA"),
+            "AWS 前缀也不能出现在 delta: {}",
+            logged
+        );
+    }
+
+    #[test]
+    fn authoritative_assistant_replaces_the_safe_delta_notice() {
+        const CANARY: &str = "AKIAWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: true,
+            ..Default::default()
+        };
+        hooks.on_delta(&CANARY[..8]);
+        hooks.on_delta(&CANARY[8..]);
+        hooks.on_assistant("最终回复");
+
+        let log = hub.log.lock().unwrap();
+        assert_eq!(log.len(), 2, "固定提示与最终 assistant 各一条");
+        assert!(log[0].1.contains("\"type\":\"delta\""), "{}", log[0].1);
+        assert!(log[1].1.contains("\"type\":\"assistant\""), "{}", log[1].1);
+        assert!(
+            !log.iter().any(|(_, line)| line.contains(CANARY)),
+            "{}",
+            log[1].1
+        );
+    }
+
+    #[test]
+    fn model_error_boundary_emits_only_a_safe_notice() {
+        const CANARY: &str = "AKIAWEBERRORTEST123456"; // allowlist secret（测试夹具，非真凭据）
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            auto_yes: true,
+            ..Default::default()
+        };
+        hooks.on_delta(&CANARY[..9]);
+        hooks.on_delta(&CANARY[9..]);
+        hooks.flush_pending_delta();
+        hooks.flush_pending_delta();
+
+        let log = hub.log.lock().unwrap();
+        assert_eq!(log.len(), 1, "同一预览不能重复发布");
+        assert!(
+            !log[0].1.contains(CANARY),
+            "模型失败也不能带出明文: {}",
+            log[0].1
+        );
+        assert!(log[0].1.contains(DELTA_SAFE_NOTICE), "{}", log[0].1);
+    }
+
+    #[test]
+    fn assistant_stream_state_is_shared_across_tasks() {
+        const AWS: &str = "AKIAWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        const PEM_BODY: &str = "WEBASSISTANTPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        let hub = Arc::new(Hub::default());
+        for chunk in [&AWS[..12], &AWS[12..]] {
+            let mut hooks = WebHooks {
+                hub: hub.clone(),
+                auto_yes: true,
+                ..Default::default()
+            };
+            hooks.on_assistant(chunk);
+        }
+        let pem = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----", // allowlist secret（假私钥块）
+            PEM_BODY
+        ); // allowlist secret（测试夹具，非真凭据）
+        let split = pem.find(PEM_BODY).unwrap() + PEM_BODY.len() / 2;
+        for chunk in [&pem[..split], &pem[split..]] {
+            let mut hooks = WebHooks {
+                hub: hub.clone(),
+                auto_yes: true,
+                ..Default::default()
+            };
+            hooks.on_assistant(chunk);
+        }
+        let logged = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logged.contains(AWS),
+            "跨任务 assistant 不能拼回 AWS: {}",
+            logged
+        );
+        assert!(
+            !logged.contains("TANTTEST12"),
+            "AWS 尾片也不能单独泄漏: {}",
+            logged
+        );
+        assert!(
+            !logged.contains(PEM_BODY),
+            "跨任务 assistant 不能泄漏 PEM 正文: {}",
+            logged
+        );
+        assert!(
+            !logged.contains(&PEM_BODY[PEM_BODY.len() / 2..]),
+            "PEM 后半正文也不能单独泄漏: {}",
+            logged
+        );
+        assert!(logged.contains("[REDACTED:"), "{}", logged);
+    }
+
+    #[test]
+    fn tool_detail_and_full_output_share_cross_event_redaction_state() {
+        const TOKEN: &str = "abcd+efghijklmnopqrstuvwxyz"; // allowlist secret（测试夹具，非真凭据）
+        for full_first in [false, true] {
+            let hub = Hub::default();
+            let id = if full_first {
+                let id = hub
+                    .store_tool_redacted("shell", &ToolResult::ok("Bearer "))
+                    .0;
+                hub.push(Json::obj(vec![
+                    ("type", Json::from("tool")),
+                    ("detail", Json::from(TOKEN)),
+                ]));
+                id
+            } else {
+                hub.push(Json::obj(vec![
+                    ("type", Json::from("tool")),
+                    ("detail", Json::from("Bearer ")),
+                ]));
+                hub.store_tool_redacted("shell", &ToolResult::ok(TOKEN)).0
+            };
+            let full = hub.tool(id).unwrap().to_compact();
+            let logged = hub
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, line)| line.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!logged.contains(TOKEN), "SSE/backlog 拼回凭据: {}", logged);
+            assert!(!full.contains(TOKEN), "/api/tool 拼回凭据: {}", full);
+            assert!(
+                format!("{}\n{}", logged, full).contains("[REDACTED:auth header]"),
+                "logged={} full={}",
+                logged,
+                full
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_and_user_events_share_cross_event_redaction_state() {
+        const TOKEN: &str = "abcd+efghijklmnopqrstuvwxyz"; // allowlist secret（测试夹具，非真凭据）
+        let hub = Hub::default();
+        hub.push(Json::obj(vec![
+            ("type", Json::from("user")),
+            ("text", Json::from("Bearer ")),
+        ]));
+        hub.push_assistant(TOKEN);
+        let logged = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logged.contains(TOKEN),
+            "跨助手/用户出口拼回凭据: {}",
+            logged
+        );
+        assert!(logged.contains("[REDACTED:auth header]"), "{}", logged);
     }
 
     #[test]
@@ -4389,6 +5138,7 @@ mod tests {
         let mut hooks = WebHooks {
             hub: hub.clone(),
             auto_yes: false,
+            ..Default::default()
         };
         let req = ApprovalRequest {
             approval_id: "ap-7-0".into(),
@@ -4445,6 +5195,7 @@ mod tests {
         let mut hooks = WebHooks {
             hub: hub.clone(),
             auto_yes: false,
+            ..Default::default()
         };
         let req = ApprovalRequest {
             approval_id: "ap-8-0".into(),
@@ -4461,7 +5212,11 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(
-            hub.answer("ap-8-0", "call-43", ApprovalResponse::parse_verdict("yes-pls")),
+            hub.answer(
+                "ap-8-0",
+                "call-43",
+                ApprovalResponse::parse_verdict("yes-pls")
+            ),
             Answer::Accepted { .. }
         ));
         let answer = worker.join().unwrap();
@@ -4497,14 +5252,686 @@ mod tests {
             !first.cancel.is_cancelled(),
             "取消第二条绝不能把第一条也标成已取消"
         );
-        assert!(second.cancel.is_cancelled(), "撤掉的任务自己要带已取消的令牌");
+        assert!(
+            second.cancel.is_cancelled(),
+            "撤掉的任务自己要带已取消的令牌"
+        );
         // 撤掉的这笔必须留下账：worker 醒来时按它补 turn/skipped，
         // 否则日志里只能看到「没做」，分不清是撤了、丢了、还是根本没提交。
         let skipped = hub.take_skipped();
         assert_eq!(skipped.len(), 1, "排队取消要留下一笔账");
         assert_eq!(skipped[0].0, "t2");
         assert_eq!(skipped[0].1, "第二条", "账上得写清撤掉的是哪句话");
-        assert!(hub.take_skipped().is_empty(), "取走即清空：同一笔不能记两次");
+        assert_eq!(
+            skipped[0].2, "",
+            "测试 Hub 没有会话时保留空值，由 worker 归一化"
+        );
+        assert!(
+            hub.take_skipped().is_empty(),
+            "取走即清空：同一笔不能记两次"
+        );
+    }
+
+    #[test]
+    fn credential_shaped_session_names_are_rejected_and_not_listed() {
+        const SECRET_NAME: &str = "AKIAWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        assert!(!valid_session(SECRET_NAME));
+        assert!(valid_session("alpha-1"));
+        let ws = temp_workspace("session-name-redaction");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        std::fs::write(session_file(&ws, SECRET_NAME), "").unwrap();
+        let listed = session_list(&ws, "default").to_compact();
+        assert!(!listed.contains(SECRET_NAME), "{}", listed);
+    }
+
+    #[test]
+    fn queued_cancellation_keeps_the_tasks_original_session() {
+        let hub = Hub::default();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        let first = hub.new_task("A 会话".into());
+        *hub.pending_session.lock().unwrap() = Some("beta".to_string());
+        let second = hub.new_task("B 会话".into());
+        assert_eq!(first.session, "alpha");
+        assert_eq!(second.session, "beta");
+        hub.enqueue(&first);
+        hub.enqueue(&second);
+        assert!(matches!(hub.cancel_task(None), Cancelled::Queued(_)));
+        let skipped = hub.take_skipped();
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped
+            .iter()
+            .any(|(id, _, session)| id == "t1" && session == "alpha"));
+        assert!(skipped
+            .iter()
+            .any(|(id, _, session)| id == "t2" && session == "beta"));
+    }
+
+    #[test]
+    fn tool_summary_and_full_text_share_one_redaction_stream() {
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: Arc::clone(&hub),
+            ..Default::default()
+        };
+        hooks.on_tool("shell", &Json::Null, &ToolResult::ok("B"));
+        hooks.on_tool(
+            "shell",
+            &Json::Null,
+            &ToolResult::ok("earer abcd+efghijklmnopqrstuvwxyz"), // allowlist secret（测试夹具，非真凭据）
+        );
+
+        let full = hub
+            .tools
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item.str_at("text"))
+            .collect::<String>();
+        assert!(
+            !full.contains("Bearer abcd+efghijklmnopqrstuvwxyz"),
+            "{}",
+            full
+        ); // allowlist secret（测试夹具，非真凭据）
+        assert!(full.contains("[REDACTED:"), "{}", full);
+
+        let mut details = String::new();
+        for (_, line) in hub.log.lock().unwrap().iter() {
+            if let Ok(event) = ui_core::json::parse(line) {
+                if event.str_at("type") == Some("tool") {
+                    details.push_str(event.str_at("detail").unwrap_or(""));
+                }
+            }
+        }
+        assert!(
+            !details.contains("Bearer abcd+efghijklmnopqrstuvwxyz"),
+            "{}",
+            details
+        ); // allowlist secret（测试夹具，非真凭据）
+        assert!(details.contains("[REDACTED:"), "{}", details);
+    }
+
+    #[test]
+    fn failed_tool_summary_prefers_the_safe_error_and_keeps_full_stdout() {
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: Arc::clone(&hub),
+            ..Default::default()
+        };
+        hooks.on_tool(
+            "shell",
+            &Json::Null,
+            &ToolResult {
+                ok: false,
+                content: "stdout before failure".to_string(),
+                error: Some("退出码 7".to_string()),
+                meta: Json::Obj(vec![]),
+            },
+        );
+
+        let event = hub_lock(&hub.log)
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .find(|event| event.str_at("type") == Some("tool"))
+            .expect("必须发布工具摘要");
+        assert_eq!(event.str_at("detail"), Some("退出码 7"));
+        let full = hub_lock(&hub.tools)
+            .iter()
+            .filter_map(|item| item.str_at("text"))
+            .collect::<String>();
+        assert!(full.contains("stdout before failure"), "{}", full);
+        assert!(full.contains("退出码 7"), "{}", full);
+    }
+
+    #[test]
+    fn unknown_tool_names_share_the_full_output_redaction_stream() {
+        let hub = Arc::new(Hub::default());
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            ..WebHooks::default()
+        };
+        hooks.on_tool("AKI", &Json::Null, &ToolResult::ok("first"));
+        hooks.on_tool(
+            "AWEBASSISTANTTEST12", // allowlist secret（测试夹具，非真凭据）
+            &Json::Null,
+            &ToolResult::ok("second"),
+        );
+        let logged = hub_lock(&hub.log);
+        let names = logged
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .filter(|event| event.str_at("type") == Some("tool"))
+            .filter_map(|event| event.str_at("name").map(str::to_string))
+            .collect::<String>();
+        assert!(!names.contains("AKIAWEBASSISTANTTEST12"), "{}", names); // allowlist secret（测试夹具，非真凭据）
+        assert!(names.contains("[REDACTED:aws key]"), "{}", names);
+        let details = logged
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .filter(|event| event.str_at("type") == Some("tool"))
+            .filter_map(|event| event.str_at("detail").map(str::to_string))
+            .collect::<String>();
+        assert_eq!(details, "firstsecond");
+    }
+
+    #[test]
+    fn next_task_switches_back_when_skipped_audit_moved_the_agent_journal() {
+        let ws = temp_workspace("queued-session-repair");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let beta = session_file(&ws, "beta");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![Json::obj(vec![("content", Json::from("好了"))])]),
+            ),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let journal = ui_core::Journal::open(&alpha).unwrap();
+        let mut agent = Agent::new(
+            journal,
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        let hub = Arc::new(hub);
+
+        // 模拟 worker 补记 beta 的排队取消：Agent 已切走，Hub 名称仍是 alpha。
+        agent.switch_journal(&beta).unwrap();
+        agent
+            .log_event(
+                "turn/skipped",
+                Json::obj(vec![
+                    ("task", Json::from("cancelled-beta")),
+                    ("session", Json::from("beta")),
+                    ("text", Json::from("撤销的任务")),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(agent.journal_path(), beta.as_path());
+        assert_eq!(hub_lock(&hub.session).as_str(), "alpha");
+
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "alpha").unwrap());
+        assert_eq!(agent.journal_path(), alpha.as_path());
+        assert_eq!(hub_lock(&hub.session).as_str(), "alpha");
+        assert!(!switch_agent_to_task_session(&mut agent, &hub, "alpha").unwrap());
+        agent
+            .log_event(
+                "turn/start",
+                Json::obj(vec![("task", Json::from("next-alpha"))]),
+            )
+            .unwrap();
+
+        let alpha_text = std::fs::read_to_string(&alpha).unwrap_or_default();
+        let beta_text = std::fs::read_to_string(&beta).unwrap_or_default();
+        assert!(alpha_text.contains("next-alpha"), "{}", alpha_text);
+        assert!(!alpha_text.contains("cancelled-beta"), "{}", alpha_text);
+        assert!(beta_text.contains("cancelled-beta"), "{}", beta_text);
+        assert!(!beta_text.contains("next-alpha"), "{}", beta_text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_aliases_cannot_bypass_blocked_workspace_directories() {
+        let ws = temp_workspace("blocked-directory-alias");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/ok.txt"), "ok\n").unwrap();
+        for dir in ["target", "node_modules"] {
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+            std::fs::write(ws.join(dir).join("artifact.txt"), "blocked\n").unwrap();
+            let alias = ws.join(format!("alias-{}", dir));
+            std::os::unix::fs::symlink(ws.join(dir), &alias).unwrap();
+            assert!(resolve_in_workspace(&ws, &format!("{}/artifact.txt", dir)).is_err());
+            assert!(
+                resolve_in_workspace(&ws, alias.file_name().unwrap().to_str().unwrap()).is_err()
+            );
+            assert!(blocked_entry(
+                &ws,
+                &alias,
+                alias.file_name().unwrap().to_str().unwrap()
+            ));
+        }
+        assert!(resolve_in_workspace(&ws, "src/ok.txt").is_ok());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn failed_hub_preparation_keeps_agent_and_hub_on_the_current_session() {
+        const BODY: &str = "c2VjcmV0LWJvZHktdGVzdA==";
+        let ws = temp_workspace("hub-session-prepare-failure");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let journal = ui_core::Journal::open(&alpha).unwrap();
+        let mut agent = Agent::new(
+            journal,
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        *hub.redaction_path.lock().unwrap() = Some(journal_state_key(&alpha));
+        *hub.pending_session.lock().unwrap() = Some("gamma".to_string());
+        let hub = Arc::new(hub);
+        hub.push_assistant("-----BEGIN PRIVATE KEY-----"); // allowlist secret（测试夹具，非真凭据）
+        let before_log = hub_lock(&hub.log).clone();
+        let before_snapshots = hub_lock(&hub.redaction_streams).len();
+        let before_identity = agent.journal.stream_identity();
+
+        let error = switch_agent_to_task_session_with(&mut agent, &hub, "beta", |_, _| {
+            Err(AgentError::Journal(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "injected target restore failure",
+            )))
+        })
+        .unwrap_err();
+        assert!(error.contains("injected target restore failure"), "{}", error);
+        assert_eq!(agent.journal_path(), alpha.as_path());
+        assert_eq!(agent.journal.stream_identity(), before_identity);
+        assert_eq!(hub_lock(&hub.session).as_str(), "alpha");
+        assert_eq!(
+            hub_lock(&hub.redaction_path).as_deref(),
+            Some(journal_state_key(&alpha).as_path())
+        );
+        assert_eq!(
+            hub_lock(&hub.pending_session).as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(*hub_lock(&hub.log), before_log);
+        assert_eq!(hub_lock(&hub.redaction_streams).len(), before_snapshots);
+
+        // 准备失败不能清掉当前会话的活动威胁边界。
+        hub.push_assistant(BODY);
+        assert!(!hub_lock(&hub.log)
+            .iter()
+            .any(|(_, line)| line.contains(BODY)));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn hub_restores_pem_suppression_when_switching_back_to_a_session() {
+        const BODY: &str = "c2VjcmV0LWJvZHktdGVzdA==";
+        let ws = temp_workspace("hub-session-pem-state");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let journal = ui_core::Journal::open(&alpha).unwrap();
+        let mut agent = Agent::new(
+            journal,
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        *hub.redaction_path.lock().unwrap() = Some(journal_state_key(&alpha));
+        let hub = Arc::new(hub);
+
+        // 非空日志：旧实现会在切走后用 beta 的 identity 保存 alpha 的 Hub 流，
+        // 切回来时身份必失配，PEM 抑制状态被持久日志里的 clear 覆盖。
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from("neutral alpha event"))]),
+            )
+            .unwrap();
+        hub.push_assistant("-----BEGIN PRIVATE KEY-----"); // allowlist secret（测试夹具，非真凭据）
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "beta").unwrap());
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "alpha").unwrap());
+        hub.push_assistant(BODY);
+
+        let logged = hub
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!logged.contains(BODY), "{}", logged);
+    }
+
+    #[test]
+    fn hub_restart_restores_split_credential_state_from_the_journal() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = temp_workspace("hub-restart-credential-state");
+        let path = ws.join(".ui/journal.jsonl");
+        let mut journal = ui_core::Journal::open(&path).unwrap();
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(journal);
+
+        let hub = Arc::new(Hub::default());
+        *hub_lock(&hub.redaction_stream) =
+            restore_hub_stream_from_journal(&path).expect("必须恢复持久威胁状态");
+        replay_journal_into_hub_mode(&hub, &path, true);
+        hub.push_assistant(TAIL);
+        let logged = hub_lock(&hub.log)
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!logged.contains(TAIL), "Hub 重启后泄漏拆分凭据: {}", logged);
+        assert!(logged.contains("[REDACTED:aws key]"), "{}", logged);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn hub_restart_restores_pem_state_and_replay_does_not_consume_it() {
+        const BODY: &str = "WEBHUBRESTARTPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        let ws = temp_workspace("hub-restart-pem-state");
+        let path = ws.join(".ui/journal.jsonl");
+        let mut journal = ui_core::Journal::open(&path).unwrap();
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![(
+                    "content",
+                    Json::from("-----BEGIN PRIVATE KEY-----"), // allowlist secret（假私钥头）
+                )]),
+            )
+            .unwrap();
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("safe replay text"))]),
+            )
+            .unwrap();
+        drop(journal);
+
+        let hub = Arc::new(Hub::default());
+        *hub_lock(&hub.redaction_stream) =
+            restore_hub_stream_from_journal(&path).expect("必须恢复 PEM 状态");
+        replay_journal_into_hub_mode(&hub, &path, true);
+        hub.push_assistant(&format!("{}\n-----END PRIVATE KEY-----", BODY)); // allowlist secret（假私钥尾）
+        let logged = hub_lock(&hub.log)
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logged.contains(BODY),
+            "Hub 重启后泄漏 PEM 正文: {}",
+            logged
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn session_switch_restores_journal_state_without_an_in_process_snapshot() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = temp_workspace("hub-session-durable-state");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let beta = session_file(&ws, "beta");
+        let mut persisted = ui_core::Journal::open(&alpha).unwrap();
+        persisted
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(persisted);
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let mut agent = Agent::new(
+            ui_core::Journal::open(&beta).unwrap(),
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws;
+        *hub.session.lock().unwrap() = "beta".to_string();
+        *hub.redaction_path.lock().unwrap() = Some(journal_state_key(&beta));
+        let hub = Arc::new(hub);
+
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "alpha").unwrap());
+        hub.push_assistant(TAIL);
+        let logged = hub_lock(&hub.log)
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!logged.contains(TAIL), "跨进程会话状态恢复失败: {}", logged);
+    }
+
+    #[test]
+    fn session_switch_discards_a_snapshot_changed_by_another_writer() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = temp_workspace("hub-session-external-writer");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let mut agent = Agent::new(
+            ui_core::Journal::open(&alpha).unwrap(),
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        *hub.redaction_path.lock().unwrap() = Some(journal_state_key(&alpha));
+        let hub = Arc::new(hub);
+
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "beta").unwrap());
+        let mut external = ui_core::Journal::open(&alpha).unwrap();
+        external
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(external);
+        assert!(switch_agent_to_task_session(&mut agent, &hub, "alpha").unwrap());
+        hub.push_assistant(TAIL);
+
+        let logged = hub_lock(&hub.log)
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logged.contains(TAIL),
+            "旧会话快照覆盖跨进程状态: {}",
+            logged
+        );
+        assert!(logged.contains("[REDACTED:aws key]"), "{}", logged);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn hub_publishes_only_journal_safe_content_after_an_external_writer() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = temp_workspace("hub-live-external-writer");
+        let path = ws.join(".ui/journal.jsonl");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![Json::obj(vec![("content", Json::from(TAIL))])]),
+            ),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let mut agent = Agent::new(
+            ui_core::Journal::open(&path).unwrap(),
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut external = ui_core::Journal::open(&path).unwrap();
+        external
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(external);
+        let hub = Arc::new(Hub::default());
+        *hub_lock(&hub.session) = "alpha".to_string();
+        let mut hooks = WebHooks {
+            hub: hub.clone(),
+            ..Default::default()
+        };
+        agent.run_turn("continue", &mut hooks).unwrap();
+
+        let logged = hub_lock(&hub.log)
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logged.contains(TAIL),
+            "Hub 绕过了 Journal 已恢复的跨进程状态: {}",
+            logged
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn hub_push_waits_for_the_session_state_lock() {
+        let hub = Arc::new(Hub::default());
+        let serial = hub_lock(&hub.redaction_lock);
+        let (started_tx, started_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        let threaded = hub.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            threaded.push(Json::obj(vec![
+                ("type", Json::from("assistant")),
+                ("text", Json::from("AKI")),
+            ]));
+            done_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(hub_lock(&hub.log).is_empty());
+        drop(serial);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(hub_lock(&hub.log).len(), 1);
+    }
+
+    #[test]
+    fn session_switch_holds_the_state_lock_until_replay_finishes() {
+        let ws = temp_workspace("hub-session-switch-lock");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let mut agent = Agent::new(
+            ui_core::Journal::open(&alpha).unwrap(),
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws;
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        *hub.redaction_path.lock().unwrap() = Some(journal_state_key(&alpha));
+        let hub = Arc::new(hub);
+        let serial = hub_lock(&hub.redaction_lock);
+        let (started_tx, started_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        let threaded = hub.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = switch_agent_to_task_session(&mut agent, &threaded, "beta");
+            done_tx.send(result).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(hub_lock(&hub.session).as_str(), "alpha");
+        drop(serial);
+        let switched = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(switched);
+        worker.join().unwrap();
+        assert_eq!(hub_lock(&hub.session).as_str(), "beta");
+    }
+
+    #[test]
+    fn skipped_audit_write_failure_is_returned_to_the_worker() {
+        let ws = temp_workspace("queued-session-write-failure");
+        std::fs::create_dir_all(ws.join(".ui/sessions")).unwrap();
+        let alpha = session_file(&ws, "alpha");
+        // 目标“日志文件”其实是目录：switch_journal 必须失败，且不能转写别的会话。
+        std::fs::create_dir_all(session_file(&ws, "broken")).unwrap();
+        let scenario = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let model = ui_core::ScriptedModel::from_json(&scenario).unwrap();
+        let journal = ui_core::Journal::open(&alpha).unwrap();
+        let mut agent = Agent::new(
+            journal,
+            Box::new(model),
+            ws.clone(),
+            ui_core::Limits::default(),
+        );
+        let mut hub = Hub::default();
+        hub.workspace = ws.clone();
+        *hub.session.lock().unwrap() = "alpha".to_string();
+        let hub = Arc::new(hub);
+
+        let err = append_skipped_audit(
+            &mut agent,
+            &hub,
+            "cancelled-broken",
+            "不能丢的账",
+            "broken",
+            "cancelled-while-queued",
+        )
+        .unwrap_err();
+        assert!(err.contains("补记排队取消失败"), "{}", err);
+        assert_eq!(agent.journal_path(), alpha.as_path());
+        assert!(!std::fs::read_to_string(&alpha)
+            .unwrap_or_default()
+            .contains("不能丢的账"));
     }
 
     /// worker 认领任务与「本轮开始」之间不能有空窗：
@@ -4556,12 +5983,8 @@ mod tests {
         use std::sync::atomic::AtomicU64;
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ui-server-{}-{}-{}",
-            tag,
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ui-server-{}-{}-{}", tag, std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -4645,7 +6068,9 @@ mod tests {
         let (events, corrupt) =
             ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
         assert!(corrupt.is_none());
-        assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+        assert!(events
+            .iter()
+            .any(|e| e.str_at("kind") == Some("review/revert")));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -4655,8 +6080,10 @@ mod tests {
         std::fs::create_dir_all(ws.join(".ui")).unwrap();
         let path = ws.join(".ui").join("journal.jsonl");
         let mut j = ui_core::Journal::open(&path).unwrap();
-        j.append("note", Json::obj(vec![("text", Json::from("a"))])).unwrap();
-        j.append("note", Json::obj(vec![("text", Json::from("b"))])).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("a"))]))
+            .unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("b"))]))
+            .unwrap();
         drop(j);
 
         let hub = hub_for(&ws);
@@ -4682,7 +6109,8 @@ mod tests {
         std::fs::create_dir_all(ws.join(".ui")).unwrap();
         let path = ws.join(".ui").join("journal.jsonl");
         let mut j = ui_core::Journal::open(&path).unwrap();
-        j.append("note", Json::obj(vec![("text", Json::from("a"))])).unwrap();
+        j.append("note", Json::obj(vec![("text", Json::from("a"))]))
+            .unwrap();
         drop(j);
 
         let mut h = Hub::default();
@@ -4732,7 +6160,12 @@ mod tests {
             "owner@example.com",
             "owner",
         );
-        assert!(head.contains("200"), "owner 应能授予 owner: {} {}", head, out);
+        assert!(
+            head.contains("200"),
+            "owner 应能授予 owner: {} {}",
+            head,
+            out
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -4743,8 +6176,14 @@ mod tests {
         let (head, body) = http_get(hub, "/admin");
         assert!(head.contains("200 OK"), "{}", head);
         assert!(body.contains("管理面"), "admin page missing title");
-        assert!(body.contains("/api/audit/export"), "admin page missing audit link");
-        assert!(body.contains("/api/admin/rbac"), "admin page missing RBAC table");
+        assert!(
+            body.contains("/api/audit/export"),
+            "admin page missing audit link"
+        );
+        assert!(
+            body.contains("/api/admin/rbac"),
+            "admin page missing RBAC table"
+        );
         assert!(
             body.contains("id=\"roleMatrix\"") && body.contains("id=\"matrixSave\""),
             "admin page missing writable role matrix form"
@@ -4869,11 +6308,18 @@ mod tests {
             "a@example.com",
             "auditor",
         );
-        assert!(head.contains("200"), "auditor 应能读 RBAC: {} {}", head, body);
+        assert!(
+            head.contains("200"),
+            "auditor 应能读 RBAC: {} {}",
+            head,
+            body
+        );
         let parsed = json::parse(body.trim()).unwrap();
         let roles = parsed.get("roles").expect("roles");
         assert_eq!(
-            roles.bool_at("owner").or_else(|| roles.get("owner").and_then(|r| r.bool_at("manage"))),
+            roles
+                .bool_at("owner")
+                .or_else(|| roles.get("owner").and_then(|r| r.bool_at("manage"))),
             Some(true),
             "应返回角色矩阵: {}",
             body
@@ -4984,7 +6430,12 @@ mod tests {
             "alice@example.com",
             "viewer",
         );
-        assert!(head.contains("200"), "用户映射应抬到 operator: {} {}", head, out);
+        assert!(
+            head.contains("200"),
+            "用户映射应抬到 operator: {} {}",
+            head,
+            out
+        );
 
         // 反向也必须成立：头里写 owner，映射为 viewer 就只能读，管理面 403。
         let (head, _) = proxy_call(
@@ -5033,7 +6484,11 @@ mod tests {
             "owner@example.com",
             "owner",
         );
-        assert!(head.contains("503"), "损坏后读 RBAC 必须 fail closed: {}", head);
+        assert!(
+            head.contains("503"),
+            "损坏后读 RBAC 必须 fail closed: {}",
+            head
+        );
         let (head, _) = proxy_call(
             hub,
             "PUT",
@@ -5043,7 +6498,11 @@ mod tests {
             "owner@example.com",
             "owner",
         );
-        assert!(head.contains("503"), "损坏后写 RBAC 必须 fail closed: {}", head);
+        assert!(
+            head.contains("503"),
+            "损坏后写 RBAC 必须 fail closed: {}",
+            head
+        );
 
         // 结构合法但字段类型错误，同样拒绝。
         std::fs::write(
@@ -5133,8 +6592,8 @@ mod tests {
 
         let rbac_text = std::fs::read_to_string(ws.join(".ui").join("rbac.json")).unwrap();
         assert!(!rbac_text.contains(secret), "rbac.json 不得写进代理密钥");
-        let journal_text = std::fs::read_to_string(ws.join(".ui").join("journal.jsonl"))
-            .unwrap_or_default();
+        let journal_text =
+            std::fs::read_to_string(ws.join(".ui").join("journal.jsonl")).unwrap_or_default();
         assert!(
             journal_text.contains("rbac/user-update") && journal_text.contains("rbac/role-update"),
             "两类变更都要落审计"
@@ -5198,12 +6657,29 @@ mod tests {
             "alice@example.com",
             "viewer",
         );
-        assert!(head.contains("200"), "users.json 应抬到 operator: {} {}", head, out);
+        assert!(
+            head.contains("200"),
+            "users.json 应抬到 operator: {} {}",
+            head,
+            out
+        );
 
         // bob 在 users.json 里 disabled：头里写 owner 也只能拿到 403。
-        for path in ["/api/state", "/api/admin/rbac", "/api/admin/users", "/admin"] {
-            let (head, body) =
-                proxy_call(hub.clone(), "GET", path, "", secret, "bob@example.com", "owner");
+        for path in [
+            "/api/state",
+            "/api/admin/rbac",
+            "/api/admin/users",
+            "/admin",
+        ] {
+            let (head, body) = proxy_call(
+                hub.clone(),
+                "GET",
+                path,
+                "",
+                secret,
+                "bob@example.com",
+                "owner",
+            );
             assert!(
                 head.contains("403"),
                 "disabled 用户访问 {} 必须 403: {} {}",
@@ -5251,7 +6727,13 @@ mod tests {
                 "owner@example.com",
                 "owner",
             );
-            assert!(head.contains("503"), "{} 必须 fail closed: {} {}", method, head, out);
+            assert!(
+                head.contains("503"),
+                "{} 必须 fail closed: {} {}",
+                method,
+                head,
+                out
+            );
         }
 
         // 结构错误（未知角色 / 非布尔 disabled / 未知字段）同样 fail closed。
@@ -5302,7 +6784,12 @@ mod tests {
             "a@example.com",
             "auditor",
         );
-        assert!(head.contains("200"), "auditor 应能读用户表: {} {}", head, body);
+        assert!(
+            head.contains("200"),
+            "auditor 应能读用户表: {} {}",
+            head,
+            body
+        );
         let parsed = json::parse(body.trim()).unwrap();
         assert_eq!(parsed.str_at("source"), Some(".ui/rbac.json#users"));
         assert!(parsed.arr_at("users").is_some());
@@ -5328,10 +6815,22 @@ mod tests {
             "admin@example.com",
             "admin",
         );
-        assert!(head.contains("200"), "admin 应能写用户表: {} {}", head, body);
+        assert!(
+            head.contains("200"),
+            "admin 应能写用户表: {} {}",
+            head,
+            body
+        );
         let parsed = json::parse(body.trim()).unwrap();
-        assert!(parsed.u64_at("journalSeq").is_some(), "响应应带 journalSeq: {}", body);
-        assert!(ws.join(".ui").join("users.json").exists(), "变更必须落 users.json");
+        assert!(
+            parsed.u64_at("journalSeq").is_some(),
+            "响应应带 journalSeq: {}",
+            body
+        );
+        assert!(
+            ws.join(".ui").join("users.json").exists(),
+            "变更必须落 users.json"
+        );
 
         // /api/state 的 perms 让页面不用自己猜权限。
         let (_, state) = proxy_call(
@@ -5366,7 +6865,12 @@ mod tests {
             "admin@example.com",
             "admin",
         );
-        assert!(head.contains("403"), "admin 不能授予 owner: {} {}", head, body);
+        assert!(
+            head.contains("403"),
+            "admin 不能授予 owner: {} {}",
+            head,
+            body
+        );
 
         // manage 管普通用户没问题。
         let (head, body) = proxy_call(
@@ -5378,7 +6882,12 @@ mod tests {
             "admin@example.com",
             "admin",
         );
-        assert!(head.contains("200"), "admin 应能管普通用户: {} {}", head, body);
+        assert!(
+            head.contains("200"),
+            "admin 应能管普通用户: {} {}",
+            head,
+            body
+        );
 
         // owner 亲自授予之后，admin 也不能改 / 删 / 停用这条 owner 记录。
         let (head, body) = proxy_call(
@@ -5390,7 +6899,12 @@ mod tests {
             "root@example.com",
             "owner",
         );
-        assert!(head.contains("200"), "owner 应能授予 owner: {} {}", head, body);
+        assert!(
+            head.contains("200"),
+            "owner 应能授予 owner: {} {}",
+            head,
+            body
+        );
         for body_json in [
             r#"{"id":"alice@example.com","role":"operator"}"#,
             r#"{"id":"alice@example.com","disabled":true}"#,
@@ -5404,7 +6918,13 @@ mod tests {
                 "admin@example.com",
                 "admin",
             );
-            assert!(head.contains("403"), "admin 不能改 owner: {} {} {}", head, body_json, out);
+            assert!(
+                head.contains("403"),
+                "admin 不能改 owner: {} {} {}",
+                head,
+                body_json,
+                out
+            );
         }
         let (head, out) = proxy_call(
             hub.clone(),
@@ -5427,7 +6947,12 @@ mod tests {
             "root@example.com",
             "owner",
         );
-        assert!(head.contains("200"), "owner 应能删除 owner: {} {}", head, out);
+        assert!(
+            head.contains("200"),
+            "owner 应能删除 owner: {} {}",
+            head,
+            out
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -5460,7 +6985,11 @@ mod tests {
         assert_eq!(rows[0].str_at("role"), Some("operator"));
         assert_eq!(rows[0].bool_at("disabled"), Some(true));
         assert_eq!(rows[0].str_at("display"), Some("Alice"));
-        assert!(file.get("users").is_some() && file.get("roles").is_none(), "users.json 只存用户表: {}", text);
+        assert!(
+            file.get("users").is_some() && file.get("roles").is_none(),
+            "users.json 只存用户表: {}",
+            text
+        );
 
         // 审计：action=disable，且不写代理密钥。
         let journal = std::fs::read_to_string(ws.join(".ui").join("journal.jsonl")).unwrap();
@@ -5749,7 +7278,12 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("释放管理写锁后请求应完成");
         worker.join().unwrap();
-        assert!(head.contains("403"), "降权后写请求必须 403: {} {}", head, body);
+        assert!(
+            head.contains("403"),
+            "降权后写请求必须 403: {} {}",
+            head,
+            body
+        );
         assert!(
             body.contains("等待管理写锁"),
             "必须是锁内二次鉴权拦下（而不是入口预检）: {}",
@@ -5820,7 +7354,12 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("释放管理写锁后请求应完成");
         worker.join().unwrap();
-        assert!(head.contains("403"), "降权后写请求必须 403: {} {}", head, body);
+        assert!(
+            head.contains("403"),
+            "降权后写请求必须 403: {} {}",
+            head,
+            body
+        );
         assert!(
             body.contains("等待管理写锁"),
             "必须是锁内二次鉴权拦下（而不是入口预检）: {}",
@@ -6155,7 +7694,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-
     #[test]
     fn trusted_proxy_requires_actor_and_write_role() {
         let ws = temp_workspace("m1");
@@ -6193,13 +7731,21 @@ mod tests {
             hub.clone(),
             "POST /api/say HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nX-UI-Proxy-Secret: proxy-secret-1\r\nX-UI-User: o@example.com\r\nX-UI-Roles: operator\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
         );
-        assert!(operator.0.contains("200"), "operator 应能写: {}", operator.0);
+        assert!(
+            operator.0.contains("200"),
+            "operator 应能写: {}",
+            operator.0
+        );
 
         let auditor = http_request(
             hub,
             "GET /api/reviews HTTP/1.1\r\nHost: test\r\nX-UI-Proxy-Secret: proxy-secret-1\r\nX-UI-User: a@example.com\r\nX-UI-Roles: auditor\r\nConnection: close\r\n\r\n",
         );
-        assert!(auditor.0.contains("200"), "auditor 应能读审计: {}", auditor.0);
+        assert!(
+            auditor.0.contains("200"),
+            "auditor 应能读审计: {}",
+            auditor.0
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -6265,7 +7811,11 @@ mod tests {
                 .filter(|(_, line)| line.contains(proxy_value))
                 .map(|(n, _)| *n)
                 .collect();
-            assert!(leaked.is_empty(), "事件里不得出现代理密钥，命中 seq={:?}", leaked);
+            assert!(
+                leaked.is_empty(),
+                "事件里不得出现代理密钥，命中 seq={:?}",
+                leaked
+            );
         }
         let jp = ws.join(".ui").join("journal.jsonl");
         let text = std::fs::read_to_string(&jp).unwrap_or_default();
@@ -6291,10 +7841,7 @@ mod tests {
             .unwrap_or(false));
 
         std::fs::write(ws.join("a.txt"), "one\nTWO\n").unwrap();
-        let (head, diff) = http_get(
-            hub.clone(),
-            &format!("/api/diff?checkpoint={}", id),
-        );
+        let (head, diff) = http_get(hub.clone(), &format!("/api/diff?checkpoint={}", id));
         assert!(head.contains("200 OK"), "{}", head);
         let report = ui_core::json::parse(diff.trim()).unwrap();
         let hunk = report
@@ -6312,7 +7859,10 @@ mod tests {
         );
         let (head, out) = http_post(hub.clone(), "/api/review", &body);
         assert!(head.contains("200 OK"), "{} {}", head, out);
-        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "one\nTWO\n");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+            "one\nTWO\n"
+        );
         let (head, history) = http_get(hub.clone(), "/api/reviews");
         assert!(head.contains("200 OK"), "{}", head);
         let rows = ui_core::json::parse(history.trim()).unwrap();
@@ -6324,7 +7874,9 @@ mod tests {
             ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
         assert!(corrupt.is_none(), "review 审计日志不该损坏");
         assert!(
-            events.iter().any(|e| e.str_at("kind") == Some("review/apply")),
+            events
+                .iter()
+                .any(|e| e.str_at("kind") == Some("review/apply")),
             "review 必须写进 journal 审计链"
         );
         let intent = events
@@ -6376,7 +7928,11 @@ mod tests {
             "/api/approve",
             r#"{"verdict":"allow","approvalId":"ap-0-9","callId":"call-0"}"#,
         );
-        assert!(out.contains("\"reason\":\"stale\""), "认错人要能分辨: {}", out);
+        assert!(
+            out.contains("\"reason\":\"stale\""),
+            "认错人要能分辨: {}",
+            out
+        );
         assert!(
             out.contains("\"expectedApprovalId\":\"ap-1-0\""),
             "要告诉页面当前是哪张卡: {}",
@@ -6412,7 +7968,11 @@ mod tests {
             r#"{"verdict":"always","approvalId":"ap-2-0","callId":"call-2"}"#,
         );
         assert!(out.contains("\"ok\":true"), "{}", out);
-        assert!(out.contains("\"scope\":\"session\""), "作用域必须回显: {}", out);
+        assert!(
+            out.contains("\"scope\":\"session\""),
+            "作用域必须回显: {}",
+            out
+        );
         assert_eq!(rx.recv().unwrap(), ApprovalResponse::allow_session());
 
         // 认错人时也要说清用的是哪个词——否则页面只显示"没批下来"，
@@ -6461,7 +8021,10 @@ mod tests {
         assert!(out.contains("\"verdict\":\"deny\""), "{}", out);
         assert!(out.contains("note"), "缺 verdict 也要说明: {}", out);
         // 账本上还得更正"是谁替人做的决定"：没人答 ≠ 有人说了不。
-        assert_eq!(rx.recv().unwrap(), ApprovalResponse::deny().via("unknown-word"));
+        assert_eq!(
+            rx.recv().unwrap(),
+            ApprovalResponse::deny().via("unknown-word")
+        );
     }
 
     #[test]
@@ -6471,7 +8034,11 @@ mod tests {
         let ws = temp_workspace("cancel-route");
         let hub = hub_for(&ws);
         let (_head, out) = http_post(hub.clone(), "/api/cancel", "{}");
-        assert!(out.contains("\"ok\":false"), "空闲时不该谎称停了什么: {}", out);
+        assert!(
+            out.contains("\"ok\":false"),
+            "空闲时不该谎称停了什么: {}",
+            out
+        );
         assert!(out.contains("idle"), "{}", out);
 
         let first = hub.new_task("第一条".into());
@@ -6492,8 +8059,16 @@ mod tests {
         let third = hub.new_task("第三条".into());
         hub.enqueue(&third);
         let (_head, state) = http_get(hub, "/api/state");
-        assert!(state.contains("\"taskId\":null"), "空闲时不该有在跑的任务: {}", state);
-        assert!(state.contains("\"queued\":[\"t3\"]"), "排队列表要能看见: {}", state);
+        assert!(
+            state.contains("\"taskId\":null"),
+            "空闲时不该有在跑的任务: {}",
+            state
+        );
+        assert!(
+            state.contains("\"queued\":[\"t3\"]"),
+            "排队列表要能看见: {}",
+            state
+        );
     }
 
     /// 清单是进程级共享状态，而 `cargo test` 多线程跑用例：碰它的那个用例
@@ -6525,14 +8100,23 @@ mod tests {
             "/api/tree?path=vendor%2Fkeys%2Fdeploy.pem",
         ] {
             let (_head, body) = http_get(hub.clone(), target);
-            assert!(body.contains("\"error\""), "{} 应当被拒绝: {}", target, body);
+            assert!(
+                body.contains("\"error\""),
+                "{} 应当被拒绝: {}",
+                target,
+                body
+            );
             assert!(!body.contains("PRIV"), "{} 泄露了内容: {}", target, body);
         }
 
         // 父目录的列表里不能出现 `keys`：名字本身是信息，而且点了就该 404
         let (head, body) = http_get(hub.clone(), "/api/tree?path=vendor");
         assert!(head.contains("200 OK"), "{}", head);
-        assert!(!body.contains("keys"), "列表里露出了声明的隐私目录: {}", body);
+        assert!(
+            !body.contains("keys"),
+            "列表里露出了声明的隐私目录: {}",
+            body
+        );
         assert!(
             body.contains("licenses"),
             "同级的正常目录被误伤了: {}",
@@ -6570,7 +8154,12 @@ mod tests {
             "/api/tree?path=..%2F..%2Fetc",
         ] {
             let (_head, body) = http_get(hub_for(&ws), target);
-            assert!(body.contains("\"error\""), "{} 应当被拒绝: {}", target, body);
+            assert!(
+                body.contains("\"error\""),
+                "{} 应当被拒绝: {}",
+                target,
+                body
+            );
             assert!(
                 !body.contains("token.txt"),
                 "{} 泄露了 secrets: {}",
@@ -6620,7 +8209,11 @@ mod tests {
         std::fs::write(ws.join("Secrets").join("token.txt"), "s3cr3t-caps").unwrap();
         // .ui 里是整轮提示词与工具结果——它是隐私边界，不是"隐藏目录"。
         std::fs::create_dir_all(ws.join(".ui")).unwrap();
-        std::fs::write(ws.join(".ui").join("journal.jsonl"), "{\"kind\":\"prompt/snapshot\"}").unwrap();
+        std::fs::write(
+            ws.join(".ui").join("journal.jsonl"),
+            "{\"kind\":\"prompt/snapshot\"}",
+        )
+        .unwrap();
         // target/node_modules 只是噪音，但走的是同一个判据，不能有旁路。
         std::fs::create_dir_all(ws.join("target")).unwrap();
         std::fs::write(ws.join("target").join("build.txt"), "artifact").unwrap();
@@ -6645,8 +8238,18 @@ mod tests {
             "/api/file?path=src%2F..%2F..%2Fetc%2Fpasswd",
         ] {
             let (_head, body) = http_get(hub_for(&ws), target);
-            assert!(body.contains("\"ok\":false"), "{} 应被拒绝: {}", target, body);
-            assert!(!body.contains("s3cr3t"), "{} 泄露了 secrets: {}", target, body);
+            assert!(
+                body.contains("\"ok\":false"),
+                "{} 应被拒绝: {}",
+                target,
+                body
+            );
+            assert!(
+                !body.contains("s3cr3t"),
+                "{} 泄露了 secrets: {}",
+                target,
+                body
+            );
             assert!(
                 !body.contains("prompt/snapshot"),
                 "{} 泄露了内核日志: {}",
@@ -6656,7 +8259,14 @@ mod tests {
         }
         // 根列表同理：名字本身也是信息——"这里有 .ui/有 journal"已经泄了一半。
         let (_head, root) = http_get(hub_for(&ws), "/api/tree");
-        for leak in ["secrets", "Secrets", ".ui", "journal", "target", "node_modules"] {
+        for leak in [
+            "secrets",
+            "Secrets",
+            ".ui",
+            "journal",
+            "target",
+            "node_modules",
+        ] {
             assert!(
                 !root.contains(&format!("\"name\":\"{leak}\"")),
                 "根列表出现了 {leak}: {root}"
@@ -6744,7 +8354,9 @@ mod tests {
     fn tool_cache_is_isolated_by_session() {
         let hub = Arc::new(Hub::default());
         *hub.session.lock().unwrap() = "a".into();
-        let id = hub.store_tool("shell", &ToolResult::ok("secret-output"));
+        let id = hub
+            .store_tool_redacted("shell", &ToolResult::ok("secret-output"))
+            .0;
         *hub.session.lock().unwrap() = "b".into();
         assert!(
             hub.tool(id).is_none(),
@@ -6790,7 +8402,10 @@ mod tests {
         let path = ws.join(".ui").join("journal.jsonl");
         let mut journal = ui_core::Journal::open(&path).unwrap();
         journal
-            .append("turn/start", Json::obj(vec![("prompt", Json::from("旧问题"))]))
+            .append(
+                "turn/start",
+                Json::obj(vec![("prompt", Json::from("旧问题"))]),
+            )
             .unwrap();
         journal
             .append(
@@ -6809,10 +8424,7 @@ mod tests {
             )
             .unwrap();
         journal
-            .append(
-                "turn/end",
-                Json::obj(vec![("reason", Json::from("done"))]),
-            )
+            .append("turn/end", Json::obj(vec![("reason", Json::from("done"))]))
             .unwrap();
         journal
             .append(
@@ -6829,7 +8441,7 @@ mod tests {
 
         let hub = hub_for(&ws);
         *hub.session.lock().unwrap() = "default".into();
-        replay_journal_into_hub(&hub, &path);
+        replay_journal_into_hub_mode(&hub, &path, false);
         let log = hub.log.lock().unwrap();
         let types: Vec<String> = log
             .iter()
@@ -6843,6 +8455,51 @@ mod tests {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn replay_prefers_safe_failure_summary_and_never_shows_private_file_pointer() {
+        let ws = temp_workspace("replay-failed-tool-summary");
+        let path = ws.join(".ui").join("journal.jsonl");
+        let mut journal = ui_core::Journal::open(&path).unwrap();
+        for payload in [
+            Json::obj(vec![
+                ("tool", Json::from("shell")),
+                ("ok", Json::Bool(false)),
+                ("text", Json::from("stdout before failure\n\n[错误] 退出码 7")),
+            ]),
+            Json::obj(vec![
+                ("tool", Json::from("shell")),
+                ("ok", Json::Bool(false)),
+                ("text", Json::from("")),
+                ("withheld", Json::from("secrets/**")),
+                ("file", Json::from(".ui/tool-private/private-pointer.txt")),
+                ("chars", Json::from(99)),
+            ]),
+        ] {
+            journal.append("tool/output", payload).unwrap();
+        }
+        drop(journal);
+
+        let hub = hub_for(&ws);
+        replay_journal_into_hub_mode(&hub, &path, false);
+        let details: Vec<String> = hub_lock(&hub.log)
+            .iter()
+            .filter_map(|(_, line)| ui_core::json::parse(line).ok())
+            .filter(|event| event.str_at("type") == Some("tool"))
+            .map(|event| event.str_at("detail").unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                "退出码 7".to_string(),
+                "工具执行失败（输出已按隐私清单扣留）".to_string(),
+            ]
+        );
+        assert!(!hub_lock(&hub.log)
+            .iter()
+            .any(|(_, line)| line.contains("private-pointer.txt")));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -6862,6 +8519,34 @@ mod tests {
             3,
             "snapshot?limit=3 只应嵌入最近 3 条事件"
         );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ready_metadata_is_redacted_in_snapshot_and_apis() {
+        const CANARY: &str = "AKIAWEBREADYTESTCANARY"; // allowlist secret（测试夹具，非真凭据）
+        let ws = temp_workspace("snapshot-ready-redaction");
+        let hub = hub_for(&ws);
+        *hub.ready.lock().unwrap() = Some(Json::obj(vec![
+            ("workspace", Json::from(format!("/ws/{}", CANARY))),
+            ("model", Json::from(CANARY)),
+        ]));
+        for path in ["/snapshot", "/api/ready", "/api/meta"] {
+            let (head, body) = http_get(hub.clone(), path);
+            assert!(head.contains("200 OK"), "{} {}", path, head);
+            assert!(
+                !body.contains(CANARY),
+                "{} 不能带 ready 明文: {}",
+                path,
+                body
+            );
+            assert!(
+                body.contains("[REDACTED:"),
+                "{} 应保留脱敏标记: {}",
+                path,
+                body
+            );
+        }
         let _ = std::fs::remove_dir_all(&ws);
     }
 

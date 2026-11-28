@@ -35,6 +35,9 @@ pub struct Journal {
     writer: String,
     /// 落账前的脱敏开关，**状态只存在这一份**（见 `append` / `append_raw`）
     redact: bool,
+    /// 跨事件正文脱敏状态；只保护会外流的 journal，不碰模型上下文/记忆库本体。
+    /// 仅内核生成的结构字段做静态检测；路径与产物名等模型可控字段仍走流式门。
+    stream: crate::secrets::StreamRedactor,
     pub events: Vec<Json>,
     /// 因为内存上限被挤出的事件数（日志文件里仍然完整）
     dropped: u64,
@@ -112,13 +115,18 @@ impl FileLock {
         let lock = path.with_extension("lockfile");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock)
+            {
                 Ok(file) => return Ok(FileLock { file, path: lock }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     // 超过 60 秒的锁文件视为遗留（进程崩了没删）
                     if let Ok(meta) = fs::metadata(&lock) {
                         if let Ok(age) = meta.modified().and_then(|m| {
-                            m.elapsed().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                            m.elapsed()
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
                         }) {
                             if age.as_secs() > 60 {
                                 let _ = fs::remove_file(&lock);
@@ -185,6 +193,7 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
 
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut last: Vec<u8> = Vec::new();
+    let mut prior: Vec<u8> = Vec::new();
     let mut offset = 0u64;
     let mut good = 0u64;
     let mut turns = 0u64;
@@ -214,6 +223,7 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
                 }
                 offset += n as u64;
                 good = offset;
+                std::mem::swap(&mut prior, &mut last);
                 std::mem::swap(&mut last, &mut buf);
             } else {
                 corrupt = Some(Corrupt {
@@ -232,6 +242,7 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
             if contains(&buf, b"\"kind\":\"turn/start\"") {
                 turns += 1;
             }
+            std::mem::swap(&mut prior, &mut last);
             std::mem::swap(&mut last, &mut buf);
         }
         offset += n as u64;
@@ -239,15 +250,55 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
         lines += 1;
     }
 
-    let (seq, prev) = if last.is_empty() {
-        (0, GENESIS.to_string())
+    let (seq, prev, parsed_last, tail_corrupt) = if last.is_empty() {
+        (0, GENESIS.to_string(), None, None)
     } else {
-        match parse_line(&last) {
-            Some(e) => (
-                e.u64_at("seq").unwrap_or(0),
-                e.str_at("hash").unwrap_or(GENESIS).to_string(),
+        let expected_prev = if prior.is_empty() {
+            GENESIS.to_string()
+        } else {
+            match parse_line(&prior).and_then(|e| e.str_at("hash").map(str::to_string)) {
+                Some(hash) => hash,
+                None => {
+                    let seq = parse_line(&last).and_then(|e| e.u64_at("seq"));
+                    return Ok(TailScan {
+                        seq: seq.unwrap_or(0),
+                        prev: GENESIS.to_string(),
+                        offset: good,
+                        turns,
+                        dropped: 0,
+                        last: parse_line(&last),
+                        corrupt: Some(Corrupt {
+                            seq,
+                            reason: "尾部记录的前一条记录损坏，无法验证哈希链".to_string(),
+                            torn: false,
+                            good_bytes: good as usize,
+                        }),
+                        torn_reason: None,
+                    });
+                }
+            }
+        };
+        match verify_record(&last, &expected_prev) {
+            Some(event) => (
+                event.u64_at("seq").unwrap_or(0),
+                event.str_at("hash").unwrap_or(GENESIS).to_string(),
+                Some(event),
+                None,
             ),
-            None => (0, GENESIS.to_string()),
+            None => {
+                let seq = parse_line(&last).and_then(|e| e.u64_at("seq"));
+                (
+                    seq.unwrap_or(0),
+                    GENESIS.to_string(),
+                    parse_line(&last),
+                    Some(Corrupt {
+                        seq,
+                        reason: "尾部记录的 prev 或 hash 校验失败".to_string(),
+                        torn: false,
+                        good_bytes: good as usize,
+                    }),
+                )
+            }
         }
     };
 
@@ -257,8 +308,8 @@ fn scan_tail(path: &Path) -> io::Result<TailScan> {
         offset: good,
         turns,
         dropped: 0,
-        last: parse_line(&last),
-        corrupt,
+        last: parsed_last,
+        corrupt: corrupt.or(tail_corrupt),
         torn_reason: None,
     })
 }
@@ -301,6 +352,12 @@ fn verify_record(line: &[u8], expected_prev: &str) -> Option<Json> {
     Some(record)
 }
 
+enum RedactionMode {
+    None,
+    Json,
+    StreamedText { text: String, publish: bool },
+}
+
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -325,12 +382,13 @@ impl Journal {
         // 这不是理论问题——CI 上四线程并发时真的炸过。
         let (mut tail, offset) = {
             let lock_path = path.with_extension("lock");
-            let _lock = FileLock::acquire(&lock_path)
-                .map_err(|e| journal_ctx(e, &path, "拿不到日志锁"))?;
+            let _lock =
+                FileLock::acquire(&lock_path).map_err(|e| journal_ctx(e, &path, "拿不到日志锁"))?;
             // 只扫尾部：不解析历史全部记录，内存与日志大小无关。
             // 全链校验是 ui verify 的职责（流式，O(1) 内存）；
             // 这里只需要 seq/prev/offset、turn 计数、以及尾部是否撕裂。
-            let mut tail = scan_tail(&path).map_err(|e| journal_ctx(e, &path, "扫描日志尾部失败"))?;
+            let mut tail =
+                scan_tail(&path).map_err(|e| journal_ctx(e, &path, "扫描日志尾部失败"))?;
             if let Some(c) = &tail.corrupt {
                 if c.torn {
                     // A crash can leave one half-written record. Keep the verified
@@ -370,6 +428,21 @@ impl Journal {
 
         let mut torn_note = tail.torn_reason.clone();
         let events: Vec<Json> = tail.last.take().into_iter().collect();
+        let mut stream = crate::secrets::StreamRedactor::default();
+        if let Some(last) = events.first() {
+            let state = last.str_at("redactionState").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "日志缺少脱敏流状态，无法安全跨进程续写（{}）。旧版日志只能只读查看；请新建会话日志。",
+                        path.display()
+                    ),
+                )
+            })?;
+            stream
+                .restore_durable_state(state)
+                .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
+        }
         let mut journal = Journal {
             path,
             seq: tail.seq,
@@ -377,6 +450,7 @@ impl Journal {
             offset,
             writer: writer_id(),
             redact: std::env::var("UI_REDACT").map(|v| v != "0").unwrap_or(true),
+            stream,
             events,
             dropped: tail.dropped,
             turns: tail.turns,
@@ -386,7 +460,10 @@ impl Journal {
                 "journal/torn",
                 Json::obj(vec![
                     ("reason", Json::from(reason.as_str())),
-                    ("note", Json::from("崩溃时留下半条记录，已截断到最后一条完整记录")),
+                    (
+                        "note",
+                        Json::from("崩溃时留下半条记录，已截断到最后一条完整记录"),
+                    ),
                 ]),
             )?;
         }
@@ -395,6 +472,23 @@ impl Journal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 同进程切会话时由 Agent 保存/恢复跨事件状态。只有正在写的 Journal
+    /// 持有活动状态；离开会话的快照不能继续消费别处的字节。seq/hash 用来
+    /// 识别其他进程是否在此期间追加过记录：磁盘变化时必须以持久状态为准。
+    pub(crate) fn stream_snapshot(&self) -> (crate::secrets::StreamRedactor, u64, String) {
+        (self.stream.clone(), self.seq, self.prev.clone())
+    }
+
+    pub(crate) fn restore_stream_snapshot(
+        &mut self,
+        state: (crate::secrets::StreamRedactor, u64, String),
+    ) {
+        let (stream, seq, prev) = state;
+        if self.seq == seq && self.prev == prev {
+            self.stream = stream;
+        }
     }
 
     /// 这份日志落账前脱不脱敏。**状态只存在这里一份**。
@@ -419,6 +513,12 @@ impl Journal {
     /// 当前已写入的事件总数（= 最后一条的 seq）。
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// 当前流状态对应的日志位置。跨进程快照只有在这个位置仍与磁盘一致时
+    /// 才能复用；否则必须从 Journal 的最新持久状态恢复。
+    pub fn stream_identity(&self) -> (u64, String) {
+        (self.seq, self.prev.clone())
     }
 
     /// 有多少条历史事件为了省内存被挤出缓冲（日志文件里仍然完整）。
@@ -466,38 +566,51 @@ impl Journal {
             }
             let text = match std::str::from_utf8(line) {
                 Ok(t) => t,
-                Err(_) => break,
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "并发写入的日志记录不是有效 UTF-8，已拒绝续写",
+                    ))
+                }
             };
             let trimmed = text.trim();
             consumed += line.len();
             if trimmed.is_empty() {
                 continue;
             }
-            let event = match json::parse(trimmed) {
-                Ok(v) => v,
-                Err(e) => {
+            let event = match verify_record(line, &self.prev) {
+                Some(event) => event,
+                None => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("并发写入的日志行不是 JSON: {}", e),
+                        "并发写入的日志记录 prev 或 hash 校验失败，已拒绝续写",
                     ))
                 }
             };
             let seq = event.u64_at("seq").unwrap_or(0);
-            let prev = event.str_at("prev").unwrap_or("");
-            if seq != self.seq + 1 || prev != self.prev {
+            if seq != self.seq + 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "日志链在另一个进程里断了：期望 seq {} prev {}，实际 seq {} prev {}",
+                        "日志链在另一个进程里断了：期望 seq {}，实际 seq {}",
                         self.seq + 1,
-                        &self.prev[..8.min(self.prev.len())],
-                        seq,
-                        &prev[..8.min(prev.len())]
+                        seq
                     ),
                 ));
             }
             self.seq = seq;
             self.prev = event.str_at("hash").unwrap_or(GENESIS).to_string();
+            // 多进程的真实落盘顺序就是威胁流顺序。先恢复上一条记录留下的
+            // 保守状态，再脱敏当前 payload；不能各进程在锁外先过一道门。
+            let state = event.str_at("redactionState").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "并发写入的日志缺少脱敏流状态，已拒绝续写",
+                )
+            })?;
+            self.stream
+                .restore_durable_state(state)
+                .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
             self.events.push(event);
         }
         self.offset += consumed as u64;
@@ -515,24 +628,72 @@ impl Journal {
     /// `redacted: N` 由这里盖上去：N>0 说明这一条被动过手，原文得回工作区找，
     /// 别在日志里找。
     pub fn append(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
-        let mut payload = payload;
-        if self.redact {
-            let hits = crate::secrets::redact_json(&mut payload);
-            if hits > 0 {
-                payload.set("redacted", Json::from(hits));
-            }
-        }
-        self.append_raw(kind, payload)
+        self.append_locked(kind, payload, RedactionMode::Json)
     }
 
-    /// 不脱敏的那一个：只给两处例外用，调用方要能说清为什么。
+    /// 已经按来源/模式准备过的 tool/output：仍过跨事件门，防不同工具输出
+    /// 分别携带前缀与尾部；保留调用方原有的 redacted 计数并追加新增命中。
+    pub fn append_streamed_raw(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
+        self.append_locked(kind, payload, RedactionMode::Json)
+    }
+
+    /// 工具输出专用落账口：原始 `text` 在根字段原位置进入共享流，其他字段照常
+    /// 过根层结构判定。`publish=false` 时只推进状态并保留既有扣留值，绝不把
+    /// 原始正文写进事件；这样截断 PEM 头也能抑制后续输出中的正文。
+    pub fn append_with_streamed_text(
+        &mut self,
+        kind: &str,
+        payload: Json,
+        text: &str,
+        publish: bool,
+    ) -> io::Result<Json> {
+        self.append_locked(
+            kind,
+            payload,
+            RedactionMode::StreamedText {
+                text: text.to_string(),
+                publish,
+            },
+        )
+    }
+
+    /// 不脱敏的那一个：只给记忆库本体等明确例外用，调用方要能说清为什么。
     ///
-    /// 现在只有 `agent::journal_tool_output` 走这里——它自己按"模式脱敏 +
-    /// 来源扣留"两档处理过正文，再过一遍会把 `redacted` 计数的含义洗掉。
+    /// `agent` 的内存事件与 `memory::write` 走这里：它们保存的是记忆本体，
+    /// 不是外流 journal 展示文本。工具输出即使已按来源/模式处理，也走
+    /// `append_streamed_raw` 再补跨事件门。
     pub fn append_raw(&mut self, kind: &str, payload: Json) -> io::Result<Json> {
+        self.append_locked(kind, payload, RedactionMode::None)
+    }
+
+    /// 锁内顺序固定为：补读并恢复上一条状态 → 脱敏 → 写当前记录。
+    /// 状态和正文同属一条哈希链记录，崩溃不会留下“正文已写、状态没写”的窗口。
+    fn append_locked(
+        &mut self,
+        kind: &str,
+        mut payload: Json,
+        mode: RedactionMode,
+    ) -> io::Result<Json> {
         let lock_path = self.path.with_extension("lock");
-        let _lock = FileLock::acquire(&lock_path).map_err(|e| journal_ctx(e, &self.path, "拿不到日志锁"))?;
-        self.catch_up().map_err(|e| journal_ctx(e, &self.path, "补读日志失败"))?;
+        let _lock = FileLock::acquire(&lock_path)
+            .map_err(|e| journal_ctx(e, &self.path, "拿不到日志锁"))?;
+        self.catch_up()
+            .map_err(|e| journal_ctx(e, &self.path, "补读日志失败"))?;
+
+        if self.redact && !matches!(mode, RedactionMode::None) {
+            let hits = match mode {
+                RedactionMode::None => 0,
+                RedactionMode::Json => self.stream.redact_json(&mut payload),
+                RedactionMode::StreamedText { text, publish } => {
+                    self.stream
+                        .redact_json_with_text(&mut payload, &text, publish)
+                }
+            };
+            if hits > 0 {
+                let prior = payload.u64_at("redacted").unwrap_or(0) as usize;
+                payload.set("redacted", Json::from(prior + hits));
+            }
+        }
 
         let mut event = Json::obj(vec![
             ("seq", Json::from(self.seq + 1)),
@@ -543,7 +704,10 @@ impl Journal {
             for (k, v) in extra {
                 // 这些字段属于 envelope；payload 里的同名键会把 seq/hash 挪到
                 // 行中间，让按字节切 hash 的校验器误判整条日志损坏。
-                if matches!(k.as_str(), "seq" | "ts" | "kind" | "w" | "prev" | "hash") {
+                if matches!(
+                    k.as_str(),
+                    "seq" | "ts" | "kind" | "w" | "prev" | "hash" | "redactionState"
+                ) {
                     continue;
                 }
                 items.push((k.clone(), v.clone()));
@@ -552,6 +716,9 @@ impl Journal {
         // writer 标识：多个进程共享同一份日志时，光看 turn 序号分不清是谁的轮次
         event.set("w", Json::from(self.writer.clone()));
         event.set("prev", Json::from(self.prev.clone()));
+        // 只持久化有限状态与已验证的公开凭据头片段，绝不持久化 pending。
+        // 下一位 writer（无论同进程还是新进程）按实际写入顺序从这里恢复。
+        event.set("redactionState", Json::from(self.stream.durable_state()));
         let hash = sha256::hex(event.to_compact().as_bytes());
         event.set("hash", Json::from(hash.clone()));
 
@@ -637,10 +804,7 @@ impl Journal {
             preimage.extend_from_slice(&line[..cut]);
             preimage.push(b'}');
             if sha256::hex(&preimage) != want {
-                return Ok((
-                    events,
-                    Some(fail(None, "hash mismatch".to_string(), false)),
-                ));
+                return Ok((events, Some(fail(None, "hash mismatch".to_string(), false))));
             }
             let text = match std::str::from_utf8(line) {
                 Ok(t) => t,
@@ -762,11 +926,7 @@ pub fn analyze_incomplete(events: &[Json]) -> Incomplete {
                 if open.remove(&(writer.clone(), turn_no)).is_none() {
                     // resume/旧版本可能用新的 writer id 写 turn/end；按 turn
                     // 编号兜底关闭，否则 doctor 会永远报“有未完成 turn”。
-                    if let Some(key) = open
-                        .keys()
-                        .find(|(_, t)| *t == turn_no)
-                        .cloned()
-                    {
+                    if let Some(key) = open.keys().find(|(_, t)| *t == turn_no).cloned() {
                         open.remove(&key);
                     }
                 }
@@ -870,6 +1030,288 @@ mod tests {
     }
 
     #[test]
+    fn append_keeps_redaction_state_across_events() {
+        let path = tmp("cross-event-redaction");
+        let mut j = Journal::open(&path).unwrap();
+        j.set_redact(true);
+        j.append(
+            "model/response",
+            Json::obj(vec![("content", Json::from("Bearer "))]),
+        )
+        .unwrap();
+        j.append(
+            "model/response",
+            Json::obj(vec![(
+                "content",
+                Json::from("abcd+efghijklmnopqrstuvwxyz"), // allowlist secret（测试夹具，非真凭据）
+            )]),
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("abcd+efghijklmnopqrstuvwxyz"),
+            "{}",
+            on_disk
+        );
+        assert!(on_disk.contains("[REDACTED:auth header]"), "{}", on_disk);
+
+        let body = "WEBJOURNALPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        j.append(
+            "model/response",
+            Json::obj(vec![(
+                "content",
+                Json::from("-----BEGIN RSA PRIVATE KEY-----"), // allowlist secret（假私钥头）
+            )]),
+        )
+        .unwrap();
+        j.append(
+            "model/response",
+            Json::obj(vec![(
+                "content",
+                Json::from(format!("{}\n-----END RSA PRIVATE KEY-----", body)), // allowlist secret（假私钥尾）
+            )]),
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains(body), "PEM 正文跨事件泄漏: {}", on_disk);
+        let (_, corrupt) = Journal::read(&path).unwrap();
+        assert!(corrupt.is_none());
+    }
+
+    #[test]
+    fn reopening_a_journal_restores_split_credential_protection() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let path = tmp("cross-process-reopen");
+        let mut first = Journal::open(&path).unwrap();
+        first.set_redact(true);
+        first
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        assert_eq!(first.stream.durable_state(), "prefixes:AKI");
+        drop(first);
+
+        let mut second = Journal::open(&path).unwrap();
+        second.set_redact(true);
+        second
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from(TAIL))]),
+            )
+            .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains(TAIL),
+            "重开后不能释放拆分凭据尾部: {}",
+            on_disk
+        );
+        assert!(on_disk.contains("[REDACTED:aws key]"), "{}", on_disk);
+    }
+
+    #[test]
+    fn a_concurrent_writer_restores_the_previous_records_threat_state() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let path = tmp("cross-process-writers");
+        let mut a = Journal::open(&path).unwrap();
+        let mut b = Journal::open(&path).unwrap();
+        a.set_redact(true);
+        b.set_redact(true);
+        a.append(
+            "model/response",
+            Json::obj(vec![("content", Json::from("AKI"))]),
+        )
+        .unwrap();
+        // b 在 a 写入前已经打开；append 必须在锁内补读并恢复 a 的状态。
+        b.append(
+            "model/response",
+            Json::obj(vec![("content", Json::from(TAIL))]),
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains(TAIL),
+            "并发 writer 绕过拆分凭据门: {}",
+            on_disk
+        );
+    }
+
+    #[test]
+    fn reopening_a_journal_restores_open_pem_suppression() {
+        const BODY: &str = "WEBJOURNALREOPENPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        let path = tmp("cross-process-pem");
+        let mut first = Journal::open(&path).unwrap();
+        first.set_redact(true);
+        first
+            .append(
+                "model/response",
+                Json::obj(vec![(
+                    "content",
+                    Json::from("-----BEGIN RSA PRIVATE KEY-----"), // allowlist secret（假私钥头）
+                )]),
+            )
+            .unwrap();
+        assert_eq!(first.stream.durable_state(), "pem:1");
+        drop(first);
+
+        let mut second = Journal::open(&path).unwrap();
+        second.set_redact(true);
+        second
+            .append(
+                "model/response",
+                Json::obj(vec![(
+                    "content",
+                    Json::from(format!("{}\n-----END RSA PRIVATE KEY-----", BODY)), // allowlist secret（假私钥尾）
+                )]),
+            )
+            .unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains(BODY), "重开后 PEM 正文泄漏: {}", on_disk);
+        assert_eq!(second.stream.durable_state(), "clear");
+    }
+
+    #[test]
+    fn durable_public_prefixes_do_not_swallow_normal_text_after_reopen() {
+        let path = tmp("cross-process-normal-text");
+        let mut first = Journal::open(&path).unwrap();
+        first.set_redact(true);
+        first
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("ordinary alpha"))]),
+            )
+            .unwrap();
+        drop(first);
+        let mut second = Journal::open(&path).unwrap();
+        second.set_redact(true);
+        let event = second
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from(" ordinary beta"))]),
+            )
+            .unwrap();
+        assert_eq!(event.str_at("content"), Some(" ordinary beta"));
+    }
+
+    #[test]
+    fn legacy_journals_without_threat_state_fail_closed_on_open() {
+        let path = tmp("legacy-no-redaction-state");
+        let mut event = Json::obj(vec![
+            ("seq", Json::from(1u64)),
+            ("ts", Json::from(1u64)),
+            ("kind", Json::from("note")),
+            ("w", Json::from("legacy")),
+            ("prev", Json::from(GENESIS)),
+            ("text", Json::from("old record")),
+        ]);
+        let hash = sha256::hex(event.to_compact().as_bytes());
+        event.set("hash", Json::from(hash));
+        fs::write(&path, format!("{}\n", event.to_compact())).unwrap();
+        let error = match Journal::open(&path) {
+            Ok(_) => panic!("旧日志不能猜测成 clear 后续写"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("无法安全跨进程续写"));
+    }
+
+    #[test]
+    fn opening_rejects_a_tampered_tail_hash() {
+        let path = tmp("tampered-tail-open");
+        let mut journal = Journal::open(&path).unwrap();
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("first"))]),
+            )
+            .unwrap();
+        drop(journal);
+        let tampered = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"first\"", "\"evil!\"");
+        fs::write(&path, tampered).unwrap();
+        match Journal::open(&path) {
+            Ok(_) => panic!("尾部 hash 被篡改后不能继续续写"),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::InvalidData),
+        }
+    }
+
+    #[test]
+    fn catch_up_rejects_a_tampered_concurrent_record_hash() {
+        let path = tmp("tampered-tail-catch-up");
+        let mut first = Journal::open(&path).unwrap();
+        let mut second = Journal::open(&path).unwrap();
+        first
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("first"))]),
+            )
+            .unwrap();
+        let tampered = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"first\"", "\"evil!\"");
+        fs::write(&path, tampered).unwrap();
+        let error = second
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("second"))]),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("hash 校验失败"));
+    }
+
+    #[test]
+    fn journal_cross_process_child() {
+        let Some(path) = std::env::var_os("UI_JOURNAL_CROSS_PROCESS_CHILD") else {
+            return;
+        };
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let mut journal = Journal::open(path).unwrap();
+        journal.set_redact(true);
+        journal
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from(TAIL))]),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_real_child_process_cannot_complete_a_split_credential() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let path = tmp("cross-process-child");
+        let mut parent = Journal::open(&path).unwrap();
+        parent.set_redact(true);
+        parent
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(parent);
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "journal::tests::journal_cross_process_child"])
+            .env("UI_JOURNAL_CROSS_PROCESS_CHILD", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "子进程失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains(TAIL),
+            "真实子进程泄漏了拆分凭据: {}",
+            on_disk
+        );
+        assert!(on_disk.contains("[REDACTED:aws key]"), "{}", on_disk);
+    }
+
+    #[test]
     fn appends_and_verifies_chain() {
         let path = tmp("chain");
         let mut j = Journal::open(&path).unwrap();
@@ -886,12 +1328,12 @@ mod tests {
     fn detects_tampering_in_the_middle() {
         let path = tmp("tamper");
         let mut j = Journal::open(&path).unwrap();
-        j.append("note", Json::obj(vec![("text", Json::from("a"))]))
+        j.append("note", Json::obj(vec![("text", Json::from("alpha note"))]))
             .unwrap();
-        j.append("note", Json::obj(vec![("text", Json::from("b"))]))
+        j.append("note", Json::obj(vec![("text", Json::from("bravo note"))]))
             .unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        let tampered = text.replacen("\"a\"", "\"c\"", 1);
+        let tampered = text.replacen("alpha note", "charlie note", 1);
         fs::write(&path, tampered).unwrap();
         let (events, corrupt) = Journal::read(&path).unwrap();
         assert_eq!(events.len(), 0);
@@ -911,7 +1353,8 @@ mod tests {
 
         // A crash landing in the middle of a write: half a record, no newline.
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"{\"seq\":3,\"kind\":\"note\",\"prev\":\"").unwrap();
+        file.write_all(b"{\"seq\":3,\"kind\":\"note\",\"prev\":\"")
+            .unwrap();
         file.sync_all().unwrap();
 
         let (events, corrupt) = Journal::read(&path).unwrap();
@@ -970,10 +1413,7 @@ fn two_writers_share_one_journal_without_breaking_the_chain() {
             for i in 0..per_writer {
                 j.append(
                     "note",
-                    Json::obj(vec![
-                        ("writer", Json::from(w)),
-                        ("i", Json::from(i)),
-                    ]),
+                    Json::obj(vec![("writer", Json::from(w)), ("i", Json::from(i))]),
                 )
                 .unwrap();
             }
@@ -1011,7 +1451,10 @@ fn open_offset_always_matches_the_records_it_parsed() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("journal.jsonl");
-    Journal::open(&path).unwrap().append("seed", Json::obj(vec![])).unwrap();
+    Journal::open(&path)
+        .unwrap()
+        .append("seed", Json::obj(vec![]))
+        .unwrap();
 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let writer = {
@@ -1029,7 +1472,8 @@ fn open_offset_always_matches_the_records_it_parsed() {
     for round in 0..60 {
         let mut j = Journal::open(&path).unwrap();
         let data = std::fs::read(&path).unwrap();
-        let _complete: u64 = data.split_inclusive(|b| *b == b'\n')
+        let _complete: u64 = data
+            .split_inclusive(|b| *b == b'\n')
             .filter(|l| l.ends_with(b"\n"))
             .map(|l| l.len() as u64)
             .sum();
@@ -1037,23 +1481,30 @@ fn open_offset_always_matches_the_records_it_parsed() {
         assert!(
             j.offset <= data.len() as u64,
             "第 {} 轮：offset {} 超过文件长度 {}",
-            round, j.offset, data.len()
+            round,
+            j.offset,
+            data.len()
         );
         // offset 必须在行边界（要么 0，要么前一个字节是换行）
         assert!(
             j.offset == 0 || data[(j.offset - 1) as usize] == b'\n',
             "第 {} 轮：offset {} 不在行边界上",
-            round, j.offset
+            round,
+            j.offset
         );
         assert!(
             j.seq <= complete_count(&data),
             "第 {} 轮：seq {} 超过了磁盘上的记录数",
-            round, j.seq
+            round,
+            j.seq
         );
 
         // 真正的回归点：拿到的 seq/prev 必须能直接接上
         j.append("probe", Json::obj(vec![])).unwrap_or_else(|e| {
-            panic!("第 {} 轮：open 之后 append 失败（open 跳过了记录？）：{}", round, e)
+            panic!(
+                "第 {} 轮：open 之后 append 失败（open 跳过了记录？）：{}",
+                round, e
+            )
         });
     }
 
@@ -1082,8 +1533,13 @@ fn memory_buffer_is_capped_but_disk_keeps_everything() {
     let turns: u64 = 7;
     let mut j = Journal::open(&path).unwrap();
     for i in 0..total {
-        let kind = if (i as u64) < turns { "turn/start" } else { "note" };
-        j.append(kind, Json::obj(vec![("i", Json::from(i as u64))])).unwrap();
+        let kind = if (i as u64) < turns {
+            "turn/start"
+        } else {
+            "note"
+        };
+        j.append(kind, Json::obj(vec![("i", Json::from(i as u64))]))
+            .unwrap();
     }
 
     assert!(
@@ -1112,10 +1568,12 @@ fn a_second_writer_sees_events_appended_by_the_first() {
 
     let mut a = Journal::open(&path).unwrap();
     let mut b = Journal::open(&path).unwrap();
-    a.append("note", Json::obj(vec![("who", Json::from("a"))])).unwrap();
+    a.append("note", Json::obj(vec![("who", Json::from("a"))]))
+        .unwrap();
     // b 打开时只看到 0 条；append 时应当先补读 a 的那条
     assert_eq!(b.events.len(), 0);
-    b.append("note", Json::obj(vec![("who", Json::from("b"))])).unwrap();
+    b.append("note", Json::obj(vec![("who", Json::from("b"))]))
+        .unwrap();
     assert_eq!(b.events.len(), 2, "b 必须先把 a 的记录补进来");
     assert_eq!(b.events[0].str_at("who"), Some("a"));
 
@@ -1134,7 +1592,8 @@ fn opening_an_existing_journal_never_truncates_it() {
     let path = dir.join("journal.jsonl");
 
     let mut a = Journal::open(&path).unwrap();
-    a.append("note", Json::obj(vec![("who", Json::from("a"))])).unwrap();
+    a.append("note", Json::obj(vec![("who", Json::from("a"))]))
+        .unwrap();
 
     // 再打开一次：必须能看见已有的那条，且不能把文件清空
     let b = Journal::open(&path).unwrap();

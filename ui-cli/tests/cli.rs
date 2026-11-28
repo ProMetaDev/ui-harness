@@ -38,7 +38,11 @@ fn checkpoint_diff_restore_end_to_end() {
         ])
         .output()
         .expect("checkpoint");
-    assert!(cp.status.success(), "{}", String::from_utf8_lossy(&cp.stderr));
+    assert!(
+        cp.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
 
     let listed = Command::new(bin())
         .args(["checkpoints", "--workspace", ws.to_str().unwrap(), "--json"])
@@ -68,7 +72,11 @@ fn checkpoint_diff_restore_end_to_end() {
         ])
         .output()
         .expect("diff");
-    assert!(diff.status.success(), "{}", String::from_utf8_lossy(&diff.stderr));
+    assert!(
+        diff.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
     let report = ui_core::json::parse(String::from_utf8_lossy(&diff.stdout).trim()).unwrap();
     let change_rows = report.arr_at("changes").cloned().unwrap_or_default();
     let kinds: Vec<&str> = change_rows
@@ -90,7 +98,11 @@ fn checkpoint_diff_restore_end_to_end() {
         ])
         .output()
         .expect("restore");
-    assert!(restore.status.success(), "{}", String::from_utf8_lossy(&restore.stderr));
+    assert!(
+        restore.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
     assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "one\ntwo\n");
     assert_eq!(fs::read_to_string(ws.join("src/b.txt")).unwrap(), "hello\n");
     let _ = fs::remove_dir_all(&ws);
@@ -103,16 +115,20 @@ fn review_accepts_only_one_hunk_end_to_end() {
     fs::write(ws.join("a.txt"), &old).unwrap();
 
     let cp = Command::new(bin())
-        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .args([
+            "checkpoint",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--label",
+            "before",
+        ])
         .output()
         .expect("checkpoint");
     assert!(cp.status.success());
 
-    let new_text = old.replacen("line 1\n", "CHANGED-1\n", 1).replacen(
-        "line 18\n",
-        "CHANGED-18\n",
-        1,
-    );
+    let new_text =
+        old.replacen("line 1\n", "CHANGED-1\n", 1)
+            .replacen("line 18\n", "CHANGED-18\n", 1);
     fs::write(ws.join("a.txt"), new_text).unwrap();
 
     let diff = Command::new(bin())
@@ -141,15 +157,20 @@ fn review_accepts_only_one_hunk_end_to_end() {
         ])
         .output()
         .expect("review");
-    assert!(review.status.success(), "{}", String::from_utf8_lossy(&review.stderr));
+    assert!(
+        review.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
     let got = fs::read_to_string(ws.join("a.txt")).unwrap();
     assert!(got.contains("CHANGED-1"));
     assert!(!got.contains("CHANGED-18"));
     assert!(got.contains("line 18"));
-    let (events, corrupt) =
-        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let (events, corrupt) = ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
     assert!(corrupt.is_none());
-    assert!(events.iter().any(|e| e.str_at("kind") == Some("review/apply")));
+    assert!(events
+        .iter()
+        .any(|e| e.str_at("kind") == Some("review/apply")));
     let _ = fs::remove_dir_all(&ws);
 }
 
@@ -160,7 +181,13 @@ fn revert_single_file_end_to_end() {
     fs::write(ws.join("b.txt"), "keep\n").unwrap();
 
     let cp = Command::new(bin())
-        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .args([
+            "checkpoint",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--label",
+            "before",
+        ])
         .output()
         .expect("checkpoint");
     assert!(cp.status.success());
@@ -191,14 +218,19 @@ fn revert_single_file_end_to_end() {
         ])
         .output()
         .expect("revert");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "old\n");
     assert_eq!(fs::read_to_string(ws.join("b.txt")).unwrap(), "keep\n");
     assert!(ws.join("added.txt").exists());
-    let (events, corrupt) =
-        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let (events, corrupt) = ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
     assert!(corrupt.is_none());
-    assert!(events.iter().any(|e| e.str_at("kind") == Some("review/revert")));
+    assert!(events
+        .iter()
+        .any(|e| e.str_at("kind") == Some("review/revert")));
     let _ = fs::remove_dir_all(&ws);
 }
 
@@ -213,7 +245,11 @@ fn index_build_and_query_end_to_end() {
         .args(["index", "--workspace", ws.to_str().unwrap()])
         .output()
         .expect("index");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let query = Command::new(bin())
         .args([
@@ -226,7 +262,11 @@ fn index_build_and_query_end_to_end() {
         ])
         .output()
         .expect("index query");
-    assert!(query.status.success(), "{}", String::from_utf8_lossy(&query.stderr));
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
     let rows = ui_core::json::parse(String::from_utf8_lossy(&query.stdout).trim()).unwrap();
     assert_eq!(
         rows.as_arr()
@@ -249,11 +289,7 @@ fn index_is_injected_into_prompt_snapshot() {
     assert!(build.status.success());
 
     let sc = ws.join("sc.json");
-    fs::write(
-        &sc,
-        r#"{"model":"scripted","steps":[{"content":"完成"}]}"#,
-    )
-    .unwrap();
+    fs::write(&sc, r#"{"model":"scripted","steps":[{"content":"完成"}]}"#).unwrap();
     let run = Command::new(bin())
         .args([
             "run",
@@ -267,9 +303,12 @@ fn index_is_injected_into_prompt_snapshot() {
         ])
         .output()
         .expect("run");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    let (events, corrupt) =
-        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let (events, corrupt) = ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
     assert!(corrupt.is_none());
     assert!(events.iter().any(|e| {
         e.str_at("kind") == Some("prompt/snapshot")
@@ -304,14 +343,19 @@ fn run_auto_checkpoints_before_first_write() {
         ])
         .output()
         .expect("run");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let cps = ui_core::checkpoint::list(&ws).unwrap();
     assert!(!cps.is_empty(), "首次写操作前必须自动建 checkpoint");
     assert_eq!(cps[0].str_at("label"), Some("auto-before-turn-1"));
-    let (events, corrupt) =
-        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let (events, corrupt) = ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
     assert!(corrupt.is_none());
-    assert!(events.iter().any(|e| e.str_at("kind") == Some("checkpoint/auto")));
+    assert!(events
+        .iter()
+        .any(|e| e.str_at("kind") == Some("checkpoint/auto")));
     let _ = fs::remove_dir_all(&ws);
 }
 
@@ -340,7 +384,11 @@ fn run_can_checkpoint_before_tool_writes() {
         ])
         .output()
         .expect("run");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let cp = ui_core::checkpoint::list(&ws).unwrap();
     assert!(!cp.is_empty(), "--checkpoint 必须留下基线");
     let diff = Command::new(bin())
@@ -349,7 +397,11 @@ fn run_can_checkpoint_before_tool_writes() {
         .expect("diff");
     assert!(diff.status.success());
     let report = ui_core::json::parse(String::from_utf8_lossy(&diff.stdout).trim()).unwrap();
-    assert!(!report.arr_at("changes").cloned().unwrap_or_default().is_empty());
+    assert!(!report
+        .arr_at("changes")
+        .cloned()
+        .unwrap_or_default()
+        .is_empty());
     let _ = fs::remove_dir_all(&ws);
 }
 
@@ -358,7 +410,13 @@ fn review_failure_records_intent_and_error() {
     let ws = temp_ws("review-error");
     fs::write(ws.join("a.txt"), "one\n").unwrap();
     let cp = Command::new(bin())
-        .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "before"])
+        .args([
+            "checkpoint",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--label",
+            "before",
+        ])
         .output()
         .expect("checkpoint");
     assert!(cp.status.success());
@@ -366,15 +424,18 @@ fn review_failure_records_intent_and_error() {
 
     let out = Command::new(bin())
         .args([
-            "review", "--workspace", ws.to_str().unwrap(),
-            "--accept", "a.txt#999", "--yes",
+            "review",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--accept",
+            "a.txt#999",
+            "--yes",
         ])
         .output()
         .expect("review");
     assert!(!out.status.success(), "未知 hunk 必须失败");
     assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "two\n");
-    let (events, corrupt) =
-        ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
+    let (events, corrupt) = ui_core::Journal::read(ws.join(".ui").join("journal.jsonl")).unwrap();
     assert!(corrupt.is_none());
     let kinds: Vec<&str> = events.iter().filter_map(|e| e.str_at("kind")).collect();
     assert!(kinds.contains(&"review/intent"), "{:?}", kinds);
@@ -402,23 +463,38 @@ fn review_pending_and_reconcile_dangling_intent() {
 
     let pending = Command::new(bin())
         .args([
-            "review", "--workspace", ws.to_str().unwrap(),
-            "--pending", "--json",
+            "review",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pending",
+            "--json",
         ])
         .output()
         .expect("pending");
-    assert!(pending.status.success(), "{}", String::from_utf8_lossy(&pending.stderr));
+    assert!(
+        pending.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pending.stderr)
+    );
     let out = ui_core::json::parse(String::from_utf8_lossy(&pending.stdout).trim()).unwrap();
     assert_eq!(out.u64_at("count"), Some(1));
 
     let rec = Command::new(bin())
         .args([
-            "review", "--workspace", ws.to_str().unwrap(),
-            "--reconcile", "--yes", "--json",
+            "review",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--reconcile",
+            "--yes",
+            "--json",
         ])
         .output()
         .expect("reconcile");
-    assert!(rec.status.success(), "{}", String::from_utf8_lossy(&rec.stderr));
+    assert!(
+        rec.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rec.stderr)
+    );
     let out = ui_core::json::parse(String::from_utf8_lossy(&rec.stdout).trim()).unwrap();
     assert_eq!(out.u64_at("count"), Some(1));
     assert_eq!(
@@ -443,7 +519,13 @@ fn checkpoint_gc_dry_run_then_yes() {
     fs::write(ws.join("a.txt"), "one\n").unwrap();
     for _ in 0..2 {
         let cp = Command::new(bin())
-            .args(["checkpoint", "--workspace", ws.to_str().unwrap(), "--label", "x"])
+            .args([
+                "checkpoint",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--label",
+                "x",
+            ])
             .output()
             .expect("checkpoint");
         assert!(cp.status.success());
@@ -451,24 +533,47 @@ fn checkpoint_gc_dry_run_then_yes() {
     }
     let dry = Command::new(bin())
         .args([
-            "checkpoints", "--workspace", ws.to_str().unwrap(),
-            "--gc", "--keep", "1", "--json",
+            "checkpoints",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--gc",
+            "--keep",
+            "1",
+            "--json",
         ])
         .output()
         .expect("gc dry");
-    assert!(dry.status.success(), "{}", String::from_utf8_lossy(&dry.stderr));
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
     let out = ui_core::json::parse(String::from_utf8_lossy(&dry.stdout).trim()).unwrap();
     assert_eq!(out.bool_at("dryRun"), Some(true));
-    assert_eq!(ui_core::checkpoint::list(&ws).unwrap().len(), 2, "dry-run 不删");
+    assert_eq!(
+        ui_core::checkpoint::list(&ws).unwrap().len(),
+        2,
+        "dry-run 不删"
+    );
 
     let yes = Command::new(bin())
         .args([
-            "checkpoints", "--workspace", ws.to_str().unwrap(),
-            "--gc", "--keep", "1", "--yes", "--json",
+            "checkpoints",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--gc",
+            "--keep",
+            "1",
+            "--yes",
+            "--json",
         ])
         .output()
         .expect("gc yes");
-    assert!(yes.status.success(), "{}", String::from_utf8_lossy(&yes.stderr));
+    assert!(
+        yes.status.success(),
+        "{}",
+        String::from_utf8_lossy(&yes.stderr)
+    );
     assert_eq!(ui_core::checkpoint::list(&ws).unwrap().len(), 1);
     let _ = fs::remove_dir_all(&ws);
 }
@@ -494,7 +599,11 @@ fn journal_flag_redirects_the_log() {
         ])
         .output()
         .expect("run");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     assert!(target.is_file(), "--journal 指定的文件必须被写到");
     assert!(
@@ -502,7 +611,52 @@ fn journal_flag_redirects_the_log() {
         "不该同时写默认位置"
     );
     let events = ui_core::journal::Journal::load(&target).unwrap();
-    assert!(events.iter().any(|e| e.str_at("kind") == Some("turn/start")));
+    assert!(events
+        .iter()
+        .any(|e| e.str_at("kind") == Some("turn/start")));
+}
+
+#[test]
+fn cli_session_names_reject_and_hide_credential_shapes() {
+    let ws = temp_ws("session-name-privacy");
+    let sessions = ws.join(".ui").join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let hidden = "AKIAWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+    fs::write(
+        sessions.join(format!("{}.jsonl", hidden)),
+        "{\"kind\":\"note\"}\n",
+    )
+    .unwrap();
+    fs::write(sessions.join("work.jsonl"), "{\"kind\":\"note\"}\n").unwrap();
+
+    let listed = Command::new(bin())
+        .args(["sessions", "--workspace", ws.to_str().unwrap()])
+        .output()
+        .expect("sessions");
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(!stdout.contains(hidden), "凭据形状会话名不能出现在列表");
+    assert!(stdout.contains("work"));
+
+    let rejected_name = "sk-webassistanttestvalue123456"; // allowlist secret（测试夹具，非真凭据）
+    let rejected = Command::new(bin())
+        .args([
+            "sessions",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--new",
+            rejected_name,
+        ])
+        .output()
+        .expect("sessions --new");
+    assert!(!rejected.status.success());
+    assert!(!sessions.join(format!("{}.jsonl", rejected_name)).exists());
+    assert!(!String::from_utf8_lossy(&rejected.stderr).contains(rejected_name));
+    let _ = fs::remove_dir_all(&ws);
 }
 
 #[test]
@@ -512,14 +666,14 @@ fn verify_exits_2_on_a_tampered_journal() {
     let ws = temp_ws("tamper");
     let path = ws.join(".ui").join("journal.jsonl");
     let mut j = ui_core::Journal::open(&path).unwrap();
-    j.append("note", Json::obj(vec![("text", Json::from("a"))]))
+    j.append("note", Json::obj(vec![("text", Json::from("alpha note"))]))
         .unwrap();
-    j.append("note", Json::obj(vec![("text", Json::from("b"))]))
+    j.append("note", Json::obj(vec![("text", Json::from("bravo note"))]))
         .unwrap();
 
     // 改掉第一条：中间损坏（不是尾部撕裂），必须整体拒绝
     let text = fs::read_to_string(&path).unwrap();
-    let tampered = text.replacen("\"a\"", "\"z\"", 1);
+    let tampered = text.replacen("alpha note", "charlie note", 1);
     fs::write(&path, tampered).unwrap();
 
     let out = Command::new(bin())
@@ -562,7 +716,11 @@ fn verify_is_quiet_on_a_clean_journal() {
 fn non_done_reasons_exit_non_zero() {
     let ws = temp_ws("excode");
     let empty = ws.join("empty.json");
-    fs::write(&empty, r#"{"model":"scripted","steps":[{"content":""},{"content":""},{"content":""}]}"#).unwrap();
+    fs::write(
+        &empty,
+        r#"{"model":"scripted","steps":[{"content":""},{"content":""},{"content":""}]}"#,
+    )
+    .unwrap();
 
     let out = Command::new(bin())
         .args([
@@ -629,7 +787,11 @@ fn audit_rejudges_a_quiet_run_under_strict_mode() {
         ])
         .output()
         .expect("run");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 
     // 日志必须记下当时的模式
     let events = ui_core::journal::Journal::load(ws.join(".ui").join("journal.jsonl")).unwrap();
@@ -651,7 +813,11 @@ fn audit_rejudges_a_quiet_run_under_strict_mode() {
         ])
         .output()
         .expect("audit");
-    assert!(audit.status.success(), "{}", String::from_utf8_lossy(&audit.stderr));
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
     let parsed = ui_core::json::parse(String::from_utf8_lossy(&audit.stdout).trim()).unwrap();
     assert_eq!(parsed.str_at("as"), Some("strict"));
     assert!(
@@ -677,8 +843,14 @@ fn lab_bundle_records_lineage_and_verify_catches_tampering() {
     .unwrap();
     let run = Command::new(bin())
         .args([
-            "run", "--task", "写结论", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "写结论",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
@@ -687,19 +859,29 @@ fn lab_bundle_records_lineage_and_verify_catches_tampering() {
     let bundle = ws.join("bundle");
     let pack = Command::new(bin())
         .args([
-            "lab", "pack", "--workspace", ws.to_str().unwrap(),
-            "--name", "t1", "--out", bundle.to_str().unwrap(),
+            "lab",
+            "pack",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--name",
+            "t1",
+            "--out",
+            bundle.to_str().unwrap(),
         ])
         .output()
         .expect("pack");
-    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+    assert!(
+        pack.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
 
     let manifest = fs::read_to_string(bundle.join("manifest.jsonl")).unwrap();
     assert!(manifest.contains("metrics.json"), "产物必须在清单里");
     let rec = ui_core::json::parse(manifest.lines().next().unwrap()).unwrap();
     assert_eq!(rec.str_at("path"), Some("metrics.json"));
     assert_eq!(rec.u64_at("bytes"), Some(11)); // {"acc":0.8} ? 11 ??
-    // 血缘：哪次调用写的
+                                               // 血缘：哪次调用写的
     let origin = rec.get("producedBy").cloned().unwrap();
     assert_eq!(origin.str_at("tool"), Some("fs_write"));
     assert!(origin.u64_at("seq").unwrap_or(0) > 0);
@@ -711,7 +893,11 @@ fn lab_bundle_records_lineage_and_verify_catches_tampering() {
     assert_eq!(ok.status.code(), Some(0));
 
     // 篡改产物：必须被抓住
-    fs::write(bundle.join("artifacts").join("metrics.json"), "{\"acc\":0.99}").unwrap();
+    fs::write(
+        bundle.join("artifacts").join("metrics.json"),
+        "{\"acc\":0.99}",
+    )
+    .unwrap();
     let bad = Command::new(bin())
         .args(["lab", "verify", bundle.to_str().unwrap()])
         .output()
@@ -734,8 +920,14 @@ fn lab_records_reads_and_verify_flags_data_drift() {
     .unwrap();
     let run = Command::new(bin())
         .args([
-            "run", "--task", "读数据", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "读数据",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
@@ -744,12 +936,22 @@ fn lab_records_reads_and_verify_flags_data_drift() {
     let bundle = ws.join("b");
     let pack = Command::new(bin())
         .args([
-            "lab", "pack", "--workspace", ws.to_str().unwrap(),
-            "--name", "l1", "--out", bundle.to_str().unwrap(),
+            "lab",
+            "pack",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--name",
+            "l1",
+            "--out",
+            bundle.to_str().unwrap(),
         ])
         .output()
         .expect("pack");
-    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+    assert!(
+        pack.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
 
     let inputs = fs::read_to_string(bundle.join("inputs.jsonl")).unwrap();
     let rec = ui_core::json::parse(inputs.lines().next().unwrap()).unwrap();
@@ -757,7 +959,13 @@ fn lab_records_reads_and_verify_flags_data_drift() {
     assert!(rec.str_at("sha256").unwrap().len() == 64);
 
     let ok = Command::new(bin())
-        .args(["lab", "verify", bundle.to_str().unwrap(), "--workspace", ws.to_str().unwrap()])
+        .args([
+            "lab",
+            "verify",
+            bundle.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+        ])
         .output()
         .expect("verify");
     assert_eq!(ok.status.code(), Some(0), "数据没变时应通过");
@@ -765,7 +973,13 @@ fn lab_records_reads_and_verify_flags_data_drift() {
     // 数据换版本：结论就不成立了
     fs::write(ws.join("data.csv"), "x,y\n1,0\n9,9\n").unwrap();
     let drift = Command::new(bin())
-        .args(["lab", "verify", bundle.to_str().unwrap(), "--workspace", ws.to_str().unwrap()])
+        .args([
+            "lab",
+            "verify",
+            bundle.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+        ])
         .output()
         .expect("verify");
     assert_eq!(drift.status.code(), Some(3), "数据漂移时必须返回 3");
@@ -787,7 +1001,10 @@ fn lab_table_aggregates_seeds_and_refuses_mixed_data_versions() {
         .unwrap();
         fs::write(
             d.join("inputs.jsonl"),
-            format!("{{\"path\":\"data.csv\",\"sha256\":\"{}\",\"bytes\":1}}\n", hash),
+            format!(
+                "{{\"path\":\"data.csv\",\"sha256\":\"{}\",\"bytes\":1}}\n",
+                hash
+            ),
         )
         .unwrap();
         fs::write(
@@ -801,10 +1018,20 @@ fn lab_table_aggregates_seeds_and_refuses_mixed_data_versions() {
     let b = mk("b", 0.82, "hash-same");
 
     let out = Command::new(bin())
-        .args(["lab", "table", a.to_str().unwrap(), b.to_str().unwrap(), "--json"])
+        .args([
+            "lab",
+            "table",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--json",
+        ])
         .output()
         .expect("table");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(v.u64_at("bundles"), Some(2));
     assert_eq!(v.u64_at("inputDrift"), Some(0));
@@ -825,7 +1052,11 @@ fn lab_table_aggregates_seeds_and_refuses_mixed_data_versions() {
 #[test]
 fn lab_claims_must_be_backed_by_artifacts() {
     let ws = temp_ws("claims");
-    fs::write(ws.join("run_exp.sh"), "printf '{\"accuracy\":0.72}\\n' > metrics.json\n").unwrap();
+    fs::write(
+        ws.join("run_exp.sh"),
+        "printf '{\"accuracy\":0.72}\\n' > metrics.json\n",
+    )
+    .unwrap();
     let sc = ws.join("sc.json");
     fs::write(
         &sc,
@@ -836,17 +1067,33 @@ fn lab_claims_must_be_backed_by_artifacts() {
     .unwrap();
     let run = Command::new(bin())
         .args([
-            "run", "--task", "跑实验", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "跑实验",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 
     let claim = Command::new(bin())
         .args([
-            "lab", "claim", "--workspace", ws.to_str().unwrap(),
-            "--name", "accuracy", "--value", "0.72",
+            "lab",
+            "claim",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--name",
+            "accuracy",
+            "--value",
+            "0.72",
         ])
         .output()
         .expect("claim");
@@ -855,22 +1102,41 @@ fn lab_claims_must_be_backed_by_artifacts() {
     let bundle = ws.join("b");
     let pack = Command::new(bin())
         .args([
-            "lab", "pack", "--workspace", ws.to_str().unwrap(),
-            "--name", "c1", "--out", bundle.to_str().unwrap(),
+            "lab",
+            "pack",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--name",
+            "c1",
+            "--out",
+            bundle.to_str().unwrap(),
         ])
         .output()
         .expect("pack");
-    assert!(pack.status.success(), "{}", String::from_utf8_lossy(&pack.stderr));
+    assert!(
+        pack.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
 
     let ok = Command::new(bin())
         .args(["lab", "verify", bundle.to_str().unwrap()])
         .output()
         .expect("verify");
-    assert_eq!(ok.status.code(), Some(0), "{}", String::from_utf8_lossy(&ok.stdout));
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stdout)
+    );
     assert!(String::from_utf8_lossy(&ok.stdout).contains("结论 1/1 对得上"));
 
     // 产物对不上结论：必须失败
-    fs::write(bundle.join("artifacts").join("metrics.json"), "{\"accuracy\":0.99}\n").unwrap();
+    fs::write(
+        bundle.join("artifacts").join("metrics.json"),
+        "{\"accuracy\":0.99}\n",
+    )
+    .unwrap();
     let bad = Command::new(bin())
         .args(["lab", "verify", bundle.to_str().unwrap()])
         .output()
@@ -892,7 +1158,12 @@ fn lab_verify_json_marks_unbound_claims_loose_with_a_warning() {
         .args(["lab", "verify", b.to_str().unwrap(), "--json"])
         .output()
         .expect("verify --json");
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     // stdout 只留一行 JSON；人类可读的警告走 stderr。
     assert_eq!(stdout.trim().lines().count(), 1, "stdout: {}", stdout);
@@ -905,9 +1176,10 @@ fn lab_verify_json_marks_unbound_claims_loose_with_a_warning() {
     assert_eq!(claims[0].str_at("bound"), None);
     let warnings = v.arr_at("warnings").cloned().unwrap_or_default();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap_or("").contains("⚠ 未绑定路径，按全局匹配")),
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or("")
+            .contains("⚠ 未绑定路径，按全局匹配")),
         "warnings: {:?}",
         warnings
     );
@@ -991,7 +1263,11 @@ fn lab_verify_rejects_a_path_that_names_no_file() {
         .args(["lab", "verify", b.to_str().unwrap(), "--json"])
         .output()
         .expect("verify --json");
-    assert_eq!(out.status.code(), Some(3), "没写文件名必须报错，不能降级放行");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "没写文件名必须报错，不能降级放行"
+    );
     let v = ui_core::json::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(v.u64_at("claimsOk"), Some(0));
     assert_eq!(v.bool_at("loose"), Some(false));
@@ -1053,9 +1329,16 @@ fn mcp_tools_are_callable_and_policy_visible() {
     .unwrap();
     let out = Command::new(bin())
         .args([
-            "run", "--task", "用外部工具", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
-            "--mcp", cfg.to_str().unwrap(),
+            "run",
+            "--task",
+            "用外部工具",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+            "--mcp",
+            cfg.to_str().unwrap(),
         ])
         .output()
         .expect("run");
@@ -1098,8 +1381,14 @@ fn shell_writes_are_observed_and_fine_grained_tools_are_not() {
 
     let out = Command::new(bin())
         .args([
-            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "t",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
@@ -1149,8 +1438,14 @@ fn observation_can_be_switched_off() {
     let out = Command::new(bin())
         .env("UI_OBSERVE", "0")
         .args([
-            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "t",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
@@ -1200,8 +1495,14 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
 
     let out = Command::new(bin())
         .args([
-            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "t",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
@@ -1213,10 +1514,21 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
     );
 
     let out = Command::new(bin())
-        .args(["lab", "pack", "--name", "s1", "--workspace", ws.to_str().unwrap()])
+        .args([
+            "lab",
+            "pack",
+            "--name",
+            "s1",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ])
         .output()
         .expect("pack");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let bundle = ws.join("experiments").join("s1");
     assert!(
@@ -1229,7 +1541,11 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
     );
 
     let inputs = fs::read_to_string(bundle.join("inputs.jsonl")).unwrap();
-    assert!(inputs.contains("fixtures_input.txt"), "真正的输入要记下来: {}", inputs);
+    assert!(
+        inputs.contains("fixtures_input.txt"),
+        "真正的输入要记下来: {}",
+        inputs
+    );
     assert!(
         !inputs.contains("artifacts/metrics.json"),
         "产物不能被记成输入（否则多 seed 表拒绝求均值）: {}",
@@ -1246,7 +1562,11 @@ fn lab_pack_keeps_artifacts_flat_and_not_as_inputs() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(text.contains("产物 1 个校验通过"), "校验没数到产物: {}", text);
+    assert!(
+        text.contains("产物 1 个校验通过"),
+        "校验没数到产物: {}",
+        text
+    );
 }
 
 #[test]
@@ -1266,21 +1586,39 @@ fn export_streams_events_and_refuses_a_tampered_journal() {
     .unwrap();
     let out = Command::new(bin())
         .args([
-            "run", "--task", "t", "--mock", sc.to_str().unwrap(),
-            "--workspace", ws.to_str().unwrap(), "--yes",
+            "run",
+            "--task",
+            "t",
+            "--mock",
+            sc.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
         ])
         .output()
         .expect("run");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let html_path = ws.join("trace.html");
     let out = Command::new(bin())
         .args([
-            "export", "--workspace", ws.to_str().unwrap(), "--html", html_path.to_str().unwrap(),
+            "export",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--html",
+            html_path.to_str().unwrap(),
         ])
         .output()
         .expect("export");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 内嵌 JSON 必须完整可解析，且事件数与日志行数一致
     let html = fs::read_to_string(&html_path).unwrap();
@@ -1303,7 +1641,11 @@ fn export_streams_events_and_refuses_a_tampered_journal() {
     let bad = ws.join("bad.html");
     let out = Command::new(bin())
         .args([
-            "export", "--workspace", ws.to_str().unwrap(), "--html", bad.to_str().unwrap(),
+            "export",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--html",
+            bad.to_str().unwrap(),
         ])
         .output()
         .expect("export");
@@ -1392,7 +1734,13 @@ fn all_boolean_switches_keep_a_following_subcommand() {
             .expect("run");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "{}: stdout={} stderr={}", flag, stdout, stderr);
+        assert!(
+            out.status.success(),
+            "{}: stdout={} stderr={}",
+            flag,
+            stdout,
+            stderr
+        );
         assert!(
             ws.join(".ui").join("journal.jsonl").is_file(),
             "{} 吞掉了子命令 run。stdout={}",

@@ -6,12 +6,12 @@
 //! being silently repeated or silently lost.
 
 use crate::budget::{Budget, BudgetExceeded, Dim, Limits};
-use crate::json::Json;
-use crate::journal::Journal;
-use crate::model::{Model, ToolCall};
-use crate::policy::{Decision, Effect, Policy, Rule, Verdict};
 use crate::cancel::Cancel;
 use crate::compact::{compact, CompactPolicy};
+use crate::journal::Journal;
+use crate::json::Json;
+use crate::model::{Model, ToolCall};
+use crate::policy::{Decision, Effect, Policy, Rule, Verdict};
 use crate::prompt::{build_snapshot, Message, Snapshot};
 use crate::tools::{find, registry, Ctx, Tool, ToolResult};
 use std::fmt;
@@ -64,6 +64,9 @@ impl From<BudgetExceeded> for AgentError {
 /// `call_id` 标识“哪个工具调用”，`approval_id` 标识“哪一次等待人工回答”。
 /// 两者都必须是全局唯一的：否则上一个任务的回答会落到下一个任务上，
 /// 用户点「拒绝」却批准了另一件事。
+///
+/// 展示字段（tool/args/effects/reason）必须来自 Journal 已脱敏的同一条事件；
+/// 不能把模型原始参数直接交给 UI Hook。
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -222,6 +225,8 @@ pub trait Hooks {
     /// 模型正在逐字输出（用于展示的增量，不是最终结果；最终以 on_assistant 为准）。
     fn on_delta(&mut self, _text: &str) {}
     fn on_assistant(&mut self, _text: &str) {}
+    /// 用户输入已经写入 Journal 之后才会调用；展示层不得先于持久化发布正文。
+    fn on_user(&mut self, _text: &str) {}
     /// 一步的快照已生成：右栏据此显示分段与计价（契约 1）。
     fn on_snapshot(&mut self, _snapshot: &Snapshot) {}
     /// 一次工具调用的策略结论（allow/ask/deny + 依据）（契约 3）。
@@ -252,6 +257,10 @@ pub struct TurnReport {
 
 pub struct Agent {
     pub journal: Journal,
+    /// 离开当前会话时保存的脱敏流状态。切回来必须恢复，否则两个事件可以
+    /// 各自不命中、跨会话拼接后却还原凭据。状态不跨进程或重启重建。
+    journal_streams:
+        std::collections::HashMap<PathBuf, (crate::secrets::StreamRedactor, u64, String)>,
     pub model: Box<dyn Model + Send>,
     pub policy: Policy,
     pub budget: Budget,
@@ -359,6 +368,10 @@ fn record_reads(
     Ok(())
 }
 
+fn journal_state_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl Agent {
     /// 账上那条「全文在 X」现在还指得到东西吗？
     ///
@@ -400,10 +413,21 @@ impl Agent {
     /// 会话在磁盘上就是「另一个 JSONL」，不需要新概念；但历史必须跟着换，
     /// 否则会把上一条会话的上下文带进新会话（那是数据泄漏）。
     pub fn switch_journal(&mut self, path: &Path) -> Result<(), AgentError> {
+        self.switch_journal_with(path, |_| Ok::<(), AgentError>(()))
+    }
+
+    /// 两阶段切换：目标日志与历史验证通过后，先让调用方准备外部关联状态，
+    /// 成功后才提交 Agent 自身状态。展示层可据此保证「恢复失败」不会留下
+    /// Agent 已切走、Hub 仍指向旧会话的半切换现场。
+    pub fn switch_journal_with<E, F>(&mut self, path: &Path, prepare: F) -> Result<(), E>
+    where
+        E: From<AgentError>,
+        F: FnOnce(&crate::journal::Journal) -> Result<(), E>,
+    {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let journal = crate::journal::Journal::open(path)?;
+        let journal = crate::journal::Journal::open(path).map_err(AgentError::Journal)?;
         let events = match crate::journal::Journal::read(path) {
             Ok((events, None)) => events,
             Ok((events, Some(c))) if c.torn => events,
@@ -411,9 +435,10 @@ impl Agent {
                 return Err(AgentError::Journal(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("会话日志损坏：{}", c.reason),
-                )))
+                ))
+                .into());
             }
-            Err(e) => return Err(AgentError::Journal(e)),
+            Err(e) => return Err(AgentError::Journal(e).into()),
         };
         let mut history: Vec<crate::prompt::Message> = Vec::new();
         for e in &events {
@@ -460,8 +485,22 @@ impl Agent {
         // 会话日志是另一个文件，`Journal::open` 会按 UI_REDACT 重新起一份开关；
         // 这一轮的设置以 Agent 当前这份为准，不然人关掉了脱敏会在换会话时悄悄复原。
         let redact = self.journal.redacting();
+        let previous_key = journal_state_key(self.journal.path());
+        let target_key = journal_state_key(path);
+        // 外部关联状态（例如 Web Hub 的脱敏流）必须先准备成功；失败时当前
+        // 会话仍原样可用，不能提前清掉它的候选或 PEM 抑制状态。
+        prepare(&journal)?;
+        // 只有新日志已经成功打开、历史也验证通过、外部状态也准备好后才迁移状态。
+        self.journal_streams
+            .insert(previous_key, self.journal.stream_snapshot());
+        let restored = self.journal_streams.get(&target_key).cloned();
         self.journal = journal;
         self.journal.set_redact(redact);
+        if let Some(state) = restored {
+            // 仅在日志未被其他进程推进时恢复完整快照；否则保留 open()
+            // 从最新记录恢复出的持久状态，避免旧快照覆盖新的候选边界。
+            self.journal.restore_stream_snapshot(state);
+        }
         // turn 编号来自日志，不是全局 run 计数；换日志必须跟着换，否则
         // 空会话第一轮可能从 57 开始，切回来又会重复 4、5。
         self.turn = self.journal.turn_count();
@@ -542,10 +581,14 @@ impl Agent {
         // 事件缓冲有上限，轮次必须来自独立计数
         let turn = journal.turn_count();
         // watcher 要在 workspace 被 move 之前建好
-        let observe_on = std::env::var("UI_OBSERVE").map(|v| v != "0").unwrap_or(true);
+        let observe_on = std::env::var("UI_OBSERVE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
         // UI_OBSERVE_SCAN=1 强制走全量扫描（对照 benchmark 用，也是逃生口：
         // 某些网络/overlay 文件系统上 inotify 事件不可靠）
-        let force_scan = std::env::var("UI_OBSERVE_SCAN").map(|v| v == "1").unwrap_or(false);
+        let force_scan = std::env::var("UI_OBSERVE_SCAN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let watcher = if observe_on && !force_scan {
             crate::observe::Watcher::new(&workspace)
         } else {
@@ -562,6 +605,7 @@ impl Agent {
         let cancel = Cancel::new();
         Agent {
             journal,
+            journal_streams: std::collections::HashMap::new(),
             model,
             policy,
             budget: Budget::new(limits),
@@ -595,10 +639,16 @@ impl Agent {
             // 建不起来（平台不支持 / watch 超限）就退回扫描。
             watcher,
             sandbox: crate::sandbox::Config {
-                fs: std::env::var("UI_SANDBOX").map(|v| v != "0").unwrap_or(true),
-                net: std::env::var("UI_SANDBOX_NET").map(|v| v == "1").unwrap_or(false),
+                fs: std::env::var("UI_SANDBOX")
+                    .map(|v| v != "0")
+                    .unwrap_or(true),
+                net: std::env::var("UI_SANDBOX_NET")
+                    .map(|v| v == "1")
+                    .unwrap_or(false),
                 extra_writable: Vec::new(),
-                read: std::env::var("UI_SANDBOX_READ").map(|v| v != "0").unwrap_or(true),
+                read: std::env::var("UI_SANDBOX_READ")
+                    .map(|v| v != "0")
+                    .unwrap_or(true),
                 read_roots: crate::sandbox::default_read_roots(),
             },
             plugins: None,
@@ -624,9 +674,7 @@ impl Agent {
                     match probe {
                         Some(p) if p.as_os_str().is_empty() => return false,
                         Some(p) => match std::fs::canonicalize(p) {
-                            Ok(real) => {
-                                break real.join(path.file_name().unwrap_or_default())
-                            }
+                            Ok(real) => break real.join(path.file_name().unwrap_or_default()),
                             Err(_) => probe = p.parent(),
                         },
                         None => return false,
@@ -634,8 +682,7 @@ impl Agent {
                 }
             }
         };
-        let ws =
-            std::fs::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone());
+        let ws = std::fs::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone());
         !real.starts_with(&ws)
     }
 
@@ -655,20 +702,31 @@ impl Agent {
         self.turn
     }
 
+    /// 当前 agent 正在写哪个会话。Web worker 补记排队取消时用它避免
+    /// 把别的会话任务写进当前 journal。
+    pub fn journal_path(&self) -> &Path {
+        self.journal.path()
+    }
+
     /// 落账那道门的 agent 侧包装：只管两件事——
     /// ①「这一轮的日志是原文」这条记号要在第一段原文进盘之前补上；
     /// ② 事件写进 `Journal::append`，脱敏在那里发生（状态只有 Journal 那一份，
     /// 避免出现"agent 以为关了、日志还开着"这种两处开关互相漂移的 bug）。
     ///
-    /// 新事件请走这里。例外只有 `journal_tool_output`：它自己按"模式脱敏 +
-    /// 来源扣留"两档处理过正文，需要 `journal.append_raw`，见那里的注释。
+    /// 新事件请走这里。例外只有 `journal_tool_output`：它自己按“模式脱敏 +
+    /// 来源扣留”两档处理过正文，需要 `Journal::append_with_streamed_text`，见那里的注释。
     ///
     /// 它是 `pub` 的：`ui-cli/src/server.rs` 的 worker 线程也在落账（排队时被撤
     /// 掉的那条消息），走这里才能连带 `privacy/redact-off` 那条记号一起补上。
     pub fn log_event(&mut self, kind: &str, payload: Json) -> Result<(), AgentError> {
+        self.log_event_record(kind, payload).map(|_| ())
+    }
+
+    /// 与 log_event 共用同一道门，但把落账后的安全事件交给调用方。
+    /// 展示层只能发布这份事件里的正文，不能绕过 Journal 直接使用模型/工具原文。
+    fn log_event_record(&mut self, kind: &str, payload: Json) -> Result<Json, AgentError> {
         self.note_redact_off();
-        self.journal.append(kind, payload)?;
-        Ok(())
+        self.journal.append(kind, payload).map_err(AgentError::from)
     }
 
     /// 落盘一份原文（0600 + 内核命名），返回它的绝对路径。
@@ -815,21 +873,14 @@ impl Agent {
         ok: bool,
         kept: &str,
         private: Option<String>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Json, AgentError> {
         self.note_redact_off();
         let mut fields: Vec<(&str, Json)> = vec![
             ("callId", Json::from(call_id)),
             ("tool", Json::from(tool)),
             ("ok", Json::Bool(ok)),
         ];
-        let (text, hits) = if self.journal.redacting() {
-            crate::secrets::redact(kept)
-        } else {
-            (kept.to_string(), 0)
-        };
-        if hits > 0 {
-            fields.push(("redacted", Json::from(hits)));
-        }
+        let publish = private.is_none();
         match private {
             Some(declared) => {
                 // 原文另存 0600，日志里只留能对齐、不能用的东西
@@ -838,7 +889,10 @@ impl Agent {
                 fields.push(("text", Json::from("")));
                 fields.push(("withheld", Json::from(declared.as_str())));
                 fields.push(("chars", Json::from(chars)));
-                fields.push(("sha256", Json::from(crate::sha256::hex(kept.as_bytes()).as_str())));
+                fields.push((
+                    "sha256",
+                    Json::from(crate::sha256::hex(kept.as_bytes()).as_str()),
+                ));
                 match self.spill_original(true, tool, kept) {
                     Ok(path) => {
                         let rel = path
@@ -856,13 +910,13 @@ impl Agent {
                     }
                 }
             }
-            None => fields.push(("text", Json::from(text.as_str()))),
+            None => fields.push(("text", Json::from(kept))),
         }
-        // 不走 `log_event`、也不给 `Journal::append` 那道门过：这一条的正文在
-        // 上面已经按两档处理过了，`redacted` 计数指的是那里的一次抹除，
-        // 再过一遍会把计数含义洗掉。
-        self.journal.append_raw("tool/output", Json::obj(fields))?;
-        Ok(())
+        // 原始正文必须在字段原位置进入共享流：先静态替换会吃掉截断 PEM 头，
+        // 下一段工具输出就不知道要抑制正文。来源扣留时只推进状态、不发布正文。
+        self.journal
+            .append_with_streamed_text("tool/output", Json::obj(fields), kept, publish)
+            .map_err(AgentError::from)
     }
 
     /// 工具输出超过 `tool_chars` 时落盘，上下文里只留首尾 + 指针。
@@ -929,7 +983,10 @@ impl Agent {
         let tail_n = self.tool_chars / 3;
         let head: String = full.chars().take(head_n).collect();
         let tail: String = full.chars().skip(total - tail_n).collect();
-        let kept = format!("{}\n…[输出共 {} 字符，已截断{}]\n{}", head, total, rel, tail);
+        let kept = format!(
+            "{}\n…[输出共 {} 字符，已截断{}]\n{}",
+            head, total, rel, tail
+        );
 
         // `file` 字段是给 `spill::dangling` 看的：原文被保留策略清掉之后，
         // 账上这条指针就该被指出来，而不是留着让人去 fs_read 一份没了的文件。
@@ -951,7 +1008,8 @@ impl Agent {
         if self.loaded_skills.iter().any(|(n, _)| n == name) {
             return Ok(());
         }
-        self.loaded_skills.push((name.to_string(), body.to_string()));
+        self.loaded_skills
+            .push((name.to_string(), body.to_string()));
         self.log_event(
             "skill/load",
             Json::obj(vec![
@@ -987,13 +1045,20 @@ impl Agent {
         )
     }
 
-    pub fn run_turn(&mut self, input: &str, hooks: &mut dyn Hooks) -> Result<TurnReport, AgentError> {
+    pub fn run_turn(
+        &mut self,
+        input: &str,
+        hooks: &mut dyn Hooks,
+    ) -> Result<TurnReport, AgentError> {
         // 每轮只读一次：先 refresh（坏链就在这里 fail closed，连 turn/start 都不写），
         // 再用「本轮输入 + goal + 最近两条 user」检索一次。工具结果不触发隐式重检索。
         if self.memory_enabled {
             self.memory.refresh().map_err(AgentError::Memory)?;
         }
-        let query_input = self.memory_query.take().unwrap_or_else(|| input.to_string());
+        let query_input = self
+            .memory_query
+            .take()
+            .unwrap_or_else(|| input.to_string());
         let memory_query =
             crate::memory::build_query(&query_input, self.goal.as_deref(), &self.history);
         self.memory_hits = if self.memory_enabled && self.memory_tokens > 0 {
@@ -1012,11 +1077,19 @@ impl Agent {
 
         self.turn += 1;
         let turn = self.turn;
-        self.log_event(
+        let turn_event = self.log_event_record(
             "turn/start",
-            Json::obj(vec![("turn", Json::from(turn)), ("mode", Json::from(self.mode.name())), ("prompt", Json::from(input))]),
+            Json::obj(vec![
+                ("turn", Json::from(turn)),
+                ("mode", Json::from(self.mode.name())),
+                ("prompt", Json::from(input)),
+            ]),
         )?;
 
+        // 先落账再展示，而且展示的是 Journal 脱敏后的安全副本。若进程在两者
+        // 之间崩溃，重启后 Journal 仍保有这次输入建立的威胁状态。
+        let safe_input = turn_event.str_at("prompt").unwrap_or("").to_string();
+        hooks.on_user(&safe_input);
         self.history.push(Message::user(input));
         let mut steps = 0usize;
         let mut tool_calls = 0usize;
@@ -1033,8 +1106,14 @@ impl Agent {
                 return self.finish(turn, "step_budget", steps, tool_calls, last_text);
             }
             if let Err(e) = self.budget.assert_room(Dim::WallMs, 0.0) {
-                self.journal
-                    .append("turn/end", Json::obj(vec![("turn", Json::from(turn)), ("reason", Json::from("budget")), ("error", Json::from(e.to_string()))]))?;
+                self.journal.append(
+                    "turn/end",
+                    Json::obj(vec![
+                        ("turn", Json::from(turn)),
+                        ("reason", Json::from("budget")),
+                        ("error", Json::from(e.to_string())),
+                    ]),
+                )?;
                 return Err(AgentError::Budget(e));
             }
 
@@ -1170,7 +1249,7 @@ impl Agent {
             // 全局唯一 id，否则 resume、审批回执和 viewer 都会串到别的调用上。
             self.canonicalize_call_ids(&mut response);
 
-            self.log_event(
+            let response_event = self.log_event_record(
                 "model/response",
                 Json::obj(vec![
                     ("model", Json::from(self.model.name())),
@@ -1185,7 +1264,13 @@ impl Agent {
                                     Json::obj(vec![
                                         ("name", Json::from(c.name.as_str())),
                                         ("args", c.args.clone()),
-                                        ("parseError", c.parse_error.clone().map(Json::from).unwrap_or(Json::Null)),
+                                        (
+                                            "parseError",
+                                            c.parse_error
+                                                .clone()
+                                                .map(Json::from)
+                                                .unwrap_or(Json::Null),
+                                        ),
                                     ])
                                 })
                                 .collect(),
@@ -1216,8 +1301,10 @@ impl Agent {
             if !response.content.is_empty() {
                 last_text = response.content.clone();
                 // 跨轮历史：模型说的话也要记住，否则下一轮它不知道刚才说过什么
-                self.history.push(Message::assistant(response.content.clone()));
-                hooks.on_assistant(&response.content);
+                self.history
+                    .push(Message::assistant(response.content.clone()));
+                let safe_content = response_event.str_at("content").unwrap_or("").to_string();
+                hooks.on_assistant(&safe_content);
             }
             if response.tool_calls.is_empty() && response.content.trim().is_empty() {
                 // 空回复不是完成。静默结束会让"没做完"看起来像"做完了"。
@@ -1250,10 +1337,7 @@ impl Agent {
                 // 写操作前留基线：没有它，review/revert 只能靠用户记得先手动
                 // checkpoint。只做一次；失败要显式留一条 checkpoint/error，
                 // 不能假装自动基线已经存在。
-                if self.auto_checkpoint
-                    && !checkpointed
-                    && Self::may_write_workspace(&call.name)
-                {
+                if self.auto_checkpoint && !checkpointed && Self::may_write_workspace(&call.name) {
                     checkpointed = true;
                     match crate::checkpoint::create_limited(
                         &self.workspace,
@@ -1291,7 +1375,10 @@ impl Agent {
                     Err(e) => return Err(e),
                 };
                 tool_calls += 1;
-                hooks.on_tool(&name, &call.args, &result);
+                // 来源判定必须赶在展示 Hook 前面：Web 的全文、摘要与 SSE 都
+                // 从这里出去，Journal 扣留不能替 Hub 兜住已经发走的原文。
+                let private = self.private_source(call);
+                let withheld = private.is_some();
 
                 // skill 正文进上下文这件事必须留痕：谁、多少字节、什么时候
                 if name == "skill" && result.ok {
@@ -1302,15 +1389,54 @@ impl Agent {
 
                 // 工具输出不全量常驻上下文：太长就落盘，上下文里只留首尾 + 指针。
                 // 每个工具结果会在后面每一步被重发一次，这里是成本的主要来源。
-                let full = result.error.as_deref().unwrap_or(&result.content);
-                // 来源判定要用**原始调用**算：kept 已经不含参数，而"这次读的是
-                // 不是隐私路径"只由参数决定。它还得赶在截断落盘前面——那一份副本
-                // 放进哪个目录，取决于这次是不是按清单扣留。
-                let private = self.private_source(call);
-                let kept = self.retain_tool_output(&name, full, private.is_some())?;
-                // 模型看到的仍是原文，落账的那一份先脱敏/扣留（见 journal_tool_output）
-                self.journal_tool_output(&call.id, &name, result.ok, &kept, private)?;
+                let full = result.combined_text();
+                let kept = self.retain_tool_output(&name, &full, private.is_some())?;
+                // 模型看到的仍是原文，落账与网页展示的那两份分别脱敏/扣留。
+                let output_event =
+                    self.journal_tool_output(&call.id, &name, result.ok, &kept, private)?;
                 self.history.push(Message::tool(&name, result.ok, &kept));
+                // Journal 已经持久化本次输出建立的威胁状态；Hub 只能收到
+                // 这条安全事件里的正文，不能再次拿到原始 result。
+                if withheld {
+                    let display = ToolResult {
+                        ok: result.ok,
+                        content: "[工具输出已按隐私清单扣留]".to_string(),
+                        error: (!result.ok)
+                            .then(|| "工具执行失败（输出已按隐私清单扣留）".to_string()),
+                        meta: Json::Obj(vec![]),
+                    };
+                    hooks.on_tool(&name, &call.args, &display);
+                } else {
+                    let safe_text = output_event.str_at("text").unwrap_or("").to_string();
+                    // TUI/Console 优先展示 error；不能清空它而让 stdout 首行顶掉失败原因。
+                    // 这里只能从 Journal 已脱敏的合并正文派生，不能把原始 error 再发一遍。
+                    let safe_error = if result.ok {
+                        None
+                    } else if result.error.is_some() {
+                        Some(
+                            safe_text
+                                .rsplit_once("\n\n[错误] ")
+                                .map(|(_, error)| error.to_string())
+                                .filter(|error| !error.is_empty())
+                                .unwrap_or_else(|| {
+                                    if safe_text.is_empty() {
+                                        "工具执行失败（输出已脱敏扣留）".to_string()
+                                    } else {
+                                        safe_text.clone()
+                                    }
+                                }),
+                        )
+                    } else {
+                        Some("工具执行失败".to_string())
+                    };
+                    let display = ToolResult {
+                        ok: result.ok,
+                        content: safe_text,
+                        error: safe_error,
+                        meta: Json::Obj(vec![]),
+                    };
+                    hooks.on_tool(&name, &call.args, &display);
+                }
             }
 
             steps += 1;
@@ -1359,9 +1485,10 @@ impl Agent {
             ) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = self
-                        .journal
-                        .append("model/error", Json::obj(vec![("error", Json::from(e.as_str()))]));
+                    let _ = self.journal.append(
+                        "model/error",
+                        Json::obj(vec![("error", Json::from(e.as_str()))]),
+                    );
                     return Err(AgentError::Model(e));
                 }
             };
@@ -1388,15 +1515,15 @@ impl Agent {
                         ("tool", Json::from("(protocol)")),
                         ("error", Json::from(err.as_str())),
                         ("raw", Json::from(response.content.as_str())),
-                        ("usage", response.usage_tokens.map(Json::from).unwrap_or(Json::Null)),
+                        (
+                            "usage",
+                            response.usage_tokens.map(Json::from).unwrap_or(Json::Null),
+                        ),
                         ("estimatedTokens", Json::from(estimated)),
                     ]),
                 )?;
                 if attempts > self.max_repairs {
-                    return Err(AgentError::Model(format!(
-                        "协议错误重试次数用尽：{}",
-                        err
-                    )));
+                    return Err(AgentError::Model(format!("协议错误重试次数用尽：{}", err)));
                 }
                 let note = format!(
                     "你上一条输出不是约定的 JSON 对象（{}）。请只输出一个 JSON 对象：\
@@ -1431,7 +1558,10 @@ impl Agent {
                     ("tool", Json::from(broken[0].name.as_str())),
                     ("error", Json::from(error.as_str())),
                     ("raw", Json::from(broken[0].raw.clone().unwrap_or_default())),
-                    ("usage", response.usage_tokens.map(Json::from).unwrap_or(Json::Null)),
+                    (
+                        "usage",
+                        response.usage_tokens.map(Json::from).unwrap_or(Json::Null),
+                    ),
                     ("estimatedTokens", Json::from(estimated)),
                 ]),
             )?;
@@ -1461,6 +1591,8 @@ impl Agent {
     ///
     /// 审批不是「模型问完就过去了」的一条提示：每个 ask 都有自己的 id，
     /// 回答时必须同时写清决定与授权范围。`Once` 不留下会话规则，`Session` 才留下。
+    /// `args` 必须已经是 Journal 安全事件里的副本；这里不再把原始参数写第二遍，
+    /// 避免同一份裸前缀/待决 token 被重复消费后在外发出口恢复成原文。
     fn request_approval(
         &mut self,
         hooks: &mut dyn Hooks,
@@ -1481,21 +1613,13 @@ impl Agent {
             self.journal.seq(),
             self.approval_seq
         );
-        let request = ApprovalRequest {
-            approval_id: approval_id.clone(),
-            call_id: call_id.to_string(),
-            tool: tool.to_string(),
-            args: args.clone(),
-            effects: effects.to_vec(),
-            reason: reason.to_string(),
-        };
-        self.log_event(
+        let requested = self.log_event_record(
             "approval/requested",
             Json::obj(vec![
                 ("approvalId", Json::from(approval_id.as_str())),
                 ("callId", Json::from(call_id)),
-                ("tool", Json::from(tool)),
                 ("context", Json::from(context)),
+                ("tool", Json::from(tool)),
                 (
                     "effects",
                     Json::Arr(effects.iter().map(Effect::to_json).collect()),
@@ -1503,6 +1627,19 @@ impl Agent {
                 ("reason", Json::from(reason)),
             ]),
         )?;
+        // 审批卡是外发出口。参数只从上游 Journal 安全事件传入，绝不在这里
+        // 再次写入原始 args；其他展示字段取本条 approval/requested 的安全副本。
+        let request = ApprovalRequest {
+            approval_id: approval_id.clone(),
+            call_id: call_id.to_string(),
+            tool: requested.str_at("tool").unwrap_or_default().to_string(),
+            args: args.clone(),
+            effects: requested
+                .arr_at("effects")
+                .map(|items| items.iter().filter_map(Effect::from_json).collect())
+                .unwrap_or_default(),
+            reason: requested.str_at("reason").unwrap_or_default().to_string(),
+        };
         let answer = hooks.on_approval(&request);
         let mut record = vec![
             ("approvalId", Json::from(approval_id.as_str())),
@@ -1622,10 +1759,7 @@ impl Agent {
                 .filter(|e| e.kind.starts_with("fs."))
                 .filter(|e| self.escapes_workspace(&e.target))
                 .map(|e| {
-                    let reason = format!(
-                        "{} 解析后的真实路径在工作区之外（符号链接）",
-                        e.target
-                    );
+                    let reason = format!("{} 解析后的真实路径在工作区之外（符号链接）", e.target);
                     (e.clone(), Decision::Deny, reason)
                 })
                 .collect();
@@ -1650,7 +1784,7 @@ impl Agent {
                 };
             }
         }
-        self.log_event(
+        let request_event = self.log_event_record(
             "tool/request",
             Json::obj(vec![
                 ("callId", Json::from(call.id.as_str())),
@@ -1664,7 +1798,17 @@ impl Agent {
                 ("reason", Json::from(verdict.reason.as_str())),
             ]),
         )?;
-        hooks.on_decision(&call.id, &name, verdict.decision, &verdict.reason);
+        let safe_tool = request_event.str_at("tool").unwrap_or(&name).to_string();
+        let safe_args = request_event.get("args").cloned().unwrap_or(Json::Null);
+        let safe_effects: Vec<Effect> = request_event
+            .arr_at("effects")
+            .map(|items| items.iter().filter_map(Effect::from_json).collect())
+            .unwrap_or_default();
+        let safe_reason = request_event
+            .str_at("reason")
+            .unwrap_or(&verdict.reason)
+            .to_string();
+        hooks.on_decision(&call.id, &safe_tool, verdict.decision, &safe_reason);
 
         let mut allowed = verdict.decision != Decision::Deny;
         if verdict.decision == Decision::Deny {
@@ -1697,10 +1841,10 @@ impl Agent {
                 hooks,
                 "dispatch",
                 &call.id,
-                &name,
-                &call.args,
-                &effects,
-                &verdict.reason,
+                &safe_tool,
+                &safe_args,
+                &safe_effects,
+                &safe_reason,
             )?;
             if self.active_cancel.is_cancelled() {
                 let result = ToolResult::err("调用已取消");
@@ -1787,7 +1931,13 @@ impl Agent {
         )?;
         // 输入血缘：读文件也要留指纹。否则「结果可复现」只做了一半——
         // 数据换了版本，产物哈希却还是对的。
-        record_reads(&mut self.journal, &self.workspace, &name, &call.id, &effects)?;
+        record_reads(
+            &mut self.journal,
+            &self.workspace,
+            &name,
+            &call.id,
+            &effects,
+        )?;
 
         // 观测式效果：这三个通道是"信任边界"——它们声明的是「要不要执行」，
         // 内部到底读了什么、写了什么，声明里没有。执行前后取差量，
@@ -1851,7 +2001,10 @@ impl Agent {
                         ("summary", Json::from(ch.summary())),
                         ("changes", ch.to_json()),
                         ("overflowed", Json::Bool(overflowed)),
-                        ("source", Json::from(if watching { "inotify" } else { "scan" })),
+                        (
+                            "source",
+                            Json::from(if watching { "inotify" } else { "scan" }),
+                        ),
                     ]);
                     self.log_event("effect/observed", payload.clone())?;
                     hooks.on_event(&Json::obj(vec![
@@ -1920,7 +2073,12 @@ impl Agent {
             reason: reason.to_string(),
             steps,
             tool_calls,
-            tokens: self.budget.snapshot().get("used").and_then(|u| u.u64_at("tokens")).unwrap_or(0),
+            tokens: self
+                .budget
+                .snapshot()
+                .get("used")
+                .and_then(|u| u.u64_at("tokens"))
+                .unwrap_or(0),
             final_text: text,
         })
     }
@@ -1937,8 +2095,8 @@ pub struct ResumeReport {
 pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, AgentError> {
     // 未完成的调用必须从**文件**里流式取，不能靠内存里的事件缓冲：
     // 事件缓冲有 2000 条上限，大日志上的未完成调用可能早就被挤出去了。
-    let report = crate::stream_verify::verify_stream(agent.journal.path())
-        .map_err(AgentError::Journal)?;
+    let report =
+        crate::stream_verify::verify_stream(agent.journal.path()).map_err(AgentError::Journal)?;
     let mut reconciled = Vec::new();
     let mut needs_human = Vec::new();
 
@@ -1972,10 +2130,13 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
                         Json::obj(vec![
                             ("callId", Json::from(call_id.as_str())),
                             ("tool", Json::from(tool_name.as_str())),
-                            ("reason", Json::from(format!(
-                                "可重放工具当前策略不允许重跑：{}",
-                                verdict.reason
-                            ))),
+                            (
+                                "reason",
+                                Json::from(format!(
+                                    "可重放工具当前策略不允许重跑：{}",
+                                    verdict.reason
+                                )),
+                            ),
                         ]),
                     )?;
                     needs_human.push(format!(
@@ -2071,15 +2232,14 @@ pub fn resume(agent: &mut Agent, hooks: &mut dyn Hooks) -> Result<ResumeReport, 
 }
 
 pub fn describe_snapshot(s: &Snapshot) -> String {
-    let mut out = format!("snapshot {} · {} tokens · {} bytes\n", s.id, s.tokens, s.bytes);
+    let mut out = format!(
+        "snapshot {} · {} tokens · {} bytes\n",
+        s.id, s.tokens, s.bytes
+    );
     for section in &s.sections {
         out.push_str(&format!(
             "  {:<8} {:<8} {:>6} tok  {:>6} B  {}\n",
-            section.id,
-            section.owner,
-            section.tokens,
-            section.bytes,
-            section.volatility
+            section.id, section.owner, section.tokens, section.bytes, section.volatility
         ));
     }
     out
@@ -2141,7 +2301,11 @@ mod tests {
             .find(|m| m.role == "tool")
             .expect("应有工具结果");
         assert!(kept.content.contains("已截断"), "{}", kept.content);
-        assert!(kept.content.contains("tool-output"), "应给出指针：{}", kept.content);
+        assert!(
+            kept.content.contains("tool-output"),
+            "应给出指针：{}",
+            kept.content
+        );
         assert!(
             kept.content.chars().count() < 900,
             "上下文里只能留一小片，实际 {}",
@@ -2318,7 +2482,10 @@ mod tests {
         let mut hooks = NullHooks;
         let report = agent.run_turn("写个坏文件", &mut hooks).unwrap();
         assert_eq!(report.reason, "done");
-        assert_eq!(std::fs::read_to_string(ws.join("bad.txt")).unwrap(), "fixed");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("bad.txt")).unwrap(),
+            "fixed"
+        );
         let repairs = agent
             .journal
             .events
@@ -2378,8 +2545,7 @@ mod tests {
         assert_eq!(denied, 1);
         assert!(
             agent.journal.events.iter().any(|e| {
-                e.str_at("kind") == Some("turn/end")
-                    && e.str_at("reason") == Some("budget")
+                e.str_at("kind") == Some("turn/end") && e.str_at("reason") == Some("budget")
             }),
             "budget exhaustion must close the turn with reason=budget"
         );
@@ -2481,13 +2647,148 @@ mod tests {
         let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
         let script = Json::obj(vec![
             ("model", Json::from("scripted")),
-            ("steps", Json::Arr(vec![Json::obj(vec![("content", Json::from("ok"))])])),
+            (
+                "steps",
+                Json::Arr(vec![Json::obj(vec![("content", Json::from("ok"))])]),
+            ),
         ]);
         let mut agent = Agent::new(journal, model(&script), ws.clone(), Limits::default());
         let other = ws.join(".ui").join("other.jsonl");
         Journal::open(&other).unwrap();
         agent.switch_journal(&other).unwrap();
         assert_eq!(agent.turn_number(), 0, "空会话的 turn 必须从 0 开始");
+    }
+
+    #[test]
+    fn failed_switch_preparation_keeps_the_current_session_and_redaction_state() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = workspace("switch-prepare-failed");
+        let alpha = ws.join(".ui").join("alpha.jsonl");
+        let beta = ws.join(".ui").join("beta.jsonl");
+        let journal = Journal::open(&alpha).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws, Limits::default());
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+
+        let err = agent
+            .switch_journal_with(&beta, |_| {
+                Err::<(), AgentError>(AgentError::Journal(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "外部状态准备失败",
+                )))
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("外部状态准备失败"));
+        assert_eq!(agent.journal_path(), alpha.as_path());
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from(TAIL))]),
+            )
+            .unwrap();
+        let (events, corrupt) = Journal::read(&alpha).unwrap();
+        assert!(corrupt.is_none());
+        let rebuilt = events
+            .iter()
+            .filter_map(|event| event.str_at("content"))
+            .collect::<String>();
+        assert!(!rebuilt.contains("AKIAWEBASSISTANTTEST12"), "{}", rebuilt); // allowlist secret（测试夹具，非真凭据）
+
+        agent.switch_journal(&beta).unwrap();
+        assert_eq!(agent.journal_path(), beta.as_path());
+    }
+
+    #[test]
+    fn switching_sessions_preserves_each_journals_redaction_state() {
+        let ws = workspace("switch-redaction-state");
+        let alpha = ws.join(".ui").join("alpha.jsonl");
+        let beta = ws.join(".ui").join("beta.jsonl");
+        let journal = Journal::open(&alpha).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws.clone(), Limits::default());
+
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        agent.switch_journal(&beta).unwrap();
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from("beta neutral"))]),
+            )
+            .unwrap();
+        agent.switch_journal(&alpha).unwrap();
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![
+                    ("content", Json::from("AWEBASSISTANTTEST12")), // allowlist secret（测试夹具，非真凭据）
+                ]),
+            )
+            .unwrap();
+
+        let (events, corruption) = Journal::read(&alpha).unwrap();
+        assert!(corruption.is_none());
+        let rebuilt = events
+            .iter()
+            .filter_map(|event| event.str_at("content"))
+            .collect::<String>();
+        assert!(!rebuilt.contains("AKIAWEBASSISTANTTEST12"), "{}", rebuilt); // allowlist secret（测试夹具，非真凭据）
+        assert!(rebuilt.contains("[REDACTED:aws key]"), "{}", rebuilt);
+    }
+
+    #[test]
+    fn switching_sessions_discards_a_snapshot_changed_by_another_writer() {
+        const TAIL: &str = "AWEBASSISTANTTEST12"; // allowlist secret（测试夹具，非真凭据）
+        let ws = workspace("switch-redaction-external-writer");
+        let alpha = ws.join(".ui").join("alpha.jsonl");
+        let beta = ws.join(".ui").join("beta.jsonl");
+        let journal = Journal::open(&alpha).unwrap();
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            ("steps", Json::Arr(vec![])),
+        ]);
+        let mut agent = Agent::new(journal, model(&script), ws.clone(), Limits::default());
+
+        agent.switch_journal(&beta).unwrap();
+        let mut external = Journal::open(&alpha).unwrap();
+        external
+            .append(
+                "model/response",
+                Json::obj(vec![("content", Json::from("AKI"))]),
+            )
+            .unwrap();
+        drop(external);
+
+        agent.switch_journal(&alpha).unwrap();
+        agent
+            .log_event(
+                "model/response",
+                Json::obj(vec![("content", Json::from(TAIL))]),
+            )
+            .unwrap();
+        let (events, corruption) = Journal::read(&alpha).unwrap();
+        assert!(corruption.is_none());
+        let rebuilt = events
+            .iter()
+            .filter_map(|event| event.str_at("content"))
+            .collect::<String>();
+        assert!(!rebuilt.contains("AKIAWEBASSISTANTTEST12"), "{}", rebuilt); // allowlist secret（测试夹具，非真凭据）
+        assert!(rebuilt.contains("[REDACTED:aws key]"), "{}", rebuilt);
     }
 
     #[cfg(unix)]
@@ -2542,7 +2843,10 @@ mod tests {
             full.len()
         );
         assert!(
-            agent.history.iter().any(|m| m.role == "tool" && m.content.contains("完整内容在")),
+            agent
+                .history
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("完整内容在")),
             "模型上下文必须有 spill 指针"
         );
     }
@@ -2636,7 +2940,10 @@ mod tests {
             "任务锚点（第一条用户消息）不能被折掉"
         );
         assert!(
-            agent.history.iter().any(|m| m.role == "note" && m.content.contains("已折叠")),
+            agent
+                .history
+                .iter()
+                .any(|m| m.role == "note" && m.content.contains("已折叠")),
             "被折叠的部分要留下摘要"
         );
     }
@@ -2674,7 +2981,10 @@ mod tests {
             .count();
         assert_eq!(starts, 0, "取消后不应再执行任何工具");
         assert!(
-            agent.history.iter().any(|m| m.role == "user" && m.content == "干点活"),
+            agent
+                .history
+                .iter()
+                .any(|m| m.role == "user" && m.content == "干点活"),
             "取消不丢历史：下一轮还能接着聊"
         );
 
@@ -2684,7 +2994,10 @@ mod tests {
             journal2,
             model(&Json::obj(vec![
                 ("model", Json::from("scripted")),
-                ("steps", Json::Arr(vec![Json::obj(vec![("content", Json::from("好"))])])),
+                (
+                    "steps",
+                    Json::Arr(vec![Json::obj(vec![("content", Json::from("好"))])]),
+                ),
             ])),
             std::path::PathBuf::from("/tmp"),
             Limits::default(),
@@ -2840,7 +3153,12 @@ mod tests {
 
         let ws = workspace("protocol");
         let journal = Journal::open(ws.join(".ui").join("journal.jsonl")).unwrap();
-        let mut agent = Agent::new(journal, Box::new(Drifting { calls: 0 }), ws, Limits::default());
+        let mut agent = Agent::new(
+            journal,
+            Box::new(Drifting { calls: 0 }),
+            ws,
+            Limits::default(),
+        );
         let mut hooks = NullHooks;
         let report = agent.run_turn("干点活", &mut hooks).unwrap();
 
@@ -2980,10 +3298,7 @@ mod tests {
                 ("path", Json::from("a.txt")),
                 ("content", Json::from("内容")),
             ]);
-            let one = Json::obj(vec![
-                ("name", Json::from("fs_write")),
-                ("args", args),
-            ]);
+            let one = Json::obj(vec![("name", Json::from("fs_write")), ("args", args)]);
             Json::obj(vec![("toolCalls", Json::Arr(vec![one]))])
         };
         let mut steps = Vec::new();
@@ -3005,6 +3320,136 @@ mod tests {
         let mut agent = Agent::new(journal, model(script), ws, Limits::default());
         agent.mode = crate::mode::Mode::Strict;
         agent
+    }
+
+    #[test]
+    fn display_hooks_run_only_after_the_matching_journal_record_is_durable() {
+        struct OrderingHooks {
+            path: std::path::PathBuf,
+            saw_user: bool,
+            saw_tool: bool,
+        }
+        impl Hooks for OrderingHooks {
+            fn on_user(&mut self, text: &str) {
+                let (events, corrupt) = Journal::read(&self.path).unwrap();
+                assert!(corrupt.is_none());
+                assert!(events.iter().any(|event| {
+                    event.str_at("kind") == Some("turn/start")
+                        && event.str_at("prompt") == Some(text)
+                }));
+                self.saw_user = true;
+            }
+
+            fn on_tool(&mut self, name: &str, _args: &Json, result: &ToolResult) {
+                let (events, corrupt) = Journal::read(&self.path).unwrap();
+                assert!(corrupt.is_none());
+                assert!(events.iter().any(|event| {
+                    event.str_at("kind") == Some("tool/output")
+                        && event.str_at("tool") == Some(name)
+                        && event.str_at("text") == Some(result.content.as_str())
+                }));
+                self.saw_tool = true;
+            }
+        }
+
+        let ws = workspace("journal-before-display");
+        std::fs::write(ws.join("a.txt"), "tool body").unwrap();
+        let path = ws.join(".ui/journal.jsonl");
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![(
+                        "toolCalls",
+                        Json::Arr(vec![Json::obj(vec![
+                            ("name", Json::from("fs_read")),
+                            ("args", Json::obj(vec![("path", Json::from("a.txt"))])),
+                        ])]),
+                    )]),
+                    Json::obj(vec![("content", Json::from("done"))]),
+                ]),
+            ),
+        ]);
+        let mut agent = Agent::new(
+            Journal::open(&path).unwrap(),
+            model(&script),
+            ws,
+            Limits::default(),
+        );
+        let mut hooks = OrderingHooks {
+            path,
+            saw_user: false,
+            saw_tool: false,
+        };
+        agent.run_turn("read it", &mut hooks).unwrap();
+        assert!(hooks.saw_user && hooks.saw_tool);
+    }
+
+    #[test]
+    fn failed_tool_display_keeps_the_error_summary_without_losing_stdout() {
+        struct FailedToolHooks {
+            shown: Option<ToolResult>,
+        }
+        impl Hooks for FailedToolHooks {
+            fn on_tool(&mut self, _name: &str, _args: &Json, result: &ToolResult) {
+                self.shown = Some(result.clone());
+            }
+        }
+
+        let ws = workspace("failed-tool-display");
+        let path = ws.join(".ui/journal.jsonl");
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![(
+                        "toolCalls",
+                        Json::Arr(vec![Json::obj(vec![
+                            ("name", Json::from("fs_read")),
+                            ("args", Json::obj(vec![("path", Json::from("a.txt"))])),
+                        ])]),
+                    )]),
+                    Json::obj(vec![("content", Json::from("done"))]),
+                ]),
+            ),
+        ]);
+        let mut agent = Agent::new(
+            Journal::open(&path).unwrap(),
+            model(&script),
+            ws,
+            Limits::default(),
+        );
+        agent
+            .tools
+            .iter_mut()
+            .find(|tool| tool.name == "fs_read")
+            .unwrap()
+            .run = |_, _| ToolResult {
+            ok: false,
+            content: "stdout before failure".to_string(),
+            error: Some("退出码 7".to_string()),
+            meta: Json::Obj(vec![]),
+        };
+        let mut hooks = FailedToolHooks { shown: None };
+        agent.run_turn("read it", &mut hooks).unwrap();
+
+        let shown = hooks.shown.expect("失败结果也必须经过展示 Hook");
+        assert_eq!(shown.error.as_deref(), Some("退出码 7"));
+        assert!(shown.content.contains("stdout before failure"));
+        assert!(shown.content.contains("退出码 7"));
+        let output = agent
+            .journal
+            .events
+            .iter()
+            .find(|event| event.str_at("kind") == Some("tool/output"))
+            .expect("失败输出必须落账");
+        assert_eq!(output.bool_at("ok"), Some(false));
+        assert!(output
+            .str_at("text")
+            .unwrap_or_default()
+            .contains("退出码 7"));
     }
 
     #[test]
@@ -3065,14 +3510,68 @@ mod tests {
     }
 
     #[test]
+    fn approval_request_uses_the_journal_redacted_copy() {
+        struct Capture {
+            request: Option<ApprovalRequest>,
+        }
+        impl Hooks for Capture {
+            fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
+                self.request = Some(req.clone());
+                ApprovalResponse::deny()
+            }
+        }
+
+        let header = "-----BEGIN RSA PRIVATE KEY-----"; // allowlist secret（假私钥头）
+        let body = "WEBAPPROVALPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        let args = Json::obj(vec![
+            ("path", Json::from("approval.txt")),
+            ("content", Json::from("approved content")),
+            ("header", Json::from(header)),
+            ("body", Json::from(body)),
+        ]);
+        let mut agent = strict_agent("approval-redacted-copy", &one_call("fs_write", args));
+        let mut hooks = Capture { request: None };
+        agent.run_turn("写一个文件", &mut hooks).unwrap();
+
+        let request = hooks.request.expect("审批 Hook 必须收到请求");
+        let shown = format!(
+            "{}\n{}\n{}",
+            request.args.to_pretty(),
+            request
+                .effects
+                .iter()
+                .map(Effect::describe)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            request.reason
+        );
+        assert!(!shown.contains(body), "审批卡外发原文: {}", shown);
+        assert!(!shown.contains(header), "审批卡外发私钥头: {}", shown);
+        let requested = row(&agent, "tool/request");
+        assert!(
+            requested.num_at("redacted").unwrap_or(0.0) >= 1.0,
+            "上游 Journal 事件必须留下脱敏计数: {:?}",
+            requested
+        );
+        assert!(
+            !journal_text(&agent.workspace).contains(body),
+            "审批事件磁盘副本也不能含正文"
+        );
+    }
+
+    #[test]
     fn shell_private_read_is_approved_and_observed_without_claiming_proof() {
         struct PrivateReadHooks {
             effects: Vec<Effect>,
+            shown: Option<ToolResult>,
         }
         impl Hooks for PrivateReadHooks {
             fn on_approval(&mut self, req: &ApprovalRequest) -> ApprovalResponse {
                 self.effects = req.effects.clone();
                 ApprovalResponse::allow_once()
+            }
+            fn on_tool(&mut self, _name: &str, _args: &Json, result: &ToolResult) {
+                self.shown = Some(result.clone());
             }
         }
 
@@ -3110,11 +3609,55 @@ mod tests {
             .iter_mut()
             .find(|t| t.name == "shell")
             .unwrap()
-            .run = |_, _| ToolResult::ok("ok");
+            .run = |_, _| ToolResult {
+            ok: false,
+            content: "private canary body".to_string(),
+            error: Some("exit status 1".to_string()),
+            meta: Json::Obj(vec![]),
+        };
         let mut hooks = PrivateReadHooks {
             effects: Vec::new(),
+            shown: None,
         };
         agent.run_turn("读隐私路径", &mut hooks).unwrap();
+
+        let shown = hooks.shown.expect("工具结果必须经过展示 Hook");
+        assert!(!shown.content.contains("private canary body"));
+        assert!(shown.content.contains("隐私清单扣留"));
+        assert_eq!(
+            shown.error.as_deref(),
+            Some("工具执行失败（输出已按隐私清单扣留）")
+        );
+        assert!(!shown
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("exit status 1"));
+
+        // 失败命令的 stdout 不能再丢：模型上下文和 0600 private 副本都保留
+        // 规范化后的完整现场，公开 Journal 仍只留扣留元数据。
+        let tool_history = agent
+            .history
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("工具输出必须进入模型历史");
+        assert!(tool_history.content.contains("private canary body"));
+        assert!(tool_history.content.contains("exit status 1"));
+        let output = agent
+            .journal
+            .events
+            .iter()
+            .find(|e| e.str_at("kind") == Some("tool/output"))
+            .expect("工具输出必须落账");
+        assert_eq!(output.str_at("text"), Some(""));
+        assert!(output.str_at("withheld").is_some());
+        let private_file = output
+            .str_at("file")
+            .map(|rel| agent.workspace.join(rel))
+            .expect("private 全文必须有 0600 副本");
+        let private_body = std::fs::read_to_string(private_file).unwrap();
+        assert!(private_body.contains("private canary body"));
+        assert!(private_body.contains("exit status 1"));
 
         assert!(hooks
             .effects
@@ -3221,7 +3764,12 @@ mod tests {
             .iter()
             .find(|e| e.str_at("kind") == Some("approval/answered"))
             .expect("有回执");
-        assert_eq!(row.str_at("via"), None, "人自己答的，不该被标成代答: {:?}", row);
+        assert_eq!(
+            row.str_at("via"),
+            None,
+            "人自己答的，不该被标成代答: {:?}",
+            row
+        );
 
         // 听不懂的词：拒绝 + 记号，两者一起落账。
         let mut agent = strict_agent("approval-via-word", &script);
@@ -3236,7 +3784,10 @@ mod tests {
             .iter()
             .find(|e| e.str_at("kind") == Some("approval/answered"))
             .expect("有回执");
-        assert_eq!((row.str_at("verdict"), row.str_at("via")), (Some("deny"), Some("unknown-word")));
+        assert_eq!(
+            (row.str_at("verdict"), row.str_at("via")),
+            (Some("deny"), Some("unknown-word"))
+        );
     }
 
     /// 「y」和「yes」必须是同一个口子，也不能顺手把范围放大成会话。
@@ -3248,7 +3799,10 @@ mod tests {
             ("allow", "once"),
             "yes 只放这一次"
         );
-        assert_eq!(ApprovalResponse::parse_verdict("y").decision.name(), "allow");
+        assert_eq!(
+            ApprovalResponse::parse_verdict("y").decision.name(),
+            "allow"
+        );
         assert_eq!(
             ApprovalResponse::parse_verdict("session").scope.name(),
             "session",
@@ -3258,7 +3812,9 @@ mod tests {
         // 是最难查的那类集成事故——它看起来"回答了"，只是回答成了"不"。
         assert_eq!(
             (
-                ApprovalResponse::parse_verdict("allow-once").decision.name(),
+                ApprovalResponse::parse_verdict("allow-once")
+                    .decision
+                    .name(),
                 ApprovalResponse::parse_verdict("allow-once").scope.name()
             ),
             ("allow", "once")
@@ -3289,7 +3845,9 @@ mod tests {
         );
         // 「按拒绝」和「不懂你的词」是两件事：前者是决定，后者是 bug。
         // 界面据此在回执里注明，不至于让人以为自己的「允许」按钮失效了。
-        for known in ["allow", "once", "yes", "always", "session", "deny", "no", "a", "y"] {
+        for known in [
+            "allow", "once", "yes", "always", "session", "deny", "no", "a", "y",
+        ] {
             assert!(
                 ApprovalResponse::is_known_verdict(known),
                 "{known} 是文档承诺过的词"
@@ -3317,7 +3875,10 @@ mod tests {
         assert_eq!(hooks.asks.len(), 2, "「仅这一次」不能免掉第二次");
         assert_eq!(agent.policy.session_rule_count(), 0);
         assert_eq!(agent.policy.rules.len(), base, "一次批准不能改规则表");
-        assert_eq!(std::fs::read_to_string(agent.workspace.join("a.txt")).unwrap(), "内容");
+        assert_eq!(
+            std::fs::read_to_string(agent.workspace.join("a.txt")).unwrap(),
+            "内容"
+        );
     }
 
     #[test]
@@ -3330,20 +3891,33 @@ mod tests {
             asks: Vec::new(),
         };
         agent.run_turn("第一个任务", &mut hooks).unwrap();
-        assert_eq!(hooks.asks.len(), 1, "会话内授权应当免掉同一 run 的第二次询问");
+        assert_eq!(
+            hooks.asks.len(),
+            1,
+            "会话内授权应当免掉同一 run 的第二次询问"
+        );
         assert_eq!(agent.policy.session_rule_count(), 1);
 
         // 换新任务：上一轮的授权必须作废。长驻 worker（serve / chat / workflow）
         // 不重置的话，用户点的是上一条消息的「本轮都允许」。
         agent.begin_run();
         assert_eq!(agent.policy.session_rule_count(), 0, "换任务要清掉会话规则");
-        assert_eq!(agent.policy.rules.len(), base, "只能裁掉会话规则，基线要原样");
+        assert_eq!(
+            agent.policy.rules.len(),
+            base,
+            "只能裁掉会话规则，基线要原样"
+        );
         assert_eq!(
             agent
                 .policy
                 .explain(&Effect::new(
                     crate::policy::FS_WRITE,
-                    agent.workspace.join("a.txt").to_string_lossy().replace('\\', "/").as_str()
+                    agent
+                        .workspace
+                        .join("a.txt")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .as_str()
                 ))
                 .0,
             Decision::Allow,
@@ -3391,7 +3965,10 @@ mod tests {
         agent.tool_chars = 200;
         let mut hooks = NullHooks;
         agent.run_turn("读大文件", &mut hooks).unwrap();
-        assert!(agent.budget.used(Dim::Tokens) > 0.0, "第一跑要真的花掉点东西");
+        assert!(
+            agent.budget.used(Dim::Tokens) > 0.0,
+            "第一跑要真的花掉点东西"
+        );
         assert_eq!(agent.tool_seq, 1, "第一跑截断过一次输出");
         assert_eq!(agent.policy.session_rule_count(), 0);
         // 模拟「这一轮被停止」：令牌一旦被置位，同一个令牌上的下一轮会立刻结束
@@ -3415,7 +3992,12 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(files.len(), 2, "两个 run 的截断缓存不能互相覆盖: {:?}", files);
+        assert_eq!(
+            files.len(),
+            2,
+            "两个 run 的截断缓存不能互相覆盖: {:?}",
+            files
+        );
         assert_ne!(files[0], files[1]);
         let trim_files: Vec<String> = agent
             .journal
@@ -3437,7 +4019,9 @@ mod tests {
             );
         }
         // 历史里那条指针必须还能读回它自己的那一轮
-        let first = trim_files[0].trim_start_matches(".ui/tool-output/").to_string();
+        let first = trim_files[0]
+            .trim_start_matches(".ui/tool-output/")
+            .to_string();
         assert!(std::fs::read_to_string(dir.join(first)).is_ok());
     }
 
@@ -3501,6 +4085,40 @@ mod tests {
     /// 两档的顺序是有意的，这里验第一档：来源不在隐私清单上（一份普通笔记），
     /// 凭据正则就是唯一还能起作用的那一层。
     #[test]
+    fn tool_output_stream_sees_unclosed_pem_headers_before_static_redaction() {
+        let header = "-----BEGIN RSA PRIVATE KEY-----"; // allowlist secret（假私钥头）
+        let body = "WEBTOOLPEMCANARY"; // allowlist secret（假私钥正文，非真凭据）
+        let tail = format!("{}\n-----END RSA PRIVATE KEY-----", body); // allowlist secret（假私钥尾）
+
+        for (name, private) in [
+            ("tool-pem-stream", None),
+            ("tool-pem-private-stream", Some("secrets")),
+        ] {
+            let script = one_call(
+                "fs_read",
+                Json::obj(vec![("path", Json::from("notes.txt"))]),
+            );
+            let (mut agent, ws) = disk_agent(name, &script);
+            agent
+                .journal_tool_output("call-1", "shell", true, header, private.map(str::to_string))
+                .unwrap();
+            agent
+                .journal_tool_output("call-2", "shell", true, &tail, private.map(str::to_string))
+                .unwrap();
+
+            let outputs = rows(&agent, "tool/output");
+            assert_eq!(outputs.len(), 2);
+            assert!(outputs[0].num_at("redacted").unwrap_or(0.0) >= 1.0);
+            assert_eq!(outputs[1].str_at("text"), Some(""));
+            let disk = journal_text(&ws);
+            assert!(!disk.contains(body), "{} 泄漏 PEM 正文: {}", name, disk);
+            if private.is_none() {
+                assert!(disk.contains("[REDACTED:"), "{} 缺少脱敏痕迹", name);
+            }
+        }
+    }
+
+    #[test]
     fn credential_shaped_output_is_masked_before_it_reaches_the_journal() {
         let key = "AKIAIOSFODNN7EXAMPLE"; // 测试夹具：密钥形状，非真凭据（allowlist secret）
         let script = one_call(
@@ -3509,15 +4127,13 @@ mod tests {
         );
         let (mut agent, ws) = disk_agent("redact-output", &script);
         std::fs::write(ws.join("notes.txt"), format!("备份用 {} 结束\n", key)).unwrap();
-        agent.run_turn("读一份带凭据的笔记", &mut NullHooks).unwrap();
+        agent
+            .run_turn("读一份带凭据的笔记", &mut NullHooks)
+            .unwrap();
 
         let out = row(&agent, "tool/output");
         let text = out.str_at("text").unwrap();
-        assert!(
-            !text.contains(key),
-            "落账的那一份必须是抹过的：{}",
-            text
-        );
+        assert!(!text.contains(key), "落账的那一份必须是抹过的：{}", text);
         assert!(
             text.contains("[REDACTED:aws key]"),
             "要留下「这里抹过、抹的是什么类型」的痕迹：{}",
@@ -3545,6 +4161,66 @@ mod tests {
             .contains(key));
     }
 
+    #[test]
+    fn model_response_fragments_cannot_be_rejoined_from_the_journal() {
+        let aws = "AKIAWEBJOURNALCANARY12"; // allowlist secret（假凭据）
+        let body = "WEBJOURNALPEMCANARY"; // allowlist secret（假私钥正文）
+        let pem = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----", // allowlist secret（假私钥块）
+            body
+        );
+        let split = pem.find(body).unwrap() + body.len() / 2;
+        let script = Json::obj(vec![
+            ("model", Json::from("scripted")),
+            (
+                "steps",
+                Json::Arr(vec![
+                    Json::obj(vec![("content", Json::from(&aws[..8]))]),
+                    Json::obj(vec![("content", Json::from(&aws[8..]))]),
+                    Json::obj(vec![("content", Json::from(&pem[..split]))]),
+                    Json::obj(vec![("content", Json::from(&pem[split..]))]),
+                ]),
+            ),
+        ]);
+        let (mut agent, ws) = disk_agent("redact-model-stream", &script);
+        for prompt in [&aws[..8], &aws[8..], "第三段", "第四段"] {
+            agent.begin_run();
+            agent.run_turn(prompt, &mut NullHooks).unwrap();
+        }
+        agent
+            .journal
+            .append_streamed_raw(
+                "tool/output",
+                Json::obj(vec![("text", Json::from(&aws[..8]))]),
+            )
+            .unwrap();
+        agent
+            .journal
+            .append_streamed_raw(
+                "tool/output",
+                Json::obj(vec![("text", Json::from(&aws[8..]))]),
+            )
+            .unwrap();
+        let joined = rows(&agent, "model/response")
+            .iter()
+            .filter_map(|row| row.str_at("content"))
+            .collect::<String>();
+        assert!(
+            !joined.contains(aws),
+            "journal 可跨任务拼回 AWS: {}",
+            joined
+        );
+        assert!(
+            !joined.contains(body),
+            "journal 可跨任务拼回 PEM 正文: {}",
+            joined
+        );
+        assert!(joined.contains("[REDACTED:"), "{}", joined);
+        let disk = journal_text(&ws);
+        assert!(!disk.contains(aws), "磁盘 journal 可跨任务拼回 AWS");
+        assert!(!disk.contains(body), "磁盘 journal 可跨任务拼回 PEM 正文");
+    }
+
     /// 参数比输出更早外流：`tool/request` 带 args，`model/response` 带
     /// toolCalls，`fs_write` 的 `content` 里塞什么日志里就有什么。
     #[test]
@@ -3558,7 +4234,9 @@ mod tests {
             ]),
         );
         let (mut agent, ws) = disk_agent("redact-args", &script);
-        agent.run_turn("写一份带凭据的笔记", &mut NullHooks).unwrap();
+        agent
+            .run_turn("写一份带凭据的笔记", &mut NullHooks)
+            .unwrap();
 
         let req = row(&agent, "tool/request");
         let arg_content = req
@@ -3572,7 +4250,11 @@ mod tests {
             "tool/request 的 args 里还剩原文：{}",
             arg_content
         );
-        assert!(arg_content.contains("[REDACTED"), "要看得出抹过：{}", arg_content);
+        assert!(
+            arg_content.contains("[REDACTED"),
+            "要看得出抹过：{}",
+            arg_content
+        );
         assert!(
             req.num_at("redacted").unwrap_or(0.0) >= 1.0,
             "参数侧的抹除同样要计数：{:?}",
@@ -3646,7 +4328,9 @@ mod tests {
             answer: ApprovalResponse::allow_once(),
             asks: Vec::new(),
         };
-        agent.run_turn("把私密目录里的东西打出来", &mut hooks).unwrap();
+        agent
+            .run_turn("把私密目录里的东西打出来", &mut hooks)
+            .unwrap();
 
         let out = row(&agent, "tool/output");
         assert_eq!(
@@ -3665,11 +4349,13 @@ mod tests {
             spill_rel
         );
         assert!(
-            !ws.join(".ui/tool-output").join(
-                std::path::Path::new(&spill_rel)
-                    .file_name()
-                    .unwrap_or_default()
-            ).exists(),
+            !ws.join(".ui/tool-output")
+                .join(
+                    std::path::Path::new(&spill_rel)
+                        .file_name()
+                        .unwrap_or_default()
+                )
+                .exists(),
             "同一份正文不该在模型读得到的目录里再留一份"
         );
         let spill = std::fs::read_to_string(ws.join(&spill_rel)).unwrap();
@@ -3687,12 +4373,19 @@ mod tests {
         // 换成「同机任何用户都能读」。
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::metadata(ws.join(&spill_rel)).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(ws.join(&spill_rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o600,
             "落盘的那一份只能本机用户可读"
         );
         // 模型那一份照旧是原文（它被批准执行了这条命令）
-        assert!(agent.history.iter().any(|m| m.content.contains(canary.trim_end())));
+        assert!(agent
+            .history
+            .iter()
+            .any(|m| m.content.contains(canary.trim_end())));
 
         // 关掉模式脱敏不会关掉按来源扣留：后者看的是「从哪来」，与正则无关
         let (mut off, ws2) = disk_agent("redact-source-off", &script);
@@ -3706,7 +4399,11 @@ mod tests {
         };
         off.run_turn("再打一次", &mut hooks).unwrap();
         let out = row(&off, "tool/output");
-        assert_eq!(out.str_at("withheld"), Some("secrets"), "扣留这一档不受 --no-redact 影响");
+        assert_eq!(
+            out.str_at("withheld"),
+            Some("secrets"),
+            "扣留这一档不受 --no-redact 影响"
+        );
         assert_eq!(out.str_at("text"), Some(""));
         assert_eq!(out.num_at("redacted"), None, "没跑正则就不该报抹除计数");
 
@@ -3729,12 +4426,16 @@ mod tests {
         let out = row(&both, "tool/output");
         assert_eq!(out.str_at("withheld"), Some("secrets"));
         assert_eq!(out.str_at("text"), Some(""));
-        assert!(out.num_at("redacted").unwrap_or(0.0) >= 1.0, "计数要说正则也动过手");
-        assert!(!journal_text(&ws3).contains(key), "两档叠起来的结果是日志里两头都没有");
-        let spill = std::fs::read_to_string(
-            ws3.join(out.str_at("file").unwrap_or_default()),
-        )
-        .unwrap();
+        assert!(
+            out.num_at("redacted").unwrap_or(0.0) >= 1.0,
+            "计数要说正则也动过手"
+        );
+        assert!(
+            !journal_text(&ws3).contains(key),
+            "两档叠起来的结果是日志里两头都没有"
+        );
+        let spill =
+            std::fs::read_to_string(ws3.join(out.str_at("file").unwrap_or_default())).unwrap();
         assert!(spill.contains(key), "原文只剩 0600 那一份");
     }
 
@@ -3822,17 +4523,25 @@ mod tests {
             "扣留目录不能开读例外"
         );
         assert!(
-            crate::protected::is_allowed_read(&ws, &ws.join(".ui/tool-output/0001-deadbeef-9-shell.txt")),
+            crate::protected::is_allowed_read(
+                &ws,
+                &ws.join(".ui/tool-output/0001-deadbeef-9-shell.txt")
+            ),
             "截断缓存要能按需读回，否则截断等于丢数据"
         );
 
         // 端到端：下一轮真去读那个指针，拿回来的必须是拒绝，不是正文
         let name = rel.rsplit('/').next().unwrap_or("").to_string();
-        let back = one_call("fs_read", Json::obj(vec![("path", Json::from(rel.as_str()))]));
+        let back = one_call(
+            "fs_read",
+            Json::obj(vec![("path", Json::from(rel.as_str()))]),
+        );
         let (mut agent2, ws2) = disk_agent("pointer-locked-again", &back);
         std::fs::create_dir_all(ws2.join(".ui/tool-private")).unwrap();
         std::fs::write(ws2.join(&rel), canary).unwrap();
-        agent2.run_turn("把上次那份全文再读回来", &mut NullHooks).unwrap();
+        agent2
+            .run_turn("把上次那份全文再读回来", &mut NullHooks)
+            .unwrap();
         let said: String = agent2
             .history
             .iter()
@@ -3844,7 +4553,11 @@ mod tests {
             "指针不该变成回捞正文的通道：{}",
             said
         );
-        assert!(said.contains(&name), "要说清是**被挡**，不是「这里没东西」：{}", said);
+        assert!(
+            said.contains(&name),
+            "要说清是**被挡**，不是「这里没东西」：{}",
+            said
+        );
     }
 
     /// 来源判定本身（不跑子进程，任何平台都能验）：判据是**效果目标**，
@@ -3868,7 +4581,11 @@ mod tests {
                 ("content", Json::from("一段讲到 secrets 的散文，不是路径")),
             ]),
         ));
-        assert!(plain.is_none(), "写到普通路径：正文照旧落账，散文里的词不算：{:?}", plain);
+        assert!(
+            plain.is_none(),
+            "写到普通路径：正文照旧落账，散文里的词不算：{:?}",
+            plain
+        );
         let judged = agent.private_source(&call(
             "fs_write",
             Json::obj(vec![
@@ -3876,12 +4593,20 @@ mod tests {
                 ("content", Json::from("x")),
             ]),
         ));
-        assert_eq!(judged.as_deref(), Some("secrets"), "目标在清单上就按来源扣留");
+        assert_eq!(
+            judged.as_deref(),
+            Some("secrets"),
+            "目标在清单上就按来源扣留"
+        );
         let execed = agent.private_source(&call(
             "shell",
             Json::obj(vec![("command", Json::from("cat secrets/api.txt"))]),
         ));
-        assert_eq!(execed.as_deref(), Some("secrets"), "shell 的效果目标是整条命令串");
+        assert_eq!(
+            execed.as_deref(),
+            Some("secrets"),
+            "shell 的效果目标是整条命令串"
+        );
         // 重读截断缓存：模型本来就能读那个目录，算成隐私来源只会换来每读一次
         // 复制一份、并把诊断信息从日志里抹掉
         let reread = agent.private_source(&call(
@@ -3892,7 +4617,10 @@ mod tests {
         // 豁免只有那一条：同层的另一个目录放的正是"日志里连片段都别留"的内容
         let grab = agent.private_source(&call(
             "fs_read",
-            Json::obj(vec![("path", Json::from(".ui/tool-private/0001-shell.txt"))]),
+            Json::obj(vec![(
+                "path",
+                Json::from(".ui/tool-private/0001-shell.txt"),
+            )]),
         ));
         assert_eq!(grab.as_deref(), Some(".ui"), "例外不包括 tool-private");
         let log = agent.private_source(&call(
@@ -3926,11 +4654,7 @@ mod tests {
         );
         assert_eq!(out.num_at("redacted"), None);
         let off = rows(&agent, "privacy/redact-off");
-        assert_eq!(
-            off.len(),
-            1,
-            "这个选择本身要入账，一轮一次就够"
-        );
+        assert_eq!(off.len(), 1, "这个选择本身要入账，一轮一次就够");
         assert!(
             off[0]
                 .str_at("reason")
@@ -3981,7 +4705,10 @@ mod tests {
                 Json::obj(vec![
                     ("task", Json::from("t2")),
                     ("reason", Json::from("cancelled-while-queued")),
-                    ("text", Json::from(format!("部署要用 {}，别贴进 issue", key))),
+                    (
+                        "text",
+                        Json::from(format!("部署要用 {}，别贴进 issue", key)),
+                    ),
                 ]),
             )
             .unwrap();
@@ -3992,9 +4719,6 @@ mod tests {
             row.str_at("text")
         );
         assert_eq!(row.u64_at("redacted"), Some(1), "并且要说清抹了几处");
-        assert!(
-            !journal_text(&ws).contains(key),
-            "盘上的日志也不能有原文"
-        );
+        assert!(!journal_text(&ws).contains(key), "盘上的日志也不能有原文");
     }
 }

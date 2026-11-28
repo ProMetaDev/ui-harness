@@ -17,7 +17,7 @@
 | R1 | 全量测试通过 | `bash tools/test.sh` | ✅ 通过（数量以 `tools/count_tests.sh` 输出为准；另有 ignored 的吞吐探针） |
 | R2 | 门禁通过 | `bash tools/debug.sh` | ✅ 全部通过（项数以脚本输出为准） |
 | R3 | **干净检出的 HEAD 可构建** | `debug.sh` 的「干净检出的 HEAD 可构建」项（临时 worktree + 独立 target） | ✅ |
-| R4 | CI 在 Linux 与 Windows 交叉编译上通过 | `tools/ci.yml` 两个 job | ✅ |
+| R4 | CI 在 Linux 与 Windows 交叉编译上通过 | `.github/workflows/ci.yml` 三个 job：Linux 门禁、Windows 交叉编译、Windows 运行时 | ✅ |
 | R5 | 日志链可校验、可回放 | `ui verify` / `ui replay` | ✅ 30 万条 549 ms / 3.4 MB |
 | R6 | 七类契约事件齐全且各有测试 | 见 `docs/02-design.md` §契约 | ✅ |
 | R7 | 信任边界有隔离（计划内）与观测 | `ui doctor` 的信任边界块 + `verify_sandbox.sh` | ✅ Linux Landlock / Windows Job Object |
@@ -50,6 +50,7 @@
 | U6 | Windows 无读侧文件视图，硬链接别名不受路径遮罩保护 | 这些情况下 `cat secrets/x` 仍可能读到；Linux 默认读侧视图已遮住清单路径，`read.private` 补审批与 `provesRead:false` 留痕 | 见 `docs/22` 攻击表；不把路径沙箱说成 inode 级防护 |
 | U7 | `memory/used` **双写**（主日志 + 记忆链） | 两处各自可校验，但不是唯一事实源 | 主日志给 replay/verify，记忆链给 hits 派生；P2 再决定是否收敛成单链 |
 | U8 | 记忆只有 P1（人工写入） | 模型不能自己写记忆、没有候选/确认机制 | 这是**有意**的：自动写记忆最容易污染审计，P2 才做且必须人工确认 |
+| U9 | 审批执行/resume 仍重复消费 args 脱敏流 | `tool/start` 再记一次 args；批准执行与 Hub PEM 审批卡未专门覆盖，resume 重放脱敏参数可能改变语义 | 审批卡 P1 已关闭；此项按既有 P2 明示，不把审批执行链称为完整覆盖 |
 
 ## 五、发布前待办（D1–D6 已在 0.2.0 完成）
 

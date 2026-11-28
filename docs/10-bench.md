@@ -58,10 +58,10 @@ external │ tok 4269/200000 │ calls 3/60 │ 8s
   下一步可以做 `lab verify --claims`：把报告里的数字与产物逐个比对，对不上就判无效。
 - `ablation` 的 `best_lr` 三个 seed 都是 0.5——任务太简单，区分度不够，后续换数据集再调。
 
-## 真实多仓库评测：框架可用，正式 120 任务未跑
+## 真实多仓库评测：正式 120 任务运行中
 
 上面的 3 个 CPU 任务和单仓库 `lr` 对照都**不是多仓库评测**。10 个真实仓库 × 12 个任务的
-正式评测目前**一次都没跑**；但已经不能再说“没有任何真实结果”：
+正式评测已绑定最终 v2 RC 与真实 Qwen3 provider 运行，当前尚未完成；但已经不能再说“没有任何真实结果”：
 
 - 真实只读 pilot：serde / flask / axios，5 个任务全部完成，160,773 tokens，changed=0；
 - 真实代码修改：1 个 Flask 仓库、3 个自拟任务，最终 pytest 135 passed；
@@ -76,6 +76,8 @@ external │ tok 4269/200000 │ calls 3/60 │ 8s
 - `bench/tasks.example.json`：12 个通用任务；
 - `tools/make_bench_fixtures.sh` + `tools/verify_bench_repos.sh`：12 个合成 fixture 的
   dry-run/index 自测；fixture **不是真实仓库**，不产生真实数字。
+- 2026-11-28 最终 v2 RC：UI SHA-256 `08d1f6d4…708436`，Qwen3 探针 1/1 通过；
+  正式 120 任务运行中，证据目录为 `out/bench/rc-0.3.0-final-rust1.100-clean-20261128-qwen3-v2/`。
 
 没有 provider 时只做 index，报告 `mode=dry-run`、任务状态 `dry-run`、`success=0`；
 这表示“没有执行模型”，不能当成失败率，也不能写进对外评测结论。完整口径、选仓标准、

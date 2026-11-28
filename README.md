@@ -13,16 +13,16 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 > 我们**撤回了此前的 `v1.0.x` tag**：一个还没过外部评审、没有真实用户、没有多仓库评测的版本，
 > 用 1.0 是给用户错误信号。版本号规则与 1.0 的准入条件见 [docs/34](docs/34-versioning.md)。
 
-## 当前状态（2026-11-27）
+## 当前状态（2026-11-28）
 
 - **本地单用户**：可用；审阅、回滚、索引、审计、浏览器 e2e 都有回归。
 - **0.3.0（本地开发版，尚未打 tag）**：checkpoint GC（保留窗口 + 未引用 blob 清理）、
   review 事务化（先写 intent 再改文件；`ui review --pending/--reconcile` 对账崩溃遗留）、
   审计签名/锚定与本地 WORM 风格存储、OIDC/RBAC/可写管理台，以及 metrics/Postgres/容器 runner 等可选 L2 已落地。
-  0.3.0 基线二进制已跑通 **24h soak**（8580 轮，0 失败，见 [docs/48](docs/48-soak.md)）；最终发布二进制仍需重跑。
+  0.3.0 基线二进制已跑通 **24h soak**（8580 轮，0 失败，见 [docs/48](docs/48-soak.md)）；审批卡 P1 修复后已重新冻结最终 v2 RC（SHA-256 `08d1f6d4…708436`），累计活跃 24h soak 正在运行。
 - **企业单租户**：M1 受信代理/RBAC 已落地最小闭环；M6 角色矩阵/用户映射与审计 API 已接入，`/admin` 提供可写的角色矩阵与用户表单，本地用户表 `.ui/users.json` 是唯一事实；OIDC userinfo 适配层在 `adapters/oidc/`；Postgres/runner/metrics/audit/admin 是可选 L2。
 - **未完成**：OIDC authorization code flow（token 仍由现有 OIDC 客户端获取）、真实付费 provider 长跑、S3 Object Lock；
-  24h soak 的 **0.3.0 基线**已通过（8580 轮，见 [docs/48](docs/48-soak.md)），但跑的是修复前二进制，最终发布版仍需重跑；
+  最终 v2 RC 的 24h soak 与真实 Qwen3 的正式 10 仓库 × 120 任务评测正在运行，两项完成前不能把 0.3.0 称为最终验收通过；
   4 个 soak 脚本的公共层待抽（见 [tools/README](tools/README.md)）。
 - 门禁：`tools/debug.sh` 共 **57 项**（构建 + 端到端 + 攻击场景 + 跨平台）；通过数以实际输出为准，当前数字快照见 [docs/23](docs/23-status.md)。
 
@@ -40,7 +40,7 @@ Rust 内核，零第三方依赖；网页端、背景板、字体全部随单二
 [docs/41](docs/41-enterprise-m1.md)；Postgres L2 adapter 见 [docs/42](docs/42-postgres-adapter.md)；
 真实浏览器 e2e 见 [docs/43](docs/43-browser-e2e.md)；M3 容器 runner 见
 [docs/44](docs/44-container-runner.md)；可观测性见 [docs/45](docs/45-metrics.md)；
-审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；OIDC userinfo 适配层见 [docs/51](docs/51-oidc.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)；端到端导出→签名→锚定→WORM 管线见 [docs/54](docs/54-audit-worm-pipeline.md)；真实付费 provider 的固定 1 轮 smoke（默认 SKIP、预算 0.01 美元）见 [docs/55](docs/55-paid-smoke.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。真实多仓库评测框架（只有框架与合成 fixture 自测，尚未跑出真实结果）见 [docs/56](docs/56-real-repos.md)。
+审计导出见 [docs/46](docs/46-audit-export.md)；非对称签名与锚定链（可选 L2）见 [docs/49](docs/49-audit-sign.md)；本地 WORM 风格审计存储（可选 L2，不是 S3 Object Lock）见 [docs/52](docs/52-worm.md)；管理面见 [docs/47](docs/47-admin.md)；OIDC userinfo 适配层见 [docs/51](docs/51-oidc.md)；长跑与状态检查见 [docs/48](docs/48-soak.md)；真实 provider 长跑（有成本、默认 SKIP）见 [docs/50](docs/50-real-soak.md)；付费 provider 长跑包装器（四道闸、默认 SKIP）见 [docs/53](docs/53-paid-soak.md)；端到端导出→签名→锚定→WORM 管线见 [docs/54](docs/54-audit-worm-pipeline.md)；真实付费 provider 的固定 1 轮 smoke（默认 SKIP、预算 0.01 美元）见 [docs/55](docs/55-paid-smoke.md)。近期工作记录见 [WORKLOG.md](WORKLOG.md)。真实多仓库评测框架与正式 10 仓库 × 120 任务运行状态见 [docs/56](docs/56-real-repos.md)。
 
 ## 它解决什么问题
 

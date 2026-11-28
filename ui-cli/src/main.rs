@@ -9,26 +9,26 @@
 
 mod frame;
 mod knowledge;
-mod memory;
-mod render;
 mod lab;
+mod memory;
 mod providers;
+mod render;
 mod server;
 mod term;
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use ui_core::agent::{resume, Agent, ApprovalRequest, ApprovalResponse, ApprovalScope, Hooks};
 use ui_core::budget::Limits;
 use ui_core::compact::CompactPolicy;
-use ui_core::json::{self, Json};
 use ui_core::journal::{analyze_incomplete, Journal};
+use ui_core::json::{self, Json};
 use ui_core::model::{ExternalModel, Model, ModelResponse, ScriptedModel};
 use ui_core::policy::{Decision, Effect, Policy};
 use ui_core::prompt::{inspect_environment, Message, Snapshot};
 use ui_core::tools::{registry, ToolResult};
-use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::fs::File;
-use std::path::{Path, PathBuf};
 
 /// Windows 控制台默认是 GBK，直接输出 UTF-8 会变成乱码（实机看到「UI 宸插惎鍔?」）。
 /// 启动时把输入输出代码页都切到 65001。
@@ -240,12 +240,14 @@ fn sessions_dir(ws: &Path) -> PathBuf {
 }
 
 /// 会话名只允许安全字符：会话名会变成文件名，不能让它跑出目录。
+/// 名字本身也是外发字段，因此凭据形状同样拒绝，不能借列表输出泄露 key。
 fn valid_session_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && ui_core::secrets::find(name).is_empty()
 }
 
 fn session_path(ws: &Path, name: &str) -> PathBuf {
@@ -300,7 +302,9 @@ fn cmd_sessions(args: &Args) -> Result<i32, String> {
 
     if let Some(name) = args.get("new") {
         if !valid_session_name(name) {
-            return Err("会话名只能用字母、数字、- 和 _（最长 64）".to_string());
+            return Err(
+                "会话名只能用字母、数字、- 和 _（最长 64），且不能包含凭据形状".to_string(),
+            );
         }
         let path = session_path(&ws, name);
         if path.exists() {
@@ -320,12 +324,23 @@ fn cmd_sessions(args: &Args) -> Result<i32, String> {
     }
 
     let mut rows: Vec<(String, u64, u64, u64)> = Vec::new(); // name, events, bytes, mtime
-    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+    for e in std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let p = e.path();
         if p.extension().map(|x| x != "jsonl").unwrap_or(true) {
             continue;
         }
-        let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let name = p
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        // 磁盘上可能已有旧版本创建的凭据形状文件名；列表不读取、不回显它。
+        if !valid_session_name(&name) {
+            continue;
+        }
         let events = std::fs::read_to_string(&p)
             .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
             .unwrap_or(0);
@@ -486,7 +501,9 @@ fn cmd_review(args: &Args) -> Result<i32, String> {
             println!("{}", report.to_json().to_compact());
         } else {
             print!("{}", report.render());
-            println!("\n用 --accept <path#n,...|all> --yes 接受 hunk；其余 hunk 会回退到 checkpoint。");
+            println!(
+                "\n用 --accept <path#n,...|all> --yes 接受 hunk；其余 hunk 会回退到 checkpoint。"
+            );
         }
         return Ok(0);
     }
@@ -594,7 +611,10 @@ fn review_pending(args: &Args, ws: &std::path::Path, jp: &std::path::Path) -> Re
             println!(
                 "{}",
                 Json::obj(vec![
-                    ("pending", Json::Arr(pending.iter().map(|e| (*e).clone()).collect())),
+                    (
+                        "pending",
+                        Json::Arr(pending.iter().map(|e| (*e).clone()).collect())
+                    ),
                     ("count", Json::from(count)),
                 ])
                 .to_compact()
@@ -609,7 +629,12 @@ fn review_pending(args: &Args, ws: &std::path::Path, jp: &std::path::Path) -> Re
         for e in &pending {
             let accepted = e
                 .arr_at("accepted")
-                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
                 .unwrap_or_default();
             println!(
                 "{:>5}  {:<28}  {}",
@@ -648,8 +673,8 @@ fn review_pending(args: &Args, ws: &std::path::Path, jp: &std::path::Path) -> Re
             ("dryRun", Json::Bool(dry)),
         ]));
         if !dry {
-            let mut journal = ui_core::Journal::open(jp)
-                .map_err(|e| format!("写对账日志失败: {}", e))?;
+            let mut journal =
+                ui_core::Journal::open(jp).map_err(|e| format!("写对账日志失败: {}", e))?;
             journal
                 .append(
                     "review/reconciled",
@@ -895,13 +920,13 @@ fn cmd_spill(args: &Args) -> Result<i32, String> {
                     Json::obj(vec![
                         ("name", Json::from(e.name.as_str())),
                         ("bytes", Json::from(e.bytes)),
-                        ("ageDays", Json::from((now.saturating_sub(e.touched_ms) as f64) / 86400000.0)),
+                        (
+                            "ageDays",
+                            Json::from((now.saturating_sub(e.touched_ms) as f64) / 86400000.0),
+                        ),
                         ("mine", Json::Bool(e.mine)),
                         ("from", Json::from(from(e).as_str())),
-                        (
-                            "scheduled",
-                            Json::Bool(going.iter().any(|n| *n == e.path)),
-                        ),
+                        ("scheduled", Json::Bool(going.iter().any(|n| *n == e.path))),
                     ])
                 })
                 .collect(),
@@ -933,22 +958,12 @@ fn cmd_spill(args: &Args) -> Result<i32, String> {
             ("cleaned", Json::Bool(verb == "clean" && !dry)),
             (
                 "willRemove",
-                Json::Arr(
-                    doomed
-                        .iter()
-                        .map(|e| Json::from(e.name.as_str()))
-                        .collect(),
-                ),
+                Json::Arr(doomed.iter().map(|e| Json::from(e.name.as_str())).collect()),
             ),
             ("willRemoveBytes", Json::from(doomed_bytes)),
             (
                 "danglingPointers",
-                Json::Arr(
-                    dangling
-                        .iter()
-                        .map(|d| Json::from(d.as_str()))
-                        .collect(),
-                ),
+                Json::Arr(dangling.iter().map(|d| Json::from(d.as_str())).collect()),
             ),
             ("entries", rows),
         ];
@@ -975,7 +990,11 @@ fn cmd_spill(args: &Args) -> Result<i32, String> {
     println!(
         "  保留策略：{}{}",
         policy.describe(),
-        if all { "（本次被 --all 覆盖成「一个不留」）" } else { "" }
+        if all {
+            "（本次被 --all 覆盖成「一个不留」）"
+        } else {
+            ""
+        }
     );
     for w in ui_core::spill::Policy::warnings() {
         // 设了却没生效的旋钮：不说就等于骗人"这一档在管着"
@@ -1031,7 +1050,9 @@ fn cmd_spill(args: &Args) -> Result<i32, String> {
         for d in dangling.iter().take(8) {
             println!("    · {}", d);
         }
-        println!("    （这是清理的正常结果：正文出过盘，但保留期过了。日志里的字数与指纹仍然可核对。）");
+        println!(
+            "    （这是清理的正常结果：正文出过盘，但保留期过了。日志里的字数与指纹仍然可核对。）"
+        );
     }
     match &prune_result {
         Some(p) => {
@@ -1041,7 +1062,10 @@ fn cmd_spill(args: &Args) -> Result<i32, String> {
                 human_bytes(p.freed_bytes)
             );
             if p.failed > 0 {
-                println!("  有 {} 个删不掉（只读挂载或被占用）——它们还在盘上，下次再试", p.failed);
+                println!(
+                    "  有 {} 个删不掉（只读挂载或被占用）——它们还在盘上，下次再试",
+                    p.failed
+                );
             }
             if p.skipped_foreign > 0 {
                 println!("  跳过 {} 个非内核命名的文件", p.skipped_foreign);
@@ -1230,7 +1254,9 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     println!("            执行前后还会对比工作区，把**实际改动**记入 effect/observed（UI_OBSERVE=0 可关）");
     println!("            命令串命中隐私路径会记为 read.private（默认 ask）；effect/observed 只证明按策略执行，不证明实际读取");
     #[cfg(windows)]
-    println!("            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件读写限制");
+    println!(
+        "            注意：Windows 只有 Job Object（进程树 + 资源上限），**没有**文件读写限制"
+    );
     println!("  plugin  ：效果按声明仲裁；声明之外的行为无法拦截");
     println!("  mcp_call：同上，外部 server 在进程内自主");
     #[cfg(target_os = "linux")]
@@ -1273,12 +1299,18 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
     if unreadable {
         println!("  ⚠ 有目录存在但列不出来（权限/挂载）：这里可能仍有原文，上面的数字不可信");
     }
-    println!("  日志里抹掉或扣留的那一份正文就在这儿；保留策略 {}（run 边界自动执行）", policy.describe());
+    println!(
+        "  日志里抹掉或扣留的那一份正文就在这儿；保留策略 {}（run 边界自动执行）",
+        policy.describe()
+    );
     for w in ui_core::spill::Policy::warnings() {
         println!("  ⚠ {}——这一档没生效，原文会按上面那行攒着", w);
     }
-    println!("  下一次会自动清掉 {} 个、{}；看清单与手动清：ui spill / ui spill clean",
-        plan.remove.len(), human_bytes(plan.bytes));
+    println!(
+        "  下一次会自动清掉 {} 个、{}；看清单与手动清：ui spill / ui spill clean",
+        plan.remove.len(),
+        human_bytes(plan.bytes)
+    );
     if foot.foreign > 0 {
         println!(
             "  其中 {} 个不是内核命名——清理不碰它们（要删请自己确认是什么）",
@@ -1324,7 +1356,11 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
         println!(
             "  {:<9} {:<14} {}",
             tool.name,
-            if tool.idempotent { "可重放" } else { "有副作用" },
+            if tool.idempotent {
+                "可重放"
+            } else {
+                "有副作用"
+            },
             verdict
                 .reasons
                 .iter()
@@ -1366,16 +1402,14 @@ fn provider_model(args: &Args) -> Option<Result<Box<dyn Model + Send>, String>> 
     }
     Some((|| {
         let reg = providers::Registry::load(&path)?;
-        let p = reg
-            .pick(args.get("provider"))
-            .ok_or_else(|| {
-                let names: Vec<&str> = reg.providers.iter().map(|p| p.name.as_str()).collect();
-                format!(
-                    "没有名为 `{}` 的 provider（可用：{}）",
-                    args.get("provider").unwrap_or("?"),
-                    names.join(", ")
-                )
-            })?;
+        let p = reg.pick(args.get("provider")).ok_or_else(|| {
+            let names: Vec<&str> = reg.providers.iter().map(|p| p.name.as_str()).collect();
+            format!(
+                "没有名为 `{}` 的 provider（可用：{}）",
+                args.get("provider").unwrap_or("?"),
+                names.join(", ")
+            )
+        })?;
         // 适配器是 shell 命令：用环境变量前缀把模型名和附加配置传进去
         let mut head = String::new();
         for (k, v) in &p.env {
@@ -1428,8 +1462,16 @@ fn cmd_plugins(args: &Args) -> Result<i32, String> {
             println!(
                 "    - {} — {}  [{}]",
                 t.name,
-                if t.summary.is_empty() { "?" } else { &t.summary },
-                if eff.is_empty() { "无副作用".to_string() } else { eff.join(", ") }
+                if t.summary.is_empty() {
+                    "?"
+                } else {
+                    &t.summary
+                },
+                if eff.is_empty() {
+                    "无副作用".to_string()
+                } else {
+                    eff.join(", ")
+                }
             );
         }
     }
@@ -1450,10 +1492,24 @@ fn cmd_providers(args: &Args) -> Result<i32, String> {
         ));
     }
     let reg = providers::Registry::load(&path)?;
-    println!("配置 {} · 默认 {}", path.display(), if reg.default.is_empty() { "（未设）" } else { &reg.default });
+    println!(
+        "配置 {} · 默认 {}",
+        path.display(),
+        if reg.default.is_empty() {
+            "（未设）"
+        } else {
+            &reg.default
+        }
+    );
     for p in &reg.providers {
         let mark = if p.name == reg.default { "*" } else { " " };
-        println!("{} {:<12} model={:<18} cmd={}", mark, p.name, if p.model.is_empty() { "-" } else { &p.model }, p.cmd.join(" "));
+        println!(
+            "{} {:<12} model={:<18} cmd={}",
+            mark,
+            p.name,
+            if p.model.is_empty() { "-" } else { &p.model },
+            p.cmd.join(" ")
+        );
     }
     Ok(0)
 }
@@ -1582,7 +1638,12 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
 
     let t = std::time::Instant::now();
     let model = build_model(args)?;
-    steps.push(boot_step("config", true, format!("model {}", model.name()), t));
+    steps.push(boot_step(
+        "config",
+        true,
+        format!("model {}", model.name()),
+        t,
+    ));
 
     // journal：打不开就把降级路径走通（临时日志），并在界面上如实说明
     let jp = resolve_journal(args, &ws);
@@ -1602,8 +1663,7 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
             degraded = true;
             let tmp =
                 std::env::temp_dir().join(format!("ui-degraded-{}.jsonl", std::process::id()));
-            let j =
-                Journal::open(&tmp).map_err(|e2| format!("{}；临时日志也打不开: {}", e, e2))?;
+            let j = Journal::open(&tmp).map_err(|e2| format!("{}；临时日志也打不开: {}", e, e2))?;
             steps.push(boot_step(
                 "journal",
                 false,
@@ -1670,7 +1730,19 @@ fn cmd_serve(args: &Args) -> Result<i32, String> {
     let splash =
         !args.flag("no-splash") && std::env::var("UI_SPLASH").map(|v| v != "0").unwrap_or(true);
 
-    server::serve(agent, &addr, ready, splash, args.flag("yes"), args.get("bundles"), args.get("bench-cmd"), args.get("token"), args.get("session"), trusted_proxy.as_deref(), trusted_proxy_secret.as_deref())?;
+    server::serve(
+        agent,
+        &addr,
+        ready,
+        splash,
+        args.flag("yes"),
+        args.get("bundles"),
+        args.get("bench-cmd"),
+        args.get("token"),
+        args.get("session"),
+        trusted_proxy.as_deref(),
+        trusted_proxy_secret.as_deref(),
+    )?;
     Ok(0)
 }
 
@@ -1708,8 +1780,14 @@ fn trusted_proxy_config(args: &Args) -> Result<(Option<String>, Option<String>),
 /// 渲染一帧全屏界面（纯函数，不需要 tty）。用来定版式，也方便贴进 issue。
 fn cmd_preview(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
-    let width = args.get("cols").and_then(|v| v.parse().ok()).unwrap_or(84usize);
-    let height = args.get("rows").and_then(|v| v.parse().ok()).unwrap_or(22usize);
+    let width = args
+        .get("cols")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(84usize);
+    let height = args
+        .get("rows")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(22usize);
 
     let mut state = frame::ScreenState::default();
     state.workspace = ws.to_string_lossy().to_string();
@@ -1987,7 +2065,10 @@ fn run_one(agent: &mut Agent, hooks: &mut TuiHooks, text: &str) {
             };
             hooks.state.lines.push(frame::Line::info(note));
         }
-        Err(e) => hooks.state.lines.push(frame::Line::warn(format!("—— 出错：{}", e))),
+        Err(e) => hooks
+            .state
+            .lines
+            .push(frame::Line::warn(format!("—— 出错：{}", e))),
     }
     if let Some(used) = agent.budget.snapshot().get("used") {
         hooks.state.tokens = used.u64_at("tokens").unwrap_or(0);
@@ -2083,7 +2164,9 @@ impl Hooks for TuiHooks {
                 Ok(term::Key::Char('a')) | Ok(term::Key::Char('A')) => {
                     self.allow_all = true;
                     self.state.approval = None;
-                    self.state.rail.resolve(&req.call_id, ApprovalScope::Session.name());
+                    self.state
+                        .rail
+                        .resolve(&req.call_id, ApprovalScope::Session.name());
                     self.redraw();
                     return ApprovalResponse::allow_session();
                 }
@@ -2133,7 +2216,11 @@ fn apply_tool_filter(agent: &mut Agent, args: &Args) {
         return;
     }
     if let Some(list) = args.get("tools") {
-        let want: Vec<&str> = list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let want: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         agent.tools.retain(|t| want.iter().any(|w| *w == t.name));
     }
 }
@@ -2156,10 +2243,16 @@ fn tool_chars(args: &Args) -> usize {
 /// 上下文折叠策略：`--compact-tokens N`（0 = 关闭）、`--keep-recent K`。
 fn compact_policy(args: &Args) -> CompactPolicy {
     let mut p = CompactPolicy::default();
-    if let Some(v) = args.get("compact-tokens").and_then(|v| v.parse::<u64>().ok()) {
+    if let Some(v) = args
+        .get("compact-tokens")
+        .and_then(|v| v.parse::<u64>().ok())
+    {
         p.max_history_tokens = if v == 0 { u64::MAX } else { v };
     }
-    if let Some(v) = args.get("keep-recent").and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(v) = args
+        .get("keep-recent")
+        .and_then(|v| v.parse::<usize>().ok())
+    {
         p.keep_recent = v.max(2);
     }
     p
@@ -2282,7 +2375,10 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
         .run_turn(&task, &mut hooks)
         .map_err(|e| e.to_string())?;
 
-    println!("\n{}", render::status_line(agent.model.name(), &agent.budget.snapshot(), &limits));
+    println!(
+        "\n{}",
+        render::status_line(agent.model.name(), &agent.budget.snapshot(), &limits)
+    );
     println!(
         "结束原因 {} · {} 步 · {} 次工具 · 约 {} tokens",
         report.reason, report.steps, report.tool_calls, report.tokens
@@ -2349,16 +2445,17 @@ fn cmd_audit(args: &Args) -> Result<i32, String> {
         }
         actions += 1;
         let base = policy.decide(&effects).decision;
-        let judged = effects
-            .iter()
-            .map(|f| target.adjust(&f.kind, base))
-            .fold(Decision::Allow, |acc, d| {
-                if d.severity() > acc.severity() {
-                    d
-                } else {
-                    acc
-                }
-            });
+        let judged =
+            effects
+                .iter()
+                .map(|f| target.adjust(&f.kind, base))
+                .fold(Decision::Allow, |acc, d| {
+                    if d.severity() > acc.severity() {
+                        d
+                    } else {
+                        acc
+                    }
+                });
         if judged == base {
             continue;
         }
@@ -2430,7 +2527,11 @@ fn env_fingerprint() -> Json {
     let os = read("/etc/os-release")
         .lines()
         .find(|l| l.starts_with("PRETTY_NAME="))
-        .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+        .map(|l| {
+            l.trim_start_matches("PRETTY_NAME=")
+                .trim_matches('"')
+                .to_string()
+        })
         .unwrap_or_default();
     let kernel = std::process::Command::new("uname")
         .arg("-r")
@@ -2495,7 +2596,14 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
         if tool == "shell" {
             commands.push(Json::obj(vec![
                 ("seq", Json::from(seq)),
-                ("command", Json::from(e.get("args").and_then(|a| a.str_at("command")).unwrap_or(""))),
+                (
+                    "command",
+                    Json::from(
+                        e.get("args")
+                            .and_then(|a| a.str_at("command"))
+                            .unwrap_or(""),
+                    ),
+                ),
                 ("decision", Json::from(decision)),
             ]));
         }
@@ -2558,7 +2666,13 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
             let name = e.file_name().to_string_lossy().to_string();
             if matches!(
                 name.as_str(),
-                ".ui" | "target" | "node_modules" | ".git" | "experiments" | "bundles" | "claims.json"
+                ".ui"
+                    | "target"
+                    | "node_modules"
+                    | ".git"
+                    | "experiments"
+                    | "bundles"
+                    | "claims.json"
             ) {
                 continue;
             }
@@ -2671,8 +2785,11 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
         .map(|m| m.to_compact())
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(bundle.join("manifest.jsonl"), format!("{}\n", manifest_text))
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        bundle.join("manifest.jsonl"),
+        format!("{}\n", manifest_text),
+    )
+    .map_err(|e| e.to_string())?;
     let inputs_text = inputs
         .iter()
         .map(|m| m.to_compact())
@@ -2698,9 +2815,13 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
     report.push_str(&format!(
         "- 环境：{} · kernel {} · {} 核 · {}\n",
         meta.get("env").and_then(|e| e.str_at("os")).unwrap_or("?"),
-        meta.get("env").and_then(|e| e.str_at("kernel")).unwrap_or("?"),
+        meta.get("env")
+            .and_then(|e| e.str_at("kernel"))
+            .unwrap_or("?"),
         meta.get("env").and_then(|e| e.u64_at("cpus")).unwrap_or(0),
-        meta.get("env").and_then(|e| e.str_at("python")).unwrap_or("?")
+        meta.get("env")
+            .and_then(|e| e.str_at("python"))
+            .unwrap_or("?")
     ));
     report.push_str(&format!("- 日志事件：{}\n\n", events.len()));
     report.push_str("## 产物\n\n| 文件 | 字节 | sha256 | 来源 |\n|---|---|---|---|\n");
@@ -2716,7 +2837,8 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
         ));
     }
     if !inputs.is_empty() {
-        report.push_str("\n## 读过的输入\n\n| 文件 | 字节 | sha256 | 读取于 |\n|---|---|---|---|\n");
+        report
+            .push_str("\n## 读过的输入\n\n| 文件 | 字节 | sha256 | 读取于 |\n|---|---|---|---|\n");
         for m in &inputs {
             let by = m.get("readBy").cloned().unwrap_or(Json::Null);
             report.push_str(&format!(
@@ -2757,7 +2879,12 @@ fn lab_pack(args: &Args) -> Result<i32, String> {
     std::fs::write(bundle.join("report.md"), report).map_err(|e| e.to_string())?;
 
     println!("实验包 {}", bundle.display());
-    println!("产物 {} 个 · 命令 {} 条 · 日志 {} 事件", manifest.len(), commands.len(), events.len());
+    println!(
+        "产物 {} 个 · 命令 {} 条 · 日志 {} 事件",
+        manifest.len(),
+        commands.len(),
+        events.len()
+    );
     for m in &manifest {
         println!(
             "  {}  {}  {}…",
@@ -2806,7 +2933,12 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
         let file = bundle_artifact_path(&bundle, rel);
         match sha256_file(&file) {
             Some(got) if got == want => checked += 1,
-            Some(got) => bad.push(format!("{} 哈希不符（记录 {}…，实际 {}…）", rel, &want[..8.min(want.len())], &got[..8.min(got.len())])),
+            Some(got) => bad.push(format!(
+                "{} 哈希不符（记录 {}…，实际 {}…）",
+                rel,
+                &want[..8.min(want.len())],
+                &got[..8.min(got.len())]
+            )),
             None => bad.push(format!("{} 缺失", rel)),
         }
     }
@@ -2851,7 +2983,9 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
                     let want = rec.str_at("sha256").unwrap_or("");
                     match sha256_file(&ws.join(rel)) {
                         Some(got) if got == want => input_checked += 1,
-                        Some(_) => bad.push(format!("输入 {} 已改变（数据版本和当初不一样了）", rel)),
+                        Some(_) => {
+                            bad.push(format!("输入 {} 已改变（数据版本和当初不一样了）", rel))
+                        }
                         None => bad.push(format!("输入 {} 在日志里出现过，但现在找不到", rel)),
                     }
                 }
@@ -2908,7 +3042,11 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
             claim_report.ok,
             claim_report.total,
             if journal_ok { "完整" } else { "有问题" },
-            if input_skipped { "（工作区不在本机，跳过输入校验）" } else { "" }
+            if input_skipped {
+                "（工作区不在本机，跳过输入校验）"
+            } else {
+                ""
+            }
         );
         for w in &claim_report.warnings {
             eprintln!("{}", w);
@@ -2927,7 +3065,11 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
         claim_report.ok,
         claim_report.total,
         if journal_ok { "完整" } else { "有问题" },
-        if input_skipped { "（工作区不在本机，跳过输入校验）" } else { "" }
+        if input_skipped {
+            "（工作区不在本机，跳过输入校验）"
+        } else {
+            ""
+        }
     );
     for w in &claim_report.warnings {
         println!("{}", w);
@@ -2949,12 +3091,7 @@ fn lab_verify(args: &Args) -> Result<i32, String> {
 /// 顺序很重要：**先验输入一致，再谈数值聚合**——数据版本不同的实验，
 /// 放在一张表里求均值是学术不端的温床。
 fn lab_table(args: &Args) -> Result<i32, String> {
-    let dirs: Vec<PathBuf> = args
-        .rest
-        .iter()
-        .skip(1)
-        .map(PathBuf::from)
-        .collect();
+    let dirs: Vec<PathBuf> = args.rest.iter().skip(1).map(PathBuf::from).collect();
     if dirs.is_empty() {
         return Err("用法：ui lab table <bundle1> <bundle2> [...] [--json]".to_string());
     }
@@ -2966,14 +3103,22 @@ fn lab_table(args: &Args) -> Result<i32, String> {
         numbers: std::collections::BTreeMap<String, f64>,
     }
 
-    fn collect_numbers(value: &Json, prefix: &str, out: &mut std::collections::BTreeMap<String, f64>) {
+    fn collect_numbers(
+        value: &Json,
+        prefix: &str,
+        out: &mut std::collections::BTreeMap<String, f64>,
+    ) {
         match value {
             Json::Num(n) => {
                 out.insert(prefix.to_string(), *n);
             }
             Json::Obj(items) => {
                 for (k, v) in items {
-                    let key = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
+                    let key = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
                     collect_numbers(v, &key, out);
                 }
             }
@@ -2985,11 +3130,14 @@ fn lab_table(args: &Args) -> Result<i32, String> {
     for dir in &dirs {
         let meta = std::fs::read_to_string(dir.join("meta.json"))
             .map_err(|e| format!("{} 读不到 meta.json: {}", dir.display(), e))?;
-        let meta = json::parse(&meta).map_err(|e| format!("{} meta.json 不是 JSON: {}", dir.display(), e))?;
-        let name = meta
-            .str_at("name")
-            .map(str::to_string)
-            .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+        let meta = json::parse(&meta)
+            .map_err(|e| format!("{} meta.json 不是 JSON: {}", dir.display(), e))?;
+        let name = meta.str_at("name").map(str::to_string).unwrap_or_else(|| {
+            dir.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
         let env = meta.get("env").cloned().unwrap_or(Json::Null);
 
         let mut inputs = std::collections::BTreeMap::new();
@@ -3029,12 +3177,18 @@ fn lab_table(args: &Args) -> Result<i32, String> {
         let mut numbers = std::collections::BTreeMap::new();
         scan_json(&dir.join("artifacts"), &mut numbers);
 
-        bundles.push(Bundle { name, env, inputs, numbers });
+        bundles.push(Bundle {
+            name,
+            env,
+            inputs,
+            numbers,
+        });
     }
 
     // 输入一致性：同一个文件在不同包里哈希必须相同。
     // 产物路径一律不算输入（哪怕旧包里漏进了 inputs.jsonl）：它们每个 seed 本来就不同。
-    let mut all_inputs: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+    let mut all_inputs: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        Default::default();
     for b in &bundles {
         for (path, hash) in &b.inputs {
             if path.starts_with("artifacts/") {
@@ -3060,10 +3214,7 @@ fn lab_table(args: &Args) -> Result<i32, String> {
             ("path", Json::from(path.as_str())),
             ("consistent", Json::Bool(consistent)),
             ("versions", Json::from(uniq.len())),
-            (
-                "covered",
-                Json::from(versions.len()),
-            ),
+            ("covered", Json::from(versions.len())),
         ]));
     }
 
@@ -3102,7 +3253,10 @@ fn lab_table(args: &Args) -> Result<i32, String> {
             ("mean", Json::from(((mean * 10000.0).round()) / 10000.0)),
             ("min", Json::from(min)),
             ("max", Json::from(max)),
-            ("std", Json::from(((var.sqrt() * 10000.0).round()) / 10000.0)),
+            (
+                "std",
+                Json::from(((var.sqrt() * 10000.0).round()) / 10000.0),
+            ),
             (
                 "values",
                 Json::Arr(vals.iter().map(|v| Json::from(*v)).collect()),
@@ -3165,7 +3319,11 @@ fn lab_table(args: &Args) -> Result<i32, String> {
             println!(
                 "| {} | {} | {} | {} |",
                 r.str_at("path").unwrap_or(""),
-                if r.bool_at("consistent") == Some(true) { "✅" } else { "❌" },
+                if r.bool_at("consistent") == Some(true) {
+                    "✅"
+                } else {
+                    "❌"
+                },
                 r.u64_at("versions").unwrap_or(0),
                 r.u64_at("covered").unwrap_or(0)
             );
@@ -3181,7 +3339,13 @@ fn lab_table(args: &Args) -> Result<i32, String> {
         for r in &metric_rows {
             let vals = r
                 .arr_at("values")
-                .map(|a| a.iter().filter_map(|v| v.as_f64()).map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(", "))
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_f64())
+                        .map(|v| format!("{:.4}", v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
                 .unwrap_or_default();
             println!(
                 "| {} | {} | {:.4} | {:.4} | {:.4} | {:.4} | {} |",
@@ -3212,7 +3376,10 @@ fn lab_table(args: &Args) -> Result<i32, String> {
 
     println!();
     if drift > 0 {
-        println!("结论：有 {} 个输入在不同包里版本不一致——**这张表不能求均值**。", drift);
+        println!(
+            "结论：有 {} 个输入在不同包里版本不一致——**这张表不能求均值**。",
+            drift
+        );
         Ok(3)
     } else if !env_same {
         println!("结论：输入一致，但环境不同（OS/kernel/核数）；跨机器比数值要谨慎。");
@@ -3228,7 +3395,9 @@ fn lab_table(args: &Args) -> Result<i32, String> {
 /// 约定：**结论必须显式声明**，不能从自由文本里猜数字——猜错了比不查更糟。
 fn lab_claim(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
-    let name = args.get("name").ok_or("用法：ui lab claim --name accuracy --value 0.72")?;
+    let name = args
+        .get("name")
+        .ok_or("用法：ui lab claim --name accuracy --value 0.72")?;
     let value: f64 = args
         .get("value")
         .ok_or("用法：ui lab claim --name accuracy --value 0.72")?
@@ -3256,7 +3425,11 @@ fn lab_claim(args: &Args) -> Result<i32, String> {
     std::fs::write(&path, doc.to_pretty()).map_err(|e| e.to_string())?;
     println!("已声明 {} 条结论 → {}", list.len(), path.display());
     for c in &list {
-        println!("  {} = {}", c.str_at("name").unwrap_or(""), c.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        println!(
+            "  {} = {}",
+            c.str_at("name").unwrap_or(""),
+            c.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0)
+        );
     }
     Ok(0)
 }
@@ -3320,7 +3493,10 @@ fn cmd_prompt(args: &Args) -> Result<i32, String> {
         snap.bytes
     );
     for s in &snap.sections {
-        println!("  {:<10} {:>7} 字节 {:>6} tok  [{}]", s.id, s.bytes, s.tokens, s.owner);
+        println!(
+            "  {:<10} {:>7} 字节 {:>6} tok  [{}]",
+            s.id, s.bytes, s.tokens, s.owner
+        );
     }
     Ok(0)
 }
@@ -3491,7 +3667,8 @@ fn cmd_export(args: &Args) -> Result<i32, String> {
             continue;
         }
         if !first {
-            w.write_all(b",").map_err(|e| format!("写文件失败: {}", e))?;
+            w.write_all(b",")
+                .map_err(|e| format!("写文件失败: {}", e))?;
         }
         first = false;
         // 脱敏：解析→清洗→只在真的动了的时候重新序列化。
@@ -3610,7 +3787,11 @@ fn cmd_secrets(args: &Args) -> Result<i32, String> {
             .map(|d| d.display().to_string())
             .collect::<Vec<String>>()
             .join(" ＋ ");
-        println!("没有可扫的东西：{}、{}、.ui/memory.jsonl 都不存在", jp.display(), where_);
+        println!(
+            "没有可扫的东西：{}、{}、.ui/memory.jsonl 都不存在",
+            jp.display(),
+            where_
+        );
         return Ok(0);
     }
 
@@ -3672,11 +3853,7 @@ fn cmd_secrets(args: &Args) -> Result<i32, String> {
         ]);
         println!("{}", payload.to_compact());
     } else {
-        println!(
-            "扫描 {} 行（{} 个来源）",
-            scanned,
-            sources.len()
-        );
+        println!("扫描 {} 行（{} 个来源）", scanned, sources.len());
         if hits.is_empty() {
             println!("未发现疑似密钥。");
         }
@@ -3753,12 +3930,16 @@ fn cmd_secrets(args: &Args) -> Result<i32, String> {
                         for envelope in ["seq", "ts", "prev", "hash", "w"] {
                             ev.remove(envelope);
                         }
-                        journal
-                            .append(&kind, ev)
-                            .map_err(|e| e.to_string())?;
+                        journal.append(&kind, ev).map_err(|e| e.to_string())?;
                         written += 1;
                     }
-                    Err(_) => return Err(format!("{} 第 {} 行不是合法事件", src.display(), written + 1)),
+                    Err(_) => {
+                        return Err(format!(
+                            "{} 第 {} 行不是合法事件",
+                            src.display(),
+                            written + 1
+                        ))
+                    }
                 }
             }
         }
@@ -3798,7 +3979,10 @@ fn cmd_skills(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let cat = ui_core::skill::Catalog::discover(&ws);
     if cat.is_empty() {
-        println!("没有 skill。放在 {}/skills/<名字>/SKILL.md 或 .ui/skills/ 下。", ws.display());
+        println!(
+            "没有 skill。放在 {}/skills/<名字>/SKILL.md 或 .ui/skills/ 下。",
+            ws.display()
+        );
         return Ok(0);
     }
     println!("{} 个 skill（正文按需加载）：", cat.skills.len());
@@ -3827,7 +4011,9 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
     let ws = workspace(args);
     let task = match args.get("task") {
         Some(t) => t.to_string(),
-        None => return Err("用法：ui team --task \"复杂任务\" [--agents 3] [--isolate]".to_string()),
+        None => {
+            return Err("用法：ui team --task \"复杂任务\" [--agents 3] [--isolate]".to_string())
+        }
     };
     let agents = args
         .get("agents")
@@ -3904,14 +4090,12 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
 
     // ── 3. 委派给 workflow 执行器（并行 + 隔离 + 闸门都在那边）──
     let mut wf_args = Args::empty();
-    wf_args.values.insert(
-        "file".to_string(),
-        plan_path.to_string_lossy().to_string(),
-    );
-    wf_args.values.insert(
-        "workspace".to_string(),
-        ws.to_string_lossy().to_string(),
-    );
+    wf_args
+        .values
+        .insert("file".to_string(), plan_path.to_string_lossy().to_string());
+    wf_args
+        .values
+        .insert("workspace".to_string(), ws.to_string_lossy().to_string());
     for key in ["mock", "agents", "max-tokens", "max-calls", "mode", "mcp"] {
         if let Some(v) = args.get(key) {
             wf_args.values.insert(key.to_string(), v.to_string());
@@ -3932,10 +4116,9 @@ fn cmd_team(args: &Args) -> Result<i32, String> {
 
     // ── 4. 把子代理的改动合并回主工作区（冲突/漂移闸都在 apply 里）──
     let mut apply_args = Args::empty();
-    apply_args.values.insert(
-        "workspace".to_string(),
-        ws.to_string_lossy().to_string(),
-    );
+    apply_args
+        .values
+        .insert("workspace".to_string(), ws.to_string_lossy().to_string());
     apply_args.flags.push("all".to_string());
     if args.flag("yes") {
         apply_args.flags.push("yes".to_string());
@@ -4345,7 +4528,6 @@ fn cmd_workflow(args: &Args) -> Result<i32, String> {
     Ok(exit)
 }
 
-
 /// `--skills a,b` → ["a", "b"]
 fn skill_list(args: &Args) -> Vec<String> {
     args.get("skills")
@@ -4359,7 +4541,8 @@ fn skill_list(args: &Args) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn preload_skills(agent: &mut Agent, ws: &Path, names: &[String]) -> Result<(), String> {    if names.is_empty() {
+fn preload_skills(agent: &mut Agent, ws: &Path, names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
         return Ok(());
     }
     let catalog = ui_core::skill::Catalog::discover(ws);
@@ -4508,10 +4691,7 @@ fn copy_tree(
             files += 1;
             if let (Ok(rel), Some(h)) = (from.strip_prefix(root), hash) {
                 // 键格式与读取侧（ui_core::isolate::rel_key）保持一致
-                manifest.push((
-                    ui_core::isolate::rel_key(&rel.to_string_lossy()),
-                    h,
-                ));
+                manifest.push((ui_core::isolate::rel_key(&rel.to_string_lossy()), h));
             }
         }
     }
@@ -4660,7 +4840,10 @@ fn run_parallel(
                                 .trim()
                                 .to_string()
                         });
-                    (o.status.success(), answer.chars().take(600).collect::<String>())
+                    (
+                        o.status.success(),
+                        answer.chars().take(600).collect::<String>(),
+                    )
                 }
                 Err(e) => (false, format!("启动失败: {}", e)),
             };
@@ -4742,8 +4925,7 @@ fn apply_root(ws: &Path) -> PathBuf {
 
 /// 相对路径摊平成备份文件名：分隔符换成 `+`，保留文件名和扩展名好让人翻。
 fn flatten_rel(rel: &str) -> String {
-    rel
-        .chars()
+    rel.chars()
         .map(|c| match c {
             '/' | '\\' | ':' => '+',
             other => other,
@@ -4778,7 +4960,11 @@ fn apply_manifest_entries(manifest: &Json) -> Vec<Json> {
 /// 名字前缀是补零到 8 位的日志序号，所以字典序就是时间序。
 fn apply_txn_dirs(ws: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(apply_root(ws)) {
-        Ok(rd) => rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect(),
+        Ok(rd) => rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
         Err(_) => return Vec::new(),
     };
     dirs.sort();
@@ -4835,10 +5021,9 @@ fn abandon_apply_txn(ws: &Path, jp: &Path, dir: &Path, txn: &str, note: &dyn Fn(
     }
     match Journal::open(jp) {
         Ok(mut journal) => {
-            if let Err(e) = journal.append(
-                "apply/abandoned",
-                Json::obj(vec![("txn", Json::s(txn))]),
-            ) {
+            if let Err(e) =
+                journal.append("apply/abandoned", Json::obj(vec![("txn", Json::s(txn))]))
+            {
                 note(format!("  apply/abandoned 记不进日志: {}", e));
             }
         }
@@ -4917,7 +5102,13 @@ impl ApplyUndo {
 /// 事务内部失败的回滚不开——那时笔迹只有我们自己的，无条件还原才是对的。
 ///
 /// `dry` = 只分类不动盘，给计划模式用。
-fn restore_apply_entries(ws: &Path, dir: &Path, entries: &[Json], gate: bool, dry: bool) -> ApplyUndo {
+fn restore_apply_entries(
+    ws: &Path,
+    dir: &Path,
+    entries: &[Json],
+    gate: bool,
+    dry: bool,
+) -> ApplyUndo {
     let mut undo = ApplyUndo::default();
     for e in entries {
         let rel = match e.str_at("rel") {
@@ -4936,8 +5127,7 @@ fn restore_apply_entries(ws: &Path, dir: &Path, entries: &[Json], gate: bool, dr
         match backup {
             Some(b) => {
                 if !b.is_file() {
-                    undo
-                        .errors
+                    undo.errors
                         .push(format!("{}：留底 {} 不见了，无法还原", rel, b.display()));
                     continue;
                 }
@@ -4969,7 +5159,8 @@ fn restore_apply_entries(ws: &Path, dir: &Path, entries: &[Json], gate: bool, dr
                 // 写回之前这里没有文件：还原 = 删掉它
                 if !dst.is_file() {
                     if dst.exists() {
-                        undo.skipped.push(format!("{}：那是目录不是文件，没有删", rel));
+                        undo.skipped
+                            .push(format!("{}：那是目录不是文件，没有删", rel));
                     }
                     continue;
                 }
@@ -5275,10 +5466,7 @@ fn cmd_apply_rollback(
     };
     let txn = txn_id_of(&dir, &manifest);
     let entries = apply_manifest_entries(&manifest);
-    let status = manifest
-        .str_at("status")
-        .unwrap_or("未知")
-        .to_string();
+    let status = manifest.str_at("status").unwrap_or("未知").to_string();
     note(format!(
         "事务 {}（档案状态 {}）· {} 个文件",
         txn,
@@ -5413,7 +5601,8 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
     };
 
     // rel -> [(子代理 id, 副本工作区)]
-    let mut by_path: std::collections::BTreeMap<String, Vec<(String, PathBuf)>> = Default::default();
+    let mut by_path: std::collections::BTreeMap<String, Vec<(String, PathBuf)>> =
+        Default::default();
     // 子代理删掉的文件：只报告，不自动删（删除不可逆）
     let mut deletions: Vec<String> = Vec::new();
     for rec in &picked {
@@ -5421,7 +5610,10 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
         let workdir = match rec.str_at("workdir") {
             Some(w) => PathBuf::from(w),
             None => {
-                note(format!("子代理 {} 没有 workdir（当时没开 --isolate），跳过", id));
+                note(format!(
+                    "子代理 {} 没有 workdir（当时没开 --isolate），跳过",
+                    id
+                ));
                 continue;
             }
         };
@@ -5561,7 +5753,11 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
         if conflicts.is_empty() && drifts.is_empty() {
             String::new()
         } else {
-            format!("，{} 个冲突、{} 个漂移待人工处理", conflicts.len(), drifts.len())
+            format!(
+                "，{} 个冲突、{} 个漂移待人工处理",
+                conflicts.len(),
+                drifts.len()
+            )
         }
     ));
     for (rel, _) in &plan {
@@ -5576,10 +5772,17 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
             restored.len()
         ));
         if let Some(dir) = &backups {
-            note(format!("留底留在 {}——有文件没能自动退干净，需要人工处理", dir.display()));
+            note(format!(
+                "留底留在 {}——有文件没能自动退干净，需要人工处理",
+                dir.display()
+            ));
         }
     } else {
-        note(format!("\n已写回 {} 个文件到 {}", written.len(), ws.display()));
+        note(format!(
+            "\n已写回 {} 个文件到 {}",
+            written.len(),
+            ws.display()
+        ));
         if let (Some(id), Some(dir)) = (&txn, &backups) {
             note(format!(
                 "事务 {} · 原样留底在 {}\n想退回去：ui apply --rollback --txn {} --yes",
@@ -5613,9 +5816,27 @@ fn cmd_apply(args: &Args) -> Result<i32, String> {
                 ("restored", json_arr(&restored)),
                 ("conflicts", json_arr(&conflicts)),
                 ("drift", json_arr(&drifts)),
-                ("txn", match &txn { Some(id) => Json::s(id.as_str()), None => Json::Null }),
-                ("unfinished", match &blocked { Some(id) => Json::s(id.as_str()), None => Json::Null }),
-                ("error", match &apply_error { Some(e) => Json::s(e.as_str()), None => Json::Null }),
+                (
+                    "txn",
+                    match &txn {
+                        Some(id) => Json::s(id.as_str()),
+                        None => Json::Null,
+                    }
+                ),
+                (
+                    "unfinished",
+                    match &blocked {
+                        Some(id) => Json::s(id.as_str()),
+                        None => Json::Null,
+                    }
+                ),
+                (
+                    "error",
+                    match &apply_error {
+                        Some(e) => Json::s(e.as_str()),
+                        None => Json::Null,
+                    }
+                ),
             ])
             .to_compact()
         );
@@ -5695,7 +5916,9 @@ fn count_lines(path: &std::path::Path) -> Result<usize, String> {
     let mut buf = Vec::new();
     loop {
         buf.clear();
-        let got = reader.read_until(b'\n', &mut buf).map_err(|e| e.to_string())?;
+        let got = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| e.to_string())?;
         if got == 0 {
             break;
         }
@@ -5824,5 +6047,3 @@ impl Model for UnavailableModel {
         Err("resume 不需要模型；这是内部错误".to_string())
     }
 }
-
-

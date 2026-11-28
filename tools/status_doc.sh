@@ -109,8 +109,8 @@ table = (
     '| 工具 | 13 个 + MCP + 插件网关 |\n'
     f'| 文档 | **{docs} 篇**（另有 `tools/README.md` 索引） |\n'
     f'| 提交 / 标签 | {commits} 个 / {tags} 个标签（最新 `{latest}`） |\n'
-    f'| CI | GitHub Actions 两个 job：`linux`（{gates} 项门禁，含文档一致性与隐私两档）'
-    '+ `windows`（交叉编译） |\n'
+    f'| CI | GitHub Actions 三个 job：`linux`（{gates} 项门禁，含文档一致性与隐私两档）'
+    '+ `windows`（交叉编译）+ `windows-runtime`（Windows 实机进程树验证） |\n'
 )
 
 new = new_head + '## 硬指标\n\n' + table + '\n' + t[body_end:]

@@ -71,6 +71,19 @@ bash tools/soak_status.sh /tmp/ui-soak-24h-state.json
   - RSS median 4540KB，max 4812KB，fd 5–8；
   - 期间经历关机与断点续跑，停机时间未计入；
   - **注意**：该次跑的是 P0/P1/P2 修复前的二进制；最终发布版仍需重跑 24h。
+- 24h soak（0.3.0 初步 RC，`16ac9c0`）：**已暂停，尚未通过**；
+  - 2026-11-28 02:00 UTC 启动，安全复核发现两项 P1 后在 70 轮、0 失败时中断；
+  - 这不是最终验收二进制；P1 修复后必须重新冻结并启动新的 24h，不能续跑这份旧二进制；
+  - 初步冻结二进制 SHA-256：`852725855d11bf76917df972a723736105e23e6b62f6ca512cd7278961bd0868`；
+  - workspace/journal/state/log 位于 WSL 持久目录
+    `/home/fairy/ui-release-evidence/0.3.0-16ac9c0/soak/`，不放 `/tmp`；
+  - 末态为 `phase=interrupted`，`lastError=interrupted by signal (round=70)`，runner 已停止。
+- 24h soak（0.3.0 最终 v2 RC）：**运行中，尚未通过**；
+  - 2026-11-28 启动，使用审批卡 P1 修复后重新冻结的 Linux release；
+  - 二进制 SHA-256：`08d1f6d42d498e1ce89c62195815386b15c5346de63024bdd273612576708436`；
+  - 目标是累计活跃 86400 秒；workspace/journal/state/log 位于 WSL 持久目录
+    `/home/fairy/ui-release-evidence/0.3.0-final-rust1.100-clean-20261128-v2/soak/`；
+  - 只有 `phase=passed` 才计入最终验收，运行中不提前宣称通过。
 
 ## 边界
 
